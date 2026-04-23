@@ -368,6 +368,8 @@ export function useMessenger() {
     selectedAudioInputId: persisted.selectedAudioInputId,
     selectedAudioOutputId: persisted.selectedAudioOutputId,
     microphoneThreshold: persisted.microphoneThreshold,
+    audioDevicesLoading: false,
+    audioDevicesPermission: "unknown",
 
     recording: null,        // { recorder, stream, startedAt, roomId } while recording voice memo
     recordingElapsed: 0,
@@ -476,6 +478,29 @@ export function useMessenger() {
       state.audioDevices = await navigator.mediaDevices.enumerateDevices();
     } catch {
       state.audioDevices = [];
+    }
+  }
+
+  async function unlockAudioDevices() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      state.lastError = "Audio devices are not available in this browser.";
+      return false;
+    }
+
+    state.audioDevicesLoading = true;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      for (const track of stream.getTracks()) track.stop();
+      state.audioDevicesPermission = "granted";
+      await refreshAudioDevices();
+      return true;
+    } catch {
+      state.audioDevicesPermission = "denied";
+      state.lastError = "Microphone permission is required to list audio devices.";
+      await refreshAudioDevices();
+      return false;
+    } finally {
+      state.audioDevicesLoading = false;
     }
   }
 
@@ -835,6 +860,7 @@ export function useMessenger() {
         ? state.callStream
         : await navigator.mediaDevices.getUserMedia(audioConstraints());
       refreshAudioDevices();
+      state.audioDevicesPermission = "granted";
       const mimeType = pickAudioMime();
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       const chunks = [];
@@ -918,6 +944,7 @@ export function useMessenger() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia(audioConstraints());
       refreshAudioDevices();
+      state.audioDevicesPermission = "granted";
       setupCallAnalyser(stream);
       state.callStream = stream;
       state.callRoom = roomId;
@@ -1457,6 +1484,7 @@ export function useMessenger() {
 
     persist,
     refreshAudioDevices,
+    unlockAudioDevices,
     setAudioInput,
     setAudioOutput,
     setMicrophoneThreshold,

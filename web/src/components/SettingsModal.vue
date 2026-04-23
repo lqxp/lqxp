@@ -213,7 +213,17 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
             </select>
           </label>
 
-          <button type="button" class="btn settings-btn" @click="messenger.refreshAudioDevices">Refresh devices</button>
+          <p class="settings-note" v-if="messenger.state.audioDevicesPermission !== 'granted'">
+            Allow microphone access to reveal the real device names and available inputs/outputs. This does not start a call.
+          </p>
+          <button
+            type="button"
+            class="btn settings-btn"
+            :disabled="messenger.state.audioDevicesLoading"
+            @click="messenger.unlockAudioDevices"
+          >
+            {{ messenger.state.audioDevicesLoading ? "Checking..." : "Allow and refresh devices" }}
+          </button>
         </div>
 
         <div class="settings-group">
