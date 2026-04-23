@@ -467,6 +467,7 @@ input, textarea { font: inherit; color: inherit; background: none; border: 0; ou
 .thread {
   display: flex;
   flex-direction: column;
+  min-height: 0;
   min-width: 0;
   background: var(--bg);
 }
@@ -715,13 +716,12 @@ input, textarea { font: inherit; color: inherit; background: none; border: 0; ou
 }
 .reaction:hover { opacity: 0.8; }
 
-/* Floating hover toolbar: sits half-inside the bubble's top edge so the
-   cursor never crosses a dead zone leaving the bubble. */
+/* Keep the hover toolbar inside the scrollable feed so it cannot be clipped
+   when a long message history is scrolled near the viewport edges. */
 .bubble-actions {
   position: absolute;
-  top: 0;
+  top: 6px;
   z-index: 10;
-  transform: translateY(-55%);
   opacity: 0;
   pointer-events: none;
   transition: opacity 100ms ease;
