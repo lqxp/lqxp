@@ -5,7 +5,8 @@ const props = defineProps({
   src: { type: String, required: true },
   filename: { type: String, default: "Audio" },
   sizeLabel: { type: String, default: "" },
-  fallbackDuration: { type: String, default: "" }
+  fallbackDuration: { type: String, default: "" },
+  messenger: { type: Object, default: null }
 });
 
 const audioRef = ref(null);
@@ -86,9 +87,15 @@ function seek(event) {
 }
 
 function onLoadedMetadata() {
+  props.messenger?.applyAudioOutput?.(audioRef.value);
   canPlay.value = true;
   syncAudioState();
 }
+
+watch(
+  () => props.messenger?.state.selectedAudioOutputId,
+  () => props.messenger?.applyAudioOutput?.(audioRef.value)
+);
 
 function onPlay() {
   isPlaying.value = true;

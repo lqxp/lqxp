@@ -18,6 +18,8 @@ const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_ATTACHMENT_B64_LEN: usize = ((MAX_ATTACHMENT_BYTES + 2) / 3) * 4 + 4;
 const MAX_FILENAME_LEN: usize = 128;
 const MAX_MIMETYPE_LEN: usize = 96;
+const MIN_ROOM_ID_LEN: usize = 8;
+const MAX_ROOM_ID_LEN: usize = 64;
 // Voice call chunks are ~800ms of Opus at 64–128kbps → 6–13KB raw.
 // Cap generously at 512KB raw (~680KB base64) so a malicious peer can't push
 // large payloads per frame.
@@ -288,8 +290,8 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
         return respond_error(state, session_id, 3, "Malformed request", request_id(&d)).await;
     };
 
-    if game_id.is_empty() {
-        return respond_error(state, session_id, 3, "Malformed request", request_id(&d)).await;
+    if let Err(message) = validate_room_id(game_id) {
+        return respond_error(state, session_id, 3, message, request_id(&d)).await;
     }
 
     let join_result = {
@@ -362,8 +364,8 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
         return respond_error(state, session_id, 4, "Missing gameId", req_id).await;
     };
 
-    if game_id.is_empty() {
-        return respond_error(state, session_id, 4, "Missing gameId", req_id).await;
+    if let Err(message) = validate_room_id(game_id) {
+        return respond_error(state, session_id, 4, message, req_id).await;
     }
 
     let leave_result = {
@@ -468,8 +470,8 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
         return respond_error(state, session_id, 7, "Missing gameId", request_id(&d)).await;
     };
 
-    if target_game_id.is_empty() {
-        return respond_error(state, session_id, 7, "Missing gameId", request_id(&d)).await;
+    if let Err(message) = validate_room_id(target_game_id) {
+        return respond_error(state, session_id, 7, message, request_id(&d)).await;
     }
 
     let attachment = match parse_attachment(d.get("attachment")) {
@@ -481,6 +483,12 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
     if trimmed.is_empty() && attachment.is_none() {
         return respond_error(state, session_id, 7, "Empty message", request_id(&d)).await;
     }
+    let reply_to_message_id = d
+        .get("replyToMessageId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(80).collect::<String>());
 
     let now = now_ms();
 
@@ -529,6 +537,7 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
         timestamp: now,
         system: false,
         reactions: Vec::new(),
+        reply_to_message_id,
         attachment,
         preview: None,
         deleted: false,
@@ -1327,6 +1336,7 @@ async fn resolve_room_for_session(
     requested_room: Option<&str>,
 ) -> Result<String, String> {
     if let Some(room) = requested_room.map(str::trim).filter(|room| !room.is_empty()) {
+        validate_room_id(room).map_err(str::to_owned)?;
         return Ok(room.to_owned());
     }
 
@@ -1435,6 +1445,19 @@ fn toggle_reaction_in_message(message: &mut ChatMessageRecord, emoji: &str, user
         });
         message.reactions.sort_by(|a, b| a.emoji.cmp(&b.emoji));
     }
+}
+
+fn validate_room_id(room_id: &str) -> Result<(), &'static str> {
+    if room_id.len() < MIN_ROOM_ID_LEN {
+        return Err("Room name must be at least 8 characters");
+    }
+    if room_id.len() > MAX_ROOM_ID_LEN {
+        return Err("Room name must be at most 64 characters");
+    }
+    if !room_id.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return Err("Room name must be alphanumeric");
+    }
+    Ok(())
 }
 
 async fn room_usernames(state: &SharedState, game_id: &str) -> Vec<String> {

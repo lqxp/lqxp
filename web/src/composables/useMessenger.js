@@ -4,6 +4,7 @@ const STORAGE_KEY = "qxprotocol-messenger-v4";
 const QUICK_REACTIONS = ["❤️", "👍", "😂", "😮", "😢", "🙏"];
 const MAX_ROOMS_SHOWN = 100;
 const MAX_HISTORY_PER_ROOM = 500;
+const ROOM_ID_MIN_LENGTH = 8;
 const ROOM_ID_MAX_LENGTH = 64;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const CALL_CHUNK_MS = 800;
@@ -20,6 +21,18 @@ function sanitizeUsername(value) {
 
 function sanitizeRoomId(value) {
   return String(value || "").trim().slice(0, ROOM_ID_MAX_LENGTH);
+}
+
+function validateRoomId(value) {
+  const id = sanitizeRoomId(value);
+  if (id.length < ROOM_ID_MIN_LENGTH) return "Room name must be at least 8 characters.";
+  if (id.length > ROOM_ID_MAX_LENGTH) return "Room name must be at most 64 characters.";
+  if (!/^[a-z0-9]+$/i.test(id)) return "Room name can only contain letters and numbers.";
+  return "";
+}
+
+function isValidRoomId(value) {
+  return !validateRoomId(value);
 }
 
 function generateRandomRoomId() {
@@ -112,14 +125,16 @@ function loadPersisted() {
             lastTimestamp: Number(r.lastTimestamp) || 0,
             lastSender: String(r.lastSender || "")
           }))
-          .filter((r) => r.roomId)
+          .filter((r) => isValidRoomId(r.roomId))
       : [];
 
     const messagesByRoom = {};
     if (raw.messagesByRoom && typeof raw.messagesByRoom === "object") {
       for (const [id, arr] of Object.entries(raw.messagesByRoom)) {
         if (!Array.isArray(arr)) continue;
-        messagesByRoom[sanitizeRoomId(id)] = arr
+        const roomId = sanitizeRoomId(id);
+        if (!isValidRoomId(roomId)) continue;
+        messagesByRoom[roomId] = arr
           .slice(-MAX_HISTORY_PER_ROOM)
           .map((m) => normalizeMessage(m, id));
       }
@@ -129,16 +144,20 @@ function loadPersisted() {
     if (raw.unreadByRoom && typeof raw.unreadByRoom === "object") {
       for (const [id, n] of Object.entries(raw.unreadByRoom)) {
         const v = Number(n);
-        if (Number.isFinite(v) && v > 0) unreadByRoom[sanitizeRoomId(id)] = v;
+        const roomId = sanitizeRoomId(id);
+        if (Number.isFinite(v) && v > 0 && isValidRoomId(roomId)) unreadByRoom[roomId] = v;
       }
     }
 
     return {
       username: String(raw.username || createDefaultUsername()),
-      activeRoom: sanitizeRoomId(raw.activeRoom || ""),
+      activeRoom: isValidRoomId(raw.activeRoom) ? sanitizeRoomId(raw.activeRoom) : "",
       rooms,
       messagesByRoom,
-      unreadByRoom
+      unreadByRoom,
+      selectedAudioInputId: String(raw.selectedAudioInputId || ""),
+      selectedAudioOutputId: String(raw.selectedAudioOutputId || ""),
+      microphoneThreshold: Math.max(0, Math.min(100, Number(raw.microphoneThreshold) || 0))
     };
   } catch {
     return {
@@ -146,7 +165,10 @@ function loadPersisted() {
       activeRoom: "",
       rooms: [],
       messagesByRoom: {},
-      unreadByRoom: {}
+      unreadByRoom: {},
+      selectedAudioInputId: "",
+      selectedAudioOutputId: "",
+      microphoneThreshold: 0
     };
   }
 }
@@ -173,7 +195,10 @@ function savePersisted(state) {
         activeRoom: sanitizeRoomId(state.activeRoom),
         rooms: state.rooms,
         messagesByRoom,
-        unreadByRoom: state.unreadByRoom
+        unreadByRoom: state.unreadByRoom,
+        selectedAudioInputId: state.selectedAudioInputId,
+        selectedAudioOutputId: state.selectedAudioOutputId,
+        microphoneThreshold: state.microphoneThreshold
       })
     );
   } catch {
@@ -265,6 +290,7 @@ function normalizeMessage(message, fallbackRoomId) {
     system: Boolean(message.system),
     deleted: Boolean(message.deleted),
     reactions: Array.isArray(message.reactions) ? message.reactions : [],
+    replyToMessageId: String(message.replyToMessageId || ""),
     attachment,
     preview,
     kind,
@@ -336,6 +362,12 @@ export function useMessenger() {
     toastMessage: "",
 
     settingsOpen: false,
+    replyingTo: null,
+
+    audioDevices: [],
+    selectedAudioInputId: persisted.selectedAudioInputId,
+    selectedAudioOutputId: persisted.selectedAudioOutputId,
+    microphoneThreshold: persisted.microphoneThreshold,
 
     recording: null,        // { recorder, stream, startedAt, roomId } while recording voice memo
     recordingElapsed: 0,
@@ -349,7 +381,9 @@ export function useMessenger() {
     callMuted: false,       // local mic mute (tracks state.callStream tracks.enabled)
 
     voiceMembersByRoom: {}, // { roomId: [username, ...] } — who is currently in voice
-    speakingByRoom: {}      // { roomId: { username: lastChunkTimestamp } } — recent speakers
+    speakingByRoom: {},     // { roomId: { username: lastChunkTimestamp } } — recent speakers
+    callAnalyser: null,
+    callAnalyserData: null
   });
 
   // Non-reactive registry of Blob-URLs keyed by messageId so repeated renders
@@ -428,6 +462,87 @@ export function useMessenger() {
     savePersisted(state);
   }
 
+  function audioConstraints() {
+    return {
+      audio: state.selectedAudioInputId
+        ? { deviceId: { exact: state.selectedAudioInputId } }
+        : true
+    };
+  }
+
+  async function refreshAudioDevices() {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    try {
+      state.audioDevices = await navigator.mediaDevices.enumerateDevices();
+    } catch {
+      state.audioDevices = [];
+    }
+  }
+
+  function setAudioInput(deviceId) {
+    state.selectedAudioInputId = String(deviceId || "");
+    persist();
+  }
+
+  function setAudioOutput(deviceId) {
+    state.selectedAudioOutputId = String(deviceId || "");
+    persist();
+  }
+
+  function setMicrophoneThreshold(value) {
+    const next = Math.max(0, Math.min(100, Number(value) || 0));
+    state.microphoneThreshold = next;
+    persist();
+  }
+
+  async function applyAudioOutput(audio) {
+    if (!audio || !state.selectedAudioOutputId || typeof audio.setSinkId !== "function") return;
+    try {
+      await audio.setSinkId(state.selectedAudioOutputId);
+    } catch {
+      /* Output selection is browser/permission dependent. */
+    }
+  }
+
+  function setupCallAnalyser(stream) {
+    state.callAnalyser = null;
+    state.callAnalyserData = null;
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      const context = new AudioCtx();
+      const source = context.createMediaStreamSource(stream);
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+      state.callAnalyser = { context, analyser };
+      state.callAnalyserData = new Uint8Array(analyser.fftSize);
+    } catch {
+      state.callAnalyser = null;
+      state.callAnalyserData = null;
+    }
+  }
+
+  function closeCallAnalyser() {
+    const context = state.callAnalyser?.context;
+    state.callAnalyser = null;
+    state.callAnalyserData = null;
+    if (context) context.close().catch(() => {});
+  }
+
+  function isAboveMicrophoneThreshold() {
+    const threshold = Number(state.microphoneThreshold) || 0;
+    if (threshold <= 0 || !state.callAnalyser?.analyser || !state.callAnalyserData) return true;
+    state.callAnalyser.analyser.getByteTimeDomainData(state.callAnalyserData);
+    let sum = 0;
+    for (const sample of state.callAnalyserData) {
+      const centered = (sample - 128) / 128;
+      sum += centered * centered;
+    }
+    const rms = Math.sqrt(sum / state.callAnalyserData.length) * 100;
+    return rms >= threshold;
+  }
+
   function touchRoom(roomId, message) {
     const id = sanitizeRoomId(roomId);
     if (!id) return;
@@ -503,7 +618,12 @@ export function useMessenger() {
 
   function requestJoin(roomId) {
     const id = sanitizeRoomId(roomId);
-    if (!id || !state.identified) return;
+    const validation = validateRoomId(id);
+    if (validation) {
+      state.lastError = validation;
+      return;
+    }
+    if (!state.identified) return;
     if (state.joinedRooms.includes(id)) return;
     if (state.pendingJoinRooms.includes(id)) return;
     state.pendingJoinRooms.push(id);
@@ -512,13 +632,18 @@ export function useMessenger() {
 
   function fetchHistory(roomId) {
     const id = sanitizeRoomId(roomId);
-    if (!id) return;
+    if (!id || !isValidRoomId(id)) return;
     send({ op: 18, d: { gameId: id } });
   }
 
   function selectConversation(roomId) {
     const id = sanitizeRoomId(roomId);
-    if (!id) return;
+    const validation = validateRoomId(id);
+    if (validation) {
+      state.lastError = validation;
+      showToast(validation);
+      return;
+    }
     state.activeRoom = id;
     state.unreadByRoom[id] = 0;
     touchRoom(id);
@@ -534,7 +659,7 @@ export function useMessenger() {
 
   function leaveRoom(roomId) {
     const id = sanitizeRoomId(roomId || state.activeRoom);
-    if (!id) return;
+    if (!id || !isValidRoomId(id)) return;
     send({ op: 4, d: { gameId: id } });
   }
 
@@ -550,9 +675,14 @@ export function useMessenger() {
 
   function submitCompose() {
     const id = sanitizeRoomId(state.composeInput);
+    const validation = validateRoomId(id);
+    if (validation) {
+      state.lastError = validation;
+      showToast(validation);
+      return;
+    }
     state.composing = false;
     state.composeInput = "";
-    if (!id) return;
     selectConversation(id);
   }
 
@@ -641,8 +771,11 @@ export function useMessenger() {
     const roomId = state.activeRoom;
     if (!text || !roomId) return;
     if (state.connected && state.identified && state.joinedRooms.includes(roomId)) {
-      send({ op: 7, d: { text, gameId: roomId } });
+      const d = { text, gameId: roomId };
+      if (state.replyingTo?.messageId) d.replyToMessageId = state.replyingTo.messageId;
+      send({ op: 7, d });
       state.messageInput = "";
+      state.replyingTo = null;
     } else {
       state.lastError = "Not joined to this room yet.";
     }
@@ -671,6 +804,7 @@ export function useMessenger() {
         d: {
           text: caption ? String(caption).trim().slice(0, 200) : "",
           gameId: roomId,
+          ...(state.replyingTo?.messageId ? { replyToMessageId: state.replyingTo.messageId } : {}),
           attachment: {
             filename: String(file.name || "file").slice(0, 128),
             mimeType: file.type || "application/octet-stream",
@@ -679,6 +813,7 @@ export function useMessenger() {
           }
         }
       });
+      state.replyingTo = null;
     } catch (err) {
       state.lastError = `Upload failed: ${err.message || err}`;
     }
@@ -698,7 +833,8 @@ export function useMessenger() {
       const reusingCallStream = !!state.callStream;
       const stream = reusingCallStream
         ? state.callStream
-        : await navigator.mediaDevices.getUserMedia({ audio: true });
+        : await navigator.mediaDevices.getUserMedia(audioConstraints());
+      refreshAudioDevices();
       const mimeType = pickAudioMime();
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       const chunks = [];
@@ -780,7 +916,9 @@ export function useMessenger() {
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia(audioConstraints());
+      refreshAudioDevices();
+      setupCallAnalyser(stream);
       state.callStream = stream;
       state.callRoom = roomId;
       state.inCall = true;
@@ -823,7 +961,7 @@ export function useMessenger() {
     const chunks = [];
     recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
     recorder.onstop = async () => {
-      if (chunks.length && state.inCall && state.connected) {
+      if (chunks.length && state.inCall && state.connected && isAboveMicrophoneThreshold()) {
         try {
           const blob = new Blob(chunks, { type: mimeType || "audio/webm" });
           const b64 = await blobToBase64(blob);
@@ -869,6 +1007,7 @@ export function useMessenger() {
       }
       state.callStream = null;
     }
+    closeCallAnalyser();
     if (state.inCall) send({ op: 98, d: { isVoiceChat: false } });
     state.inCall = false;
     state.voiceEnabled = false;
@@ -891,6 +1030,7 @@ export function useMessenger() {
       const blob = base64ToBlob(d.chunk, d.mimeType || "audio/webm");
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
+      applyAudioOutput(audio);
       audio.play().catch(() => { /* autoplay may be blocked before first gesture */ });
       audio.onended = () => URL.revokeObjectURL(url);
       if (fromUser && roomId) {
@@ -969,6 +1109,27 @@ export function useMessenger() {
     const gameId = message.roomId || state.activeRoom;
     if (!gameId) return;
     send({ op: 21, d: { messageId: message.messageId, gameId } });
+  }
+
+  function findMessageById(roomId, messageId) {
+    const id = sanitizeRoomId(roomId || state.activeRoom);
+    const target = String(messageId || "");
+    if (!id || !target) return null;
+    return (state.messagesByRoom[id] || []).find((message) => message.messageId === target) || null;
+  }
+
+  function startReply(message) {
+    if (!message?.messageId || message.deleted) return;
+    state.replyingTo = {
+      messageId: message.messageId,
+      roomId: message.roomId || state.activeRoom,
+      username: message.username || "",
+      text: message.kind === "image" ? "Photo" : message.kind === "file" ? "File attachment" : message.text || ""
+    };
+  }
+
+  function cancelReply() {
+    state.replyingTo = null;
   }
 
   function applyPreview(payload) {
@@ -1227,14 +1388,16 @@ export function useMessenger() {
               lastTimestamp: Number(r.lastTimestamp) || 0,
               lastSender: String(r.lastSender || "")
             }))
-            .filter((r) => r.roomId);
+            .filter((r) => isValidRoomId(r.roomId));
         }
 
         if (data.messagesByRoom && typeof data.messagesByRoom === "object") {
           const next = {};
           for (const [id, arr] of Object.entries(data.messagesByRoom)) {
             if (!Array.isArray(arr)) continue;
-            next[sanitizeRoomId(id)] = arr
+            const roomId = sanitizeRoomId(id);
+            if (!isValidRoomId(roomId)) continue;
+            next[roomId] = arr
               .slice(-MAX_HISTORY_PER_ROOM)
               .map((m) => normalizeMessage(m, id));
           }
@@ -1245,12 +1408,15 @@ export function useMessenger() {
           const next = {};
           for (const [id, n] of Object.entries(data.unreadByRoom)) {
             const v = Number(n);
-            if (Number.isFinite(v) && v > 0) next[sanitizeRoomId(id)] = v;
+            const roomId = sanitizeRoomId(id);
+            if (Number.isFinite(v) && v > 0 && isValidRoomId(roomId)) next[roomId] = v;
           }
           state.unreadByRoom = next;
         }
 
-        if (typeof data.activeRoom === "string") state.activeRoom = sanitizeRoomId(data.activeRoom);
+        if (typeof data.activeRoom === "string") {
+          state.activeRoom = isValidRoomId(data.activeRoom) ? sanitizeRoomId(data.activeRoom) : "";
+        }
 
         persist();
         state.lastError = "";
@@ -1286,8 +1452,15 @@ export function useMessenger() {
     formatDuration,
     buildWaveform,
     attachmentUrlFor,
+    validateRoomId,
+    isValidRoomId,
 
     persist,
+    refreshAudioDevices,
+    setAudioInput,
+    setAudioOutput,
+    setMicrophoneThreshold,
+    applyAudioOutput,
     connect,
     disconnect,
     selectConversation,
@@ -1302,6 +1475,9 @@ export function useMessenger() {
     toggleVoice,
     toggleReaction,
     deleteMessage,
+    findMessageById,
+    startReply,
+    cancelReply,
     fetchHistory,
     isOwnMessage,
     startCompose,

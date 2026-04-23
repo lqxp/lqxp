@@ -27,6 +27,7 @@ watch(
 
 function onComposeKey(event) {
   if (event.key === "Escape") props.messenger.cancelCompose();
+  if (event.key.length === 1 && !/[a-z0-9]/i.test(event.key)) event.preventDefault();
 }
 
 function removeConversation(event, roomId) {
@@ -74,9 +75,11 @@ function openSettings() {
         v-model="messenger.state.composeInput"
         type="text"
         maxlength="64"
+        minlength="8"
+        pattern="[A-Za-z0-9]{8,64}"
         autocomplete="off"
         spellcheck="false"
-        placeholder="Enter room ID"
+        placeholder="Room ID, 8-64 letters/numbers"
         @keydown.enter.prevent="messenger.submitCompose"
         @keydown="onComposeKey"
         @blur="messenger.state.composeInput ? null : messenger.cancelCompose()"

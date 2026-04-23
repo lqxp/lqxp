@@ -6,6 +6,7 @@ const props = defineProps({
 });
 
 const fileInputRef = ref(null);
+const cameraInputRef = ref(null);
 const inputRef = ref(null);
 const emojiWrapRef = ref(null);
 const pickerOpen = ref(false);
@@ -35,6 +36,11 @@ function send() {
 function pickFile() {
   if (disabled.value) return;
   fileInputRef.value?.click();
+}
+
+function pickCamera() {
+  if (disabled.value) return;
+  cameraInputRef.value?.click();
 }
 
 async function onFile(event) {
@@ -128,8 +134,28 @@ onBeforeUnmount(() => {
         style="display: none"
         @change="onFile"
       />
+      <input
+        ref="cameraInputRef"
+        type="file"
+        accept="image/*"
+        capture="environment"
+        style="display: none"
+        @change="onFile"
+      />
+      <div v-if="messenger.state.replyingTo" class="reply-draft">
+        <div>
+          <span class="reply-draft__label">Replying to {{ messenger.state.replyingTo.username || "message" }}</span>
+          <span class="reply-draft__text">{{ messenger.state.replyingTo.text }}</span>
+        </div>
+        <button type="button" class="icon-btn" aria-label="Cancel reply" @click="messenger.cancelReply">
+          <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
       <button class="icon-btn" type="button" aria-label="Attach file" :disabled="disabled" @click="pickFile">
         <svg viewBox="0 0 24 24"><path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 1 1 5.66 5.66l-9.2 9.19a2 2 0 1 1-2.83-2.83L14.83 7"/></svg>
+      </button>
+      <button class="icon-btn" type="button" aria-label="Take photo" :disabled="disabled" @click="pickCamera">
+        <svg viewBox="0 0 24 24"><path d="M4 7h3l1.4-2h7.2L17 7h3a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Z"/><circle cx="12" cy="13" r="3.5"/></svg>
       </button>
 
       <label class="composer__input">

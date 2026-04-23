@@ -37,6 +37,19 @@ const attachmentKind = computed(() => props.message.kind);
 const jumbo = computed(() => props.message.jumboEmoji && !props.message.deleted);
 const deleted = computed(() => props.message.deleted);
 const preview = computed(() => props.message.preview);
+const repliedMessage = computed(() =>
+  props.messenger.findMessageById(props.message.roomId, props.message.replyToMessageId)
+);
+const replyLabel = computed(() => repliedMessage.value?.username || (props.message.replyToMessageId ? "Message" : ""));
+const replyText = computed(() => {
+  const target = repliedMessage.value;
+  if (!target) return props.message.replyToMessageId ? "Original message is not loaded." : "";
+  if (target.deleted) return "Message deleted";
+  if (target.kind === "image") return "Photo";
+  if (target.kind === "audio" || target.kind === "voice") return "Voice message";
+  if (target.kind === "file") return target.attachment?.filename || "File attachment";
+  return target.text || "Message";
+});
 
 function download() {
   if (!attachmentUrl.value || !props.message.attachment) return;
@@ -60,6 +73,7 @@ function onDelete() {
     class="msg"
     :class="[
       { 'is-own': isOwn, 'is-jumbo': jumbo, 'is-deleted': deleted },
+      { 'has-reactions': message.reactions.length && !deleted },
       runClass
     ]"
   >
@@ -95,6 +109,13 @@ function onDelete() {
             @click="messenger.toggleReaction(message, emoji)"
           >{{ emoji }}</button>
           <button
+            type="button"
+            aria-label="Reply"
+            @click="messenger.startReply(message)"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17 4 12l5-5"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
+          </button>
+          <button
             v-if="isOwn"
             type="button"
             class="pick__delete"
@@ -124,6 +145,14 @@ function onDelete() {
             @click="messenger.toggleReaction(message, emoji)"
           >{{ emoji }}</button>
           <button
+            v-if="!deleted"
+            type="button"
+            aria-label="Reply"
+            @click="messenger.startReply(message)"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17 4 12l5-5"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
+          </button>
+          <button
             v-if="isOwn && !deleted"
             type="button"
             class="pick__delete"
@@ -136,6 +165,16 @@ function onDelete() {
       </div>
 
       <div v-if="showAuthor && !isOwn" class="bubble__author">{{ message.username }}</div>
+
+      <button
+        v-if="message.replyToMessageId"
+        type="button"
+        class="reply-card"
+        @click="repliedMessage && messenger.startReply(repliedMessage)"
+      >
+        <span class="reply-card__author">{{ replyLabel }}</span>
+        <span class="reply-card__text">{{ replyText }}</span>
+      </button>
 
       <template v-if="deleted">
         <div class="bubble__text bubble__text--deleted">Message deleted</div>
@@ -154,6 +193,7 @@ function onDelete() {
           :filename="message.attachment.filename"
           :size-label="messenger.formatSize(message.attachment.size)"
           :fallback-duration="message.voiceDuration || ''"
+          :messenger="messenger"
         />
         <div v-if="message.text && !message.text.startsWith('[voice:')" class="bubble__text">{{ message.text }}</div>
       </template>

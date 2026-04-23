@@ -73,6 +73,12 @@ pub struct ChatMessageRecord {
     pub timestamp: u64,
     pub system: bool,
     pub reactions: Vec<MessageReaction>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "replyToMessageId"
+    )]
+    pub reply_to_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment: Option<Attachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

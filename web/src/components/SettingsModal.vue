@@ -17,6 +17,7 @@ const nameValid = computed(() => draftName.value.trim().length > 0 && draftName.
 watch(isOpen, async (v) => {
   if (v) {
     draftName.value = props.messenger.state.username || "";
+    props.messenger.refreshAudioDevices();
     await nextTick();
     firstInputRef.value?.focus();
     firstInputRef.value?.select();
@@ -43,6 +44,17 @@ function onClear() {
   if (!confirm("Clear all local data? This removes every conversation, message, and reaction from this browser. The remote server is not touched.")) return;
   props.messenger.clearAllData();
   close();
+}
+
+const microphones = computed(() =>
+  props.messenger.state.audioDevices.filter((device) => device.kind === "audioinput")
+);
+const headphones = computed(() =>
+  props.messenger.state.audioDevices.filter((device) => device.kind === "audiooutput")
+);
+
+function deviceLabel(device, fallback) {
+  return device.label || fallback;
 }
 
 function onBackdropClick(event) {
@@ -121,6 +133,43 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
           style="display: none"
           @change="onFilePicked"
         />
+      </section>
+
+      <section class="modal__section">
+        <h3>Audio</h3>
+        <p class="modal__help">
+          Choose the microphone and headphone used by calls and voice playback. Increase the threshold to avoid sending room noise.
+        </p>
+        <div class="modal__field">
+          <label for="audio-input">Microphone</label>
+          <select id="audio-input" class="modal__input" :value="messenger.state.selectedAudioInputId" @change="messenger.setAudioInput($event.target.value)">
+            <option value="">System default</option>
+            <option v-for="(device, index) in microphones" :key="device.deviceId || `mic-${index}`" :value="device.deviceId">
+              {{ deviceLabel(device, `Microphone ${index + 1}`) }}
+            </option>
+          </select>
+        </div>
+        <div class="modal__field">
+          <label for="audio-output">Headphones</label>
+          <select id="audio-output" class="modal__input" :value="messenger.state.selectedAudioOutputId" @change="messenger.setAudioOutput($event.target.value)">
+            <option value="">System default</option>
+            <option v-for="(device, index) in headphones" :key="device.deviceId || `speaker-${index}`" :value="device.deviceId">
+              {{ deviceLabel(device, `Output ${index + 1}`) }}
+            </option>
+          </select>
+        </div>
+        <label class="modal__field">
+          <span>Microphone noise threshold: {{ messenger.state.microphoneThreshold }}</span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            :value="messenger.state.microphoneThreshold"
+            @input="messenger.setMicrophoneThreshold($event.target.value)"
+          />
+        </label>
+        <button type="button" class="btn modal__btn" @click="messenger.refreshAudioDevices">Refresh devices</button>
       </section>
 
       <section class="modal__section">
