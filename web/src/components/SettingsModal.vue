@@ -8,19 +8,40 @@ const props = defineProps({
 const draftName = ref(props.messenger.state.username || "");
 const fileInputRef = ref(null);
 const firstInputRef = ref(null);
+const activeSection = ref("profile");
 
 const isOpen = computed(() => props.messenger.state.settingsOpen);
 
 const nameChanged = computed(() => draftName.value.trim() !== String(props.messenger.state.username || "").trim());
 const nameValid = computed(() => draftName.value.trim().length > 0 && draftName.value.trim().length <= 16);
+const meAccent = computed(() => props.messenger.accentFor(props.messenger.state.username || "you"));
+const meInitials = computed(() => initialsOf(props.messenger.state.username));
+
+const sections = [
+  { id: "profile", label: "Profile" },
+  { id: "calls", label: "Calls" },
+  { id: "backups", label: "Backups" },
+  { id: "about", label: "About" }
+];
 
 watch(isOpen, async (v) => {
   if (v) {
     draftName.value = props.messenger.state.username || "";
     props.messenger.refreshAudioDevices();
     await nextTick();
+    if (activeSection.value === "profile") {
+      firstInputRef.value?.focus();
+      firstInputRef.value?.select();
+    }
+  }
+});
+
+watch(activeSection, async (section) => {
+  if (!isOpen.value) return;
+  if (section === "calls") props.messenger.refreshAudioDevices();
+  if (section === "profile") {
+    await nextTick();
     firstInputRef.value?.focus();
-    firstInputRef.value?.select();
   }
 });
 
@@ -57,8 +78,12 @@ function deviceLabel(device, fallback) {
   return device.label || fallback;
 }
 
-function onBackdropClick(event) {
-  if (event.target === event.currentTarget) close();
+function initialsOf(name) {
+  const trimmed = String(name || "?").trim();
+  if (!trimmed) return "?";
+  const parts = trimmed.split(/[\s\-_]+/).slice(0, 2);
+  if (parts.length === 2 && parts[1]) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return trimmed.slice(0, 2).toUpperCase();
 }
 
 function onKey(event) {
@@ -71,60 +96,165 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
 </script>
 
 <template>
-  <div v-if="isOpen" class="modal" @mousedown="onBackdropClick">
-    <div class="modal__panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-      <header class="modal__head">
+  <div v-if="isOpen" class="settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <aside class="settings__side">
+      <header class="settings__side-head">
         <h2 id="settings-title">Settings</h2>
-        <button class="icon-btn" type="button" aria-label="Close" @click="close">
+        <button class="icon-btn settings__close" type="button" aria-label="Close settings" @click="close">
           <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
         </button>
       </header>
 
-      <section class="modal__section">
-        <h3>Display name</h3>
-        <p class="modal__help">
-          Other participants see this name. Changing it while connected reconnects the session.
+      <button class="settings__card" type="button" @click="activeSection = 'profile'">
+        <span class="avatar avatar--md" :class="`avatar--${meAccent}`">{{ meInitials }}</span>
+        <span>
+          <strong>{{ messenger.state.username || "anonymous" }}</strong>
+          <small>{{ messenger.connectionLabel.value }}</small>
+        </span>
+      </button>
+
+      <nav class="settings__nav" aria-label="Settings sections">
+        <button
+          v-for="section in sections"
+          :key="section.id"
+          type="button"
+          class="settings__nav-item"
+          :class="{ 'is-active': activeSection === section.id }"
+          @click="activeSection = section.id"
+        >
+          <svg v-if="section.id === 'profile'" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+          <svg v-else-if="section.id === 'calls'" viewBox="0 0 24 24"><path d="M7.6 10.8a14.5 14.5 0 0 0 5.6 5.6l1.9-1.9a1.5 1.5 0 0 1 1.5-.37c1.03.34 2.1.52 3.2.52.83 0 1.5.67 1.5 1.5v3.05c0 .83-.67 1.5-1.5 1.5C10.45 20.7 3.3 13.55 3.3 4.2c0-.83.67-1.5 1.5-1.5h3.05c.83 0 1.5.67 1.5 1.5 0 1.1.18 2.17.52 3.2.17.53.03 1.1-.37 1.5l-1.9 1.9Z"/></svg>
+          <svg v-else-if="section.id === 'backups'" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m6 9 6-6 6 6"/><path d="M5 21h14"/></svg>
+          <svg v-else viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+          <span>{{ section.label }}</span>
+        </button>
+      </nav>
+    </aside>
+
+    <main class="settings__main">
+      <header class="settings__main-head">
+        <h3>{{ sections.find((section) => section.id === activeSection)?.label }}</h3>
+      </header>
+
+      <section v-if="activeSection === 'profile'" class="settings-page">
+        <div class="settings-profile">
+          <span class="avatar settings-profile__avatar" :class="`avatar--${meAccent}`">{{ meInitials }}</span>
+          <button type="button" class="btn settings-profile__photo">Edit photo</button>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-field">
+            <span class="settings-field__icon">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+            </span>
+            <span class="settings-field__body">
+              <span class="settings-field__label">Display name</span>
+              <span class="settings-field__hint">Visible to people you message.</span>
+            </span>
+          </label>
+          <div class="settings-inline">
+            <input
+              ref="firstInputRef"
+              v-model="draftName"
+              type="text"
+              maxlength="16"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="e.g. echo"
+              class="settings-input"
+              @keydown.enter.prevent="saveName"
+            />
+            <button
+              type="button"
+              class="btn btn--primary settings-btn"
+              :disabled="!nameValid || !nameChanged"
+              @click="saveName"
+            >Save</button>
+          </div>
+        </div>
+
+        <p class="settings-note">
+          Your profile and changes to it will be visible to people you message.
         </p>
-        <div class="modal__row">
-          <input
-            ref="firstInputRef"
-            v-model="draftName"
-            type="text"
-            maxlength="16"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="e.g. echo"
-            class="modal__input"
-            @keydown.enter.prevent="saveName"
-          />
-          <button
-            type="button"
-            class="btn btn--primary modal__btn"
-            :disabled="!nameValid || !nameChanged"
-            @click="saveName"
-          >Save</button>
+      </section>
+
+      <section v-else-if="activeSection === 'calls'" class="settings-page">
+        <div class="settings-group">
+          <h4>Calling</h4>
+          <label class="settings-check">
+            <input type="checkbox" checked disabled />
+            <span>Enable incoming calls</span>
+          </label>
+          <label class="settings-check">
+            <input type="checkbox" checked disabled />
+            <span>Play calling sounds</span>
+          </label>
+        </div>
+
+        <div class="settings-group">
+          <h4>Devices</h4>
+          <label class="settings-select">
+            <span>Microphone</span>
+            <select :value="messenger.state.selectedAudioInputId" @change="messenger.setAudioInput($event.target.value)">
+              <option value="">System default</option>
+              <option v-for="(device, index) in microphones" :key="device.deviceId || `mic-${index}`" :value="device.deviceId">
+                {{ deviceLabel(device, `Microphone ${index + 1}`) }}
+              </option>
+            </select>
+          </label>
+
+          <label class="settings-select">
+            <span>Speakers</span>
+            <select :value="messenger.state.selectedAudioOutputId" @change="messenger.setAudioOutput($event.target.value)">
+              <option value="">System default</option>
+              <option v-for="(device, index) in headphones" :key="device.deviceId || `speaker-${index}`" :value="device.deviceId">
+                {{ deviceLabel(device, `Output ${index + 1}`) }}
+              </option>
+            </select>
+          </label>
+
+          <button type="button" class="btn settings-btn" @click="messenger.refreshAudioDevices">Refresh devices</button>
+        </div>
+
+        <div class="settings-group">
+          <h4>Advanced</h4>
+          <label class="settings-range">
+            <span>Microphone noise threshold</span>
+            <small>Raise it to avoid sending background noise.</small>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              :value="messenger.state.microphoneThreshold"
+              @input="messenger.setMicrophoneThreshold($event.target.value)"
+            />
+            <strong>{{ messenger.state.microphoneThreshold }}</strong>
+          </label>
         </div>
       </section>
 
-      <section class="modal__section">
-        <h3>Local data</h3>
-        <p class="modal__help">
-          Backups include: username, room list, full message history per room (metadata, text, reactions), and unread counts.
-          File-attachment bytes are dropped from the persistent store to keep backups small; messages reference them by metadata.
-        </p>
-        <div class="modal__buttons">
-          <button type="button" class="btn modal__btn" @click="onExport">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m6 9 6-6 6 6"/><path d="M5 21h14"/></svg>
-            Export JSON
-          </button>
-          <button type="button" class="btn modal__btn" @click="onImport">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9"/><path d="m6 15 6 6 6-6"/><path d="M5 3h14"/></svg>
-            Import JSON
-          </button>
-          <button type="button" class="btn modal__btn modal__btn--danger" @click="onClear">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="m5 6 1 14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-14"/></svg>
-            Clear all
-          </button>
+      <section v-else-if="activeSection === 'backups'" class="settings-page">
+        <div class="settings-group">
+          <h4>Backups</h4>
+          <p class="settings-note">
+            Backups include username, room list, message history metadata, reactions, and unread counts.
+            Attachment bytes are dropped from persistent storage to keep files small.
+          </p>
+          <div class="settings-actions">
+            <button type="button" class="btn settings-btn" @click="onExport">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m6 9 6-6 6 6"/><path d="M5 21h14"/></svg>
+              Export JSON
+            </button>
+            <button type="button" class="btn settings-btn" @click="onImport">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9"/><path d="m6 15 6 6 6-6"/><path d="M5 3h14"/></svg>
+              Import JSON
+            </button>
+            <button type="button" class="btn settings-btn settings-btn--danger" @click="onClear">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="m5 6 1 14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-14"/></svg>
+              Clear all
+            </button>
+          </div>
         </div>
         <input
           ref="fileInputRef"
@@ -135,52 +265,17 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
         />
       </section>
 
-      <section class="modal__section">
-        <h3>Audio</h3>
-        <p class="modal__help">
-          Choose the microphone and headphone used by calls and voice playback. Increase the threshold to avoid sending room noise.
-        </p>
-        <div class="modal__field">
-          <label for="audio-input">Microphone</label>
-          <select id="audio-input" class="modal__input" :value="messenger.state.selectedAudioInputId" @change="messenger.setAudioInput($event.target.value)">
-            <option value="">System default</option>
-            <option v-for="(device, index) in microphones" :key="device.deviceId || `mic-${index}`" :value="device.deviceId">
-              {{ deviceLabel(device, `Microphone ${index + 1}`) }}
-            </option>
-          </select>
+      <section v-else class="settings-page">
+        <div class="settings-group">
+          <h4>About</h4>
+          <dl class="settings-kv">
+            <div><dt>Session</dt><dd>{{ messenger.state.uuid || "—" }}</dd></div>
+            <div><dt>Status</dt><dd>{{ messenger.connectionLabel.value }}</dd></div>
+            <div><dt>Joined rooms</dt><dd>{{ messenger.state.joinedRooms.length }}</dd></div>
+            <div><dt>Saved rooms</dt><dd>{{ messenger.state.rooms.length }}</dd></div>
+          </dl>
         </div>
-        <div class="modal__field">
-          <label for="audio-output">Headphones</label>
-          <select id="audio-output" class="modal__input" :value="messenger.state.selectedAudioOutputId" @change="messenger.setAudioOutput($event.target.value)">
-            <option value="">System default</option>
-            <option v-for="(device, index) in headphones" :key="device.deviceId || `speaker-${index}`" :value="device.deviceId">
-              {{ deviceLabel(device, `Output ${index + 1}`) }}
-            </option>
-          </select>
-        </div>
-        <label class="modal__field">
-          <span>Microphone noise threshold: {{ messenger.state.microphoneThreshold }}</span>
-          <input
-            type="range"
-            min="0"
-            max="100"
-            step="1"
-            :value="messenger.state.microphoneThreshold"
-            @input="messenger.setMicrophoneThreshold($event.target.value)"
-          />
-        </label>
-        <button type="button" class="btn modal__btn" @click="messenger.refreshAudioDevices">Refresh devices</button>
       </section>
-
-      <section class="modal__section">
-        <h3>About</h3>
-        <dl class="modal__kv">
-          <div><dt>Session</dt><dd>{{ messenger.state.uuid || "—" }}</dd></div>
-          <div><dt>Status</dt><dd>{{ messenger.connectionLabel.value }}</dd></div>
-          <div><dt>Joined rooms</dt><dd>{{ messenger.state.joinedRooms.length }}</dd></div>
-          <div><dt>Saved rooms</dt><dd>{{ messenger.state.rooms.length }}</dd></div>
-        </dl>
-      </section>
-    </div>
+    </main>
   </div>
 </template>
