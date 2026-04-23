@@ -317,6 +317,27 @@ function base64ToBlob(b64, mimeType) {
   return new Blob([bytes], { type: mimeType || "application/octet-stream" });
 }
 
+function microphoneLevelFromSamples(samples) {
+  if (!samples?.length) return 0;
+  let peak = 0;
+  let sum = 0;
+  for (const sample of samples) {
+    const centered = Math.abs((sample - 128) / 128);
+    peak = Math.max(peak, centered);
+    sum += centered * centered;
+  }
+  const rms = Math.sqrt(sum / samples.length);
+  const blended = Math.max(rms * 4.5, peak * 1.8);
+  return Math.min(100, Math.round(Math.pow(blended, 0.72) * 100));
+}
+
+function smoothLevel(previous, next) {
+  const attack = 0.38;
+  const release = 0.13;
+  const factor = next > previous ? attack : release;
+  return previous + (next - previous) * factor;
+}
+
 function buildWaveform(seed) {
   return Array.from({ length: 28 }, (_, index) => {
     const offset = ((index * 17) + String(seed).length * 13) % 24;
@@ -370,6 +391,9 @@ export function useMessenger() {
     microphoneThreshold: persisted.microphoneThreshold,
     audioDevicesLoading: false,
     audioDevicesPermission: "unknown",
+    micTestActive: false,
+    micTestLoading: false,
+    micTestLevel: 0,
 
     recording: null,        // { recorder, stream, startedAt, roomId } while recording voice memo
     recordingElapsed: 0,
@@ -391,6 +415,12 @@ export function useMessenger() {
   // Non-reactive registry of Blob-URLs keyed by messageId so repeated renders
   // reuse the same URL and we can free them when messages are evicted.
   const attachmentUrlCache = new Map();
+  let micTestStream = null;
+  let micTestAudio = null;
+  let micTestFrame = 0;
+  let micTestAnalyser = null;
+  let micTestAnalyserData = null;
+  let micTestSmoothedLevel = 0;
 
   function attachmentUrlFor(message) {
     if (!message?.attachment?.dataB64) return null;
@@ -506,11 +536,13 @@ export function useMessenger() {
 
   function setAudioInput(deviceId) {
     state.selectedAudioInputId = String(deviceId || "");
+    if (state.micTestActive) stopMicTest();
     persist();
   }
 
   function setAudioOutput(deviceId) {
     state.selectedAudioOutputId = String(deviceId || "");
+    applyAudioOutput(micTestAudio);
     persist();
   }
 
@@ -559,13 +591,85 @@ export function useMessenger() {
     const threshold = Number(state.microphoneThreshold) || 0;
     if (threshold <= 0 || !state.callAnalyser?.analyser || !state.callAnalyserData) return true;
     state.callAnalyser.analyser.getByteTimeDomainData(state.callAnalyserData);
-    let sum = 0;
-    for (const sample of state.callAnalyserData) {
-      const centered = (sample - 128) / 128;
-      sum += centered * centered;
+    return microphoneLevelFromSamples(state.callAnalyserData) >= threshold;
+  }
+
+  function stopMicTest() {
+    if (micTestFrame) {
+      cancelAnimationFrame(micTestFrame);
+      micTestFrame = 0;
     }
-    const rms = Math.sqrt(sum / state.callAnalyserData.length) * 100;
-    return rms >= threshold;
+    if (micTestAudio) {
+      micTestAudio.pause();
+      micTestAudio.srcObject = null;
+      micTestAudio = null;
+    }
+    if (micTestStream) {
+      for (const track of micTestStream.getTracks()) track.stop();
+      micTestStream = null;
+    }
+    const context = micTestAnalyser?.context;
+    micTestAnalyser = null;
+    micTestAnalyserData = null;
+    if (context) context.close().catch(() => {});
+    state.micTestActive = false;
+    state.micTestLoading = false;
+    state.micTestLevel = 0;
+    micTestSmoothedLevel = 0;
+  }
+
+  async function startMicTest() {
+    if (state.micTestActive || state.micTestLoading) {
+      stopMicTest();
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      state.lastError = "Audio devices are not available in this browser.";
+      return;
+    }
+
+    state.micTestLoading = true;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(audioConstraints());
+      state.audioDevicesPermission = "granted";
+      await refreshAudioDevices();
+      micTestStream = stream;
+
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (AudioCtx) {
+        const context = new AudioCtx();
+        const source = context.createMediaStreamSource(stream);
+        const analyser = context.createAnalyser();
+        analyser.fftSize = 2048;
+        analyser.smoothingTimeConstant = 0.82;
+        source.connect(analyser);
+        micTestAnalyser = { context, analyser };
+        micTestAnalyserData = new Uint8Array(analyser.fftSize);
+      }
+
+      micTestAudio = new Audio();
+      micTestAudio.srcObject = stream;
+      micTestAudio.volume = 0.75;
+      await applyAudioOutput(micTestAudio);
+      micTestAudio.play().catch(() => {});
+
+      state.micTestActive = true;
+      const tick = () => {
+        if (!state.micTestActive || !micTestAnalyser?.analyser || !micTestAnalyserData) return;
+        micTestAnalyser.analyser.getByteTimeDomainData(micTestAnalyserData);
+        const nextLevel = microphoneLevelFromSamples(micTestAnalyserData);
+        micTestSmoothedLevel = smoothLevel(micTestSmoothedLevel, nextLevel);
+        state.micTestLevel = Math.round(micTestSmoothedLevel);
+        micTestFrame = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch {
+      state.audioDevicesPermission = "denied";
+      state.lastError = "Microphone permission is required to test audio.";
+      stopMicTest();
+    } finally {
+      state.micTestLoading = false;
+    }
   }
 
   function touchRoom(roomId, message) {
@@ -1485,6 +1589,8 @@ export function useMessenger() {
     persist,
     refreshAudioDevices,
     unlockAudioDevices,
+    startMicTest,
+    stopMicTest,
     setAudioInput,
     setAudioOutput,
     setMicrophoneThreshold,

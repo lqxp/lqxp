@@ -1486,6 +1486,33 @@ input, textarea { font: inherit; color: inherit; background: none; border: 0; ou
   width: 100%;
   accent-color: var(--blue);
 }
+.settings-meter {
+  position: relative;
+  height: 24px;
+  overflow: hidden;
+  border-radius: 12px;
+  background:
+    linear-gradient(90deg, rgba(63, 207, 111, 0.12), rgba(215, 201, 78, 0.12), rgba(255, 107, 112, 0.12)),
+    rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+.settings-meter__bar {
+  position: absolute;
+  inset: 4px auto 4px 4px;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--green), #d7c94e, var(--red));
+  min-width: 4px;
+  transition: width 120ms ease-out;
+}
+.settings-meter__threshold {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.42), 0 0 16px rgba(255, 255, 255, 0.6);
+}
 .settings-range strong {
   align-self: flex-end;
   color: var(--muted);

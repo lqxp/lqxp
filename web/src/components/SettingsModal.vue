@@ -39,6 +39,7 @@ watch(isOpen, async (v) => {
 watch(activeSection, async (section) => {
   if (!isOpen.value) return;
   if (section === "calls") props.messenger.refreshAudioDevices();
+  else props.messenger.stopMicTest();
   if (section === "profile") {
     await nextTick();
     firstInputRef.value?.focus();
@@ -46,6 +47,7 @@ watch(activeSection, async (section) => {
 });
 
 function close() {
+  props.messenger.stopMicTest();
   props.messenger.state.settingsOpen = false;
 }
 
@@ -231,6 +233,16 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
           <label class="settings-range">
             <span>Microphone noise threshold</span>
             <small>Raise it to avoid sending background noise.</small>
+            <div class="settings-meter">
+              <span
+                class="settings-meter__bar"
+                :style="{ width: `${messenger.state.micTestLevel}%` }"
+              ></span>
+              <span
+                class="settings-meter__threshold"
+                :style="{ left: `${messenger.state.microphoneThreshold}%` }"
+              ></span>
+            </div>
             <input
               type="range"
               min="0"
@@ -241,6 +253,15 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
             />
             <strong>{{ messenger.state.microphoneThreshold }}</strong>
           </label>
+          <button
+            type="button"
+            class="btn settings-btn"
+            :class="{ 'icon-btn--active': messenger.state.micTestActive }"
+            :disabled="messenger.state.micTestLoading"
+            @click="messenger.startMicTest"
+          >
+            {{ messenger.state.micTestLoading ? "Starting..." : messenger.state.micTestActive ? "Stop listening" : "Listen and test mic" }}
+          </button>
         </div>
       </section>
 
