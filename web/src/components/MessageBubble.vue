@@ -1,6 +1,7 @@
 <script setup>
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import AudioPlayer from "@/components/AudioPlayer.vue";
+import ImageViewer from "@/components/ImageViewer.vue";
 
 const props = defineProps({
   message: { type: Object, required: true },
@@ -37,6 +38,7 @@ const attachmentKind = computed(() => props.message.kind);
 const jumbo = computed(() => props.message.jumboEmoji && !props.message.deleted);
 const deleted = computed(() => props.message.deleted);
 const preview = computed(() => props.message.preview);
+const imageViewerOpen = ref(false);
 const repliedMessage = computed(() =>
   props.messenger.findMessageById(props.message.roomId, props.message.replyToMessageId)
 );
@@ -59,6 +61,11 @@ function download() {
   document.body.appendChild(a);
   a.click();
   a.remove();
+}
+
+function openImageViewer() {
+  if (!attachmentUrl.value) return;
+  imageViewerOpen.value = true;
 }
 
 function onDelete() {
@@ -181,9 +188,21 @@ function onDelete() {
       </template>
 
       <template v-else-if="attachmentKind === 'image' && attachmentUrl">
-        <a :href="attachmentUrl" :download="message.attachment.filename" class="att-image-link">
+        <button
+          type="button"
+          class="att-image-link"
+          :aria-label="`Open image preview: ${message.attachment.filename}`"
+          @click="openImageViewer"
+        >
           <img :src="attachmentUrl" :alt="message.attachment.filename" class="att-image" />
-        </a>
+        </button>
+        <ImageViewer
+          v-if="imageViewerOpen"
+          :src="attachmentUrl"
+          :filename="message.attachment.filename"
+          :size-label="messenger.formatSize(message.attachment.size)"
+          @close="imageViewerOpen = false"
+        />
         <div v-if="message.text" class="bubble__text">{{ message.text }}</div>
       </template>
 
