@@ -1,0 +1,13 @@
+[api]
+
+domain = ""
+port = 4560
+adminPassword = ""
+
+[network]
+
+heartbeatInterval = 3000
+maxConnectionsPerIp = 3
+latestVersion = ""
+publicDir = "serve.public"
+webchatIndex = "index.html"
