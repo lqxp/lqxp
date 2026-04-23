@@ -6,10 +6,15 @@ const props = defineProps({
 });
 
 const fileInputRef = ref(null);
-const cameraInputRef = ref(null);
 const inputRef = ref(null);
 const emojiWrapRef = ref(null);
+const cameraVideoRef = ref(null);
+const cameraCanvasRef = ref(null);
 const pickerOpen = ref(false);
+const cameraOpen = ref(false);
+const cameraBusy = ref(false);
+const cameraError = ref("");
+let cameraStream = null;
 
 const canSend = computed(() => props.messenger.state.messageInput.trim().length > 0 && !!props.messenger.state.activeRoom);
 const disabled = computed(() => !props.messenger.state.activeRoom);
@@ -38,9 +43,9 @@ function pickFile() {
   fileInputRef.value?.click();
 }
 
-function pickCamera() {
+async function pickCamera() {
   if (disabled.value) return;
-  cameraInputRef.value?.click();
+  await openCamera();
 }
 
 async function onFile(event) {
@@ -103,6 +108,75 @@ function onDocMouseDown(event) {
 
 function onDocKey(event) {
   if (pickerOpen.value && event.key === "Escape") pickerOpen.value = false;
+  if (cameraOpen.value && event.key === "Escape") closeCamera();
+}
+
+function stopCameraStream() {
+  if (!cameraStream) return;
+  for (const track of cameraStream.getTracks()) track.stop();
+  cameraStream = null;
+}
+
+async function openCamera() {
+  cameraError.value = "";
+  if (!navigator.mediaDevices?.getUserMedia) {
+    cameraError.value = "Camera is not available in this browser.";
+    return;
+  }
+
+  cameraOpen.value = true;
+  await nextTick();
+
+  try {
+    cameraStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } },
+      audio: false
+    });
+    if (cameraVideoRef.value) {
+      cameraVideoRef.value.srcObject = cameraStream;
+      await cameraVideoRef.value.play();
+    }
+  } catch {
+    cameraError.value = "Camera access denied or unavailable.";
+    stopCameraStream();
+  }
+}
+
+function closeCamera() {
+  stopCameraStream();
+  cameraOpen.value = false;
+  cameraBusy.value = false;
+  cameraError.value = "";
+}
+
+async function capturePhoto() {
+  const video = cameraVideoRef.value;
+  const canvas = cameraCanvasRef.value;
+  if (!video || !canvas || cameraBusy.value) return;
+
+  const width = video.videoWidth || 1280;
+  const height = video.videoHeight || 720;
+  if (!width || !height) {
+    cameraError.value = "Camera is not ready yet.";
+    return;
+  }
+
+  cameraBusy.value = true;
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(video, 0, 0, width, height);
+
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
+  if (!blob) {
+    cameraError.value = "Could not capture photo.";
+    cameraBusy.value = false;
+    return;
+  }
+
+  const file = new File([blob], `camera-${Date.now()}.jpg`, { type: "image/jpeg" });
+  await props.messenger.sendAttachment(file);
+  closeCamera();
 }
 
 onMounted(() => {
@@ -112,6 +186,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.removeEventListener("mousedown", onDocMouseDown);
   document.removeEventListener("keydown", onDocKey);
+  stopCameraStream();
 });
 </script>
 
@@ -131,14 +206,6 @@ onBeforeUnmount(() => {
         ref="fileInputRef"
         type="file"
         multiple
-        style="display: none"
-        @change="onFile"
-      />
-      <input
-        ref="cameraInputRef"
-        type="file"
-        accept="image/*"
-        capture="environment"
         style="display: none"
         @change="onFile"
       />
@@ -220,4 +287,36 @@ onBeforeUnmount(() => {
       </button>
     </template>
   </footer>
+
+  <Teleport to="body">
+    <div v-if="cameraOpen" class="camera-modal" role="dialog" aria-modal="true" aria-label="Take photo">
+      <div class="camera-modal__panel">
+        <header class="camera-modal__head">
+          <span>Camera</span>
+          <button type="button" class="icon-btn" aria-label="Close camera" @click="closeCamera">
+            <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </header>
+
+        <div class="camera-modal__preview">
+          <video
+            ref="cameraVideoRef"
+            autoplay
+            muted
+            playsinline
+          ></video>
+          <div v-if="cameraError" class="camera-modal__error">{{ cameraError }}</div>
+        </div>
+
+        <canvas ref="cameraCanvasRef" class="sr-only"></canvas>
+
+        <div class="camera-modal__actions">
+          <button type="button" class="btn" @click="closeCamera">Cancel</button>
+          <button type="button" class="btn btn--primary" :disabled="cameraBusy || !!cameraError" @click="capturePhoto">
+            {{ cameraBusy ? "Sending..." : "Take photo" }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
 </template>
