@@ -430,11 +430,11 @@ export function useMessenger() {
 
     inCall: false,          // currently mid-voice-call
     callRoom: "",           // which room the call is in
-    callStream: null,       // MediaStream
+    callStream: null,       // raw microphone MediaStream
     cameraStream: null,
     screenStream: null,
     callElapsed: 0,         // seconds
-    callMuted: false,       // local mic mute (tracks state.callStream tracks.enabled)
+    callMuted: false,       // local mic mute applied to the outbound call gate
     callCameraEnabled: false,
     callScreenEnabled: false,
     localCallMedia: { ...EMPTY_CALL_MEDIA },
@@ -458,6 +458,9 @@ export function useMessenger() {
   let micTestSmoothedLevel = 0;
   let notificationAudioContext = null;
   let callManager: WebRtcCallManager | null = null;
+  let callOutboundStream: MediaStream | null = null;
+  let callGateFrame = 0;
+  let callGateOpenUntil = 0;
 
   function attachmentUrlFor(message) {
     if (!message?.attachment?.dataB64) return null;
@@ -660,6 +663,7 @@ export function useMessenger() {
   function setMicrophoneThreshold(value) {
     const next = Math.max(0, Math.min(100, Number(value) || 0));
     state.microphoneThreshold = next;
+    updateCallAudioGate();
     persist();
   }
 
@@ -672,26 +676,45 @@ export function useMessenger() {
     }
   }
 
-  function setupCallAnalyser(stream) {
+  function stopStreamTracks(stream) {
+    if (!stream) return;
+    for (const track of stream.getTracks()) track.stop();
+  }
+
+  function setupCallAudioPipeline(stream) {
+    closeCallAnalyser();
     state.callAnalyser = null;
     state.callAnalyserData = null;
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioCtx) return;
+      if (!AudioCtx) return stream;
       const context = new AudioCtx();
       const source = context.createMediaStreamSource(stream);
       const analyser = context.createAnalyser();
+      const gate = context.createGain();
+      const destination = context.createMediaStreamDestination();
       analyser.fftSize = 1024;
+      gate.gain.value = 1;
       source.connect(analyser);
-      state.callAnalyser = { context, analyser };
+      source.connect(gate);
+      gate.connect(destination);
+      context.resume?.().catch?.(() => {});
+      state.callAnalyser = { context, analyser, gate };
       state.callAnalyserData = new Uint8Array(analyser.fftSize);
+      return destination.stream;
     } catch {
       state.callAnalyser = null;
       state.callAnalyserData = null;
+      return stream;
     }
   }
 
   function closeCallAnalyser() {
+    if (callGateFrame) {
+      cancelAnimationFrame(callGateFrame);
+      callGateFrame = 0;
+    }
+    callGateOpenUntil = 0;
     const context = state.callAnalyser?.context;
     state.callAnalyser = null;
     state.callAnalyserData = null;
@@ -703,6 +726,51 @@ export function useMessenger() {
     if (threshold <= 0 || !state.callAnalyser?.analyser || !state.callAnalyserData) return true;
     state.callAnalyser.analyser.getByteTimeDomainData(state.callAnalyserData);
     return microphoneLevelFromSamples(state.callAnalyserData) >= threshold;
+  }
+
+  function setCallAudioGateOpen(open) {
+    const gate = state.callAnalyser?.gate;
+    const context = state.callAnalyser?.context;
+    if (gate && context) {
+      const now = context.currentTime;
+      gate.gain.cancelScheduledValues(now);
+      gate.gain.setTargetAtTime(open ? 1 : 0, now, 0.025);
+      return;
+    }
+
+    for (const track of callOutboundStream?.getAudioTracks?.() || []) {
+      track.enabled = open;
+    }
+  }
+
+  function updateCallAudioGate() {
+    if (!callOutboundStream) return;
+
+    let open = !state.callMuted;
+    const threshold = Number(state.microphoneThreshold) || 0;
+    if (open && threshold > 0 && state.callAnalyser?.analyser && state.callAnalyserData) {
+      const now = Date.now();
+      if (isAboveMicrophoneThreshold()) callGateOpenUntil = now + 220;
+      open = now <= callGateOpenUntil;
+    } else if (!open) {
+      callGateOpenUntil = 0;
+    }
+
+    setCallAudioGateOpen(open);
+  }
+
+  function startCallAudioGate() {
+    if (callGateFrame) cancelAnimationFrame(callGateFrame);
+    const tick = () => {
+      if (!state.inCall || !callOutboundStream) {
+        callGateFrame = 0;
+        return;
+      }
+      updateCallAudioGate();
+      callGateFrame = requestAnimationFrame(tick);
+    };
+    updateCallAudioGate();
+    callGateFrame = requestAnimationFrame(tick);
   }
 
   function stopMicTest() {
@@ -1155,10 +1223,8 @@ export function useMessenger() {
         try { rec.recorder.stop(); } catch { resolve(); }
       });
     } catch { /* ignore */ }
-    // Only stop tracks we started ourselves — never kill the call's stream.
-    if (rec.ownsStream) {
-      for (const t of rec.stream.getTracks()) t.stop();
-    }
+    // Only keep a shared stream alive while the call still owns it.
+    if (rec.ownsStream || rec.stream !== state.callStream) stopStreamTracks(rec.stream);
     if (cancel) return;
     if (!rec.chunks.length) return;
 
@@ -1262,9 +1328,10 @@ export function useMessenger() {
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia(audioConstraints());
+      const outboundStream = setupCallAudioPipeline(stream);
+      callOutboundStream = outboundStream;
       refreshAudioDevices();
       state.audioDevicesPermission = "granted";
-      setupCallAnalyser(stream);
       state.callStream = stream;
       state.callRoom = roomId;
       state.inCall = true;
@@ -1276,7 +1343,7 @@ export function useMessenger() {
       callManager = new WebRtcCallManager({
         roomId,
         username: sanitizeUsername(state.username),
-        localStream: stream,
+        localStream: outboundStream,
         sendSignal: (payload: CallSignalPayload) => send({ op: 111, d: payload }),
         onRemoteMedia: storeRemoteCallMedia,
         onRemoteLeft: removeRemoteCallMedia
@@ -1290,6 +1357,7 @@ export function useMessenger() {
       }
       publishCallState(true);
       connectKnownCallPeers(roomId);
+      startCallAudioGate();
       tickCall(Date.now());
     } catch (err) {
       state.lastError = "Mic access denied.";
@@ -1298,11 +1366,9 @@ export function useMessenger() {
   }
 
   function toggleMute() {
-    if (!state.callStream) return;
+    if (!state.callStream && !callOutboundStream) return;
     state.callMuted = !state.callMuted;
-    for (const track of state.callStream.getAudioTracks()) {
-      track.enabled = !state.callMuted;
-    }
+    updateCallAudioGate();
     publishCallState(true);
   }
 
@@ -1387,12 +1453,16 @@ export function useMessenger() {
       for (const t of state.screenStream.getTracks()) t.stop();
       state.screenStream = null;
     }
-    if (state.callStream) {
+    const rawCallStream = state.callStream;
+    const outboundStream = callOutboundStream;
+    const memoStream = state.recording && !state.recording.ownsStream ? state.recording.stream : null;
+    if (outboundStream && outboundStream !== rawCallStream && outboundStream !== memoStream) {
+      stopStreamTracks(outboundStream);
+    }
+    callOutboundStream = null;
+    if (rawCallStream) {
       // If a memo is also recording off the same stream, let it finish first.
-      const memoUsesStream = state.recording && !state.recording.ownsStream;
-      if (!memoUsesStream) {
-        for (const t of state.callStream.getTracks()) t.stop();
-      }
+      if (rawCallStream !== memoStream) stopStreamTracks(rawCallStream);
       state.callStream = null;
     }
     closeCallAnalyser();
