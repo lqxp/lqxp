@@ -1,4 +1,4 @@
-<script setup>
+<script setup lang="ts">
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from "vue";
 
 const props = defineProps({
@@ -69,6 +69,14 @@ function onClear() {
   if (!confirm("Clear all local data? This removes every conversation, message, and reaction from this browser. The remote server is not touched.")) return;
   props.messenger.clearAllData();
   close();
+}
+
+function targetChecked(event: Event) {
+  return Boolean((event.target as HTMLInputElement | null)?.checked);
+}
+
+function targetValue(event: Event) {
+  return (event.target as HTMLInputElement | HTMLSelectElement | null)?.value || "";
 }
 
 const microphones = computed(() =>
@@ -191,7 +199,7 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
             <input
               type="checkbox"
               :checked="messenger.state.deleteMessagesOnLeave"
-              @change="messenger.setDeleteMessagesOnLeave($event.target.checked)"
+              @change="messenger.setDeleteMessagesOnLeave(targetChecked($event))"
             />
             <span>Delete local room messages when leaving</span>
           </label>
@@ -199,7 +207,7 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
             <input
               type="checkbox"
               :checked="messenger.state.streamerMode"
-              @change="messenger.setStreamerMode($event.target.checked)"
+              @change="messenger.setStreamerMode(targetChecked($event))"
             />
             <span>Streamer mode</span>
           </label>
@@ -216,7 +224,7 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
             <input
               type="checkbox"
               :checked="messenger.state.messageSoundEnabled"
-              @change="messenger.setMessageSoundEnabled($event.target.checked)"
+              @change="messenger.setMessageSoundEnabled(targetChecked($event))"
             />
             <span>Play a sound for new messages</span>
           </label>
@@ -240,7 +248,7 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
           <h4>Devices</h4>
           <label class="settings-select">
             <span>Microphone</span>
-            <select :value="messenger.state.selectedAudioInputId" @change="messenger.setAudioInput($event.target.value)">
+            <select :value="messenger.state.selectedAudioInputId" @change="messenger.setAudioInput(targetValue($event))">
               <option value="">System default</option>
               <option v-for="(device, index) in microphones" :key="device.deviceId || `mic-${index}`" :value="device.deviceId">
                 {{ deviceLabel(device, `Microphone ${index + 1}`) }}
@@ -250,7 +258,7 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
 
           <label class="settings-select">
             <span>Speakers</span>
-            <select :value="messenger.state.selectedAudioOutputId" @change="messenger.setAudioOutput($event.target.value)">
+            <select :value="messenger.state.selectedAudioOutputId" @change="messenger.setAudioOutput(targetValue($event))">
               <option value="">System default</option>
               <option v-for="(device, index) in headphones" :key="device.deviceId || `speaker-${index}`" :value="device.deviceId">
                 {{ deviceLabel(device, `Output ${index + 1}`) }}
@@ -292,7 +300,7 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
               max="100"
               step="1"
               :value="messenger.state.microphoneThreshold"
-              @input="messenger.setMicrophoneThreshold($event.target.value)"
+              @input="messenger.setMicrophoneThreshold(targetValue($event))"
             />
             <strong>{{ messenger.state.microphoneThreshold }}</strong>
           </label>

@@ -1,4 +1,4 @@
-<script setup>
+<script setup lang="ts">
 import { computed, onMounted } from "vue";
 import { useMessenger } from "@/composables/useMessenger";
 import MessengerSidebar from "@/components/MessengerSidebar.vue";

@@ -2640,12 +2640,19 @@ textarea {
   align-items: center;
   gap: 8px;
   padding: 4px 10px 4px 4px;
-  border-radius: 999px;
+  border-radius: 8px;
   background: var(--surface-2);
   font-size: 13px;
   min-width: 0;
   border: 2px solid transparent;
   transition: border-color 120ms ease;
+}
+
+.calltile.has-video {
+  flex-direction: column;
+  align-items: stretch;
+  width: min(240px, 100%);
+  padding: 6px;
 }
 
 .calltile.is-speaking {
@@ -2668,6 +2675,21 @@ textarea {
   flex: none;
 }
 
+.calltile__video {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 6px;
+  background: #05070a;
+}
+
+.calltile__video video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
 .calltile__name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2678,6 +2700,13 @@ textarea {
 .calltile__you {
   color: var(--muted);
   font-weight: normal;
+}
+
+.calltile__media {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-family: var(--mono);
 }
 
 .calltile__muted-badge {

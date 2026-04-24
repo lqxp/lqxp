@@ -28,6 +28,8 @@ pub struct PlayerSession {
     pub tx: mpsc::UnboundedSender<Message>,
     pub rooms: HashSet<String>,
     pub is_voice_chat: bool,
+    pub call_camera: bool,
+    pub call_screen: bool,
     pub version: String,
     pub last_message_timestamp: Option<u64>,
     pub last_voice_chunk_timestamp: Option<u64>,

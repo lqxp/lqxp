@@ -1,4 +1,7 @@
 import { computed, nextTick, reactive } from "vue";
+import { EMPTY_CALL_MEDIA, normalizeCallMedia } from "@/calls/callTypes";
+import type { CallMediaState, CallSignalPayload, RemoteCallMedia } from "@/calls/callTypes";
+import { WebRtcCallManager } from "@/calls/WebRtcCallManager";
 
 const STORAGE_KEY = "qxprotocol-messenger-v4";
 const QUICK_REACTIONS = ["❤️", "👍", "😂", "😮", "😢", "🙏"];
@@ -8,7 +11,6 @@ const ROOM_ID_MIN_LENGTH = 8;
 const ROOM_ID_MAX_LENGTH = 64;
 const MESSAGE_LIMIT = 2000;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
-const CALL_CHUNK_MS = 800;
 const RANDOM_ROOM_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 
 function inferWebSocketUrl() {
@@ -204,7 +206,7 @@ function stripAttachmentDataForStorage(arr) {
 function savePersisted(state) {
   try {
     const messagesByRoom = {};
-    for (const [id, arr] of Object.entries(state.messagesByRoom || {})) {
+    for (const [id, arr] of Object.entries(state.messagesByRoom || {}) as [string, any[]][]) {
       messagesByRoom[id] = stripAttachmentDataForStorage(arr.slice(-MAX_HISTORY_PER_ROOM));
     }
     localStorage.setItem(
@@ -429,10 +431,15 @@ export function useMessenger() {
     inCall: false,          // currently mid-voice-call
     callRoom: "",           // which room the call is in
     callStream: null,       // MediaStream
-    callRecorder: null,     // active MediaRecorder chunk
-    callTimer: null,        // setTimeout handle
+    cameraStream: null,
+    screenStream: null,
     callElapsed: 0,         // seconds
     callMuted: false,       // local mic mute (tracks state.callStream tracks.enabled)
+    callCameraEnabled: false,
+    callScreenEnabled: false,
+    localCallMedia: { ...EMPTY_CALL_MEDIA },
+    remoteCallMediaByUser: {},
+    remoteCallStreamsByUser: {},
 
     voiceMembersByRoom: {}, // { roomId: [username, ...] } — who is currently in voice
     speakingByRoom: {},     // { roomId: { username: lastChunkTimestamp } } — recent speakers
@@ -450,6 +457,7 @@ export function useMessenger() {
   let micTestAnalyserData = null;
   let micTestSmoothedLevel = 0;
   let notificationAudioContext = null;
+  let callManager: WebRtcCallManager | null = null;
 
   function attachmentUrlFor(message) {
     if (!message?.attachment?.dataB64) return null;
@@ -562,7 +570,7 @@ export function useMessenger() {
 
   function ensureNotificationAudio() {
     try {
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioCtx) return null;
       if (!notificationAudioContext) notificationAudioContext = new AudioCtx();
       if (notificationAudioContext.state === "suspended") {
@@ -668,7 +676,7 @@ export function useMessenger() {
     state.callAnalyser = null;
     state.callAnalyserData = null;
     try {
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioCtx) return;
       const context = new AudioCtx();
       const source = context.createMediaStreamSource(stream);
@@ -738,7 +746,7 @@ export function useMessenger() {
       await refreshAudioDevices();
       micTestStream = stream;
 
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (AudioCtx) {
         const context = new AudioCtx();
         const source = context.createMediaStreamSource(stream);
@@ -775,7 +783,7 @@ export function useMessenger() {
     }
   }
 
-  function touchRoom(roomId, message) {
+  function touchRoom(roomId, message = null) {
     const id = sanitizeRoomId(roomId);
     if (!id) return;
     const existing = state.rooms.find((r) => r.roomId === id);
@@ -1044,7 +1052,7 @@ export function useMessenger() {
     const roomId = state.activeRoom;
     if (!text || !roomId) return;
     if (state.connected && state.identified && state.joinedRooms.includes(roomId)) {
-      const d = { text: text.slice(0, MESSAGE_LIMIT), gameId: roomId };
+      const d: any = { text: text.slice(0, MESSAGE_LIMIT), gameId: roomId };
       if (state.replyingTo?.messageId) d.replyToMessageId = state.replyingTo.messageId;
       send({ op: 7, d });
       state.messageInput = "";
@@ -1142,7 +1150,7 @@ export function useMessenger() {
     state.recording = null;
     state.recordingElapsed = 0;
     try {
-      await new Promise((resolve) => {
+      await new Promise<void>((resolve) => {
         rec.recorder.onstop = resolve;
         try { rec.recorder.stop(); } catch { resolve(); }
       });
@@ -1181,7 +1189,70 @@ export function useMessenger() {
     return `${m}:${String(s).padStart(2, "0")}`;
   }
 
-  // Voice call: toggle — announces via op 98 and streams chunked audio via op 99.
+  function currentCallMedia(): CallMediaState {
+    return {
+      audio: state.inCall && !state.callMuted,
+      camera: Boolean(state.callCameraEnabled),
+      screen: Boolean(state.callScreenEnabled)
+    };
+  }
+
+  function publishCallState(isVoiceChat = state.inCall) {
+    const media = isVoiceChat ? currentCallMedia() : { ...EMPTY_CALL_MEDIA };
+    state.localCallMedia = media;
+    callManager?.setLocalMedia(media);
+    send({ op: 98, d: { isVoiceChat, media } });
+    send({ op: 110, d: { gameId: state.callRoom || state.activeRoom, isVoiceChat, media } });
+  }
+
+  function connectKnownCallPeers(roomId) {
+    if (!callManager) return;
+    const me = sanitizeUsername(state.username);
+    for (const user of state.voiceMembersByRoom[roomId] || []) {
+      if (user && user !== me) callManager.connectPeer(user);
+    }
+  }
+
+  function updateRemoteMedia(username, media) {
+    const key = sanitizeUsername(username);
+    if (!key) return;
+    state.remoteCallMediaByUser[key] = normalizeCallMedia({
+      ...(state.remoteCallMediaByUser[key] || EMPTY_CALL_MEDIA),
+      ...(media || {})
+    });
+  }
+
+  function storeRemoteCallMedia(username: string, remote: RemoteCallMedia) {
+    const key = sanitizeUsername(username);
+    if (!key) return;
+    state.remoteCallStreamsByUser[key] = remote.stream;
+    updateRemoteMedia(key, remote.media);
+  }
+
+  function removeRemoteCallMedia(username) {
+    const key = sanitizeUsername(username);
+    if (!key) return;
+    delete state.remoteCallStreamsByUser[key];
+    delete state.remoteCallMediaByUser[key];
+  }
+
+  function remoteCallStream(username) {
+    return state.remoteCallStreamsByUser[sanitizeUsername(username)] || null;
+  }
+
+  function localPreviewStream(kind = "") {
+    if (kind === "camera") return state.cameraStream || null;
+    if (kind === "screen") return state.screenStream || null;
+    return state.callStream || null;
+  }
+
+  function remoteVideoStream(username) {
+    const stream = remoteCallStream(username);
+    if (!stream?.getVideoTracks().length) return null;
+    return stream;
+  }
+
+  // Calls use WebRTC media and the WebSocket only as a typed signaling relay.
   async function startCall() {
     if (state.inCall) return;
     const roomId = state.activeRoom;
@@ -1199,6 +1270,17 @@ export function useMessenger() {
       state.inCall = true;
       state.callMuted = false;
       state.voiceEnabled = true;
+      state.callCameraEnabled = false;
+      state.callScreenEnabled = false;
+      state.localCallMedia = currentCallMedia();
+      callManager = new WebRtcCallManager({
+        roomId,
+        username: sanitizeUsername(state.username),
+        localStream: stream,
+        sendSignal: (payload: CallSignalPayload) => send({ op: 111, d: payload }),
+        onRemoteMedia: storeRemoteCallMedia,
+        onRemoteLeft: removeRemoteCallMedia
+      });
       // Register self as voice member locally so our tile shows up immediately.
       const me = sanitizeUsername(state.username);
       if (me) {
@@ -1206,8 +1288,8 @@ export function useMessenger() {
         members.add(me);
         state.voiceMembersByRoom[roomId] = [...members];
       }
-      send({ op: 98, d: { isVoiceChat: true } });
-      scheduleCallChunk();
+      publishCallState(true);
+      connectKnownCallPeers(roomId);
       tickCall(Date.now());
     } catch (err) {
       state.lastError = "Mic access denied.";
@@ -1221,44 +1303,67 @@ export function useMessenger() {
     for (const track of state.callStream.getAudioTracks()) {
       track.enabled = !state.callMuted;
     }
+    publishCallState(true);
   }
 
-  function scheduleCallChunk() {
-    if (!state.inCall || !state.callStream) return;
-    const mimeType = pickAudioMime();
-    let recorder;
-    try {
-      recorder = new MediaRecorder(state.callStream, mimeType ? { mimeType } : undefined);
-    } catch {
-      endCall();
+  async function toggleCamera() {
+    if (!state.inCall || !callManager) return;
+    if (state.callCameraEnabled) {
+      callManager.removeLocalTracks((track) => track.kind === "video" && state.cameraStream?.getTracks().includes(track));
+      state.cameraStream = null;
+      state.callCameraEnabled = false;
+      publishCallState(true);
       return;
     }
-    const chunks = [];
-    recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
-    recorder.onstop = async () => {
-      if (chunks.length && state.inCall && state.connected && isAboveMicrophoneThreshold()) {
-        try {
-          const blob = new Blob(chunks, { type: mimeType || "audio/webm" });
-          const b64 = await blobToBase64(blob);
-          send({
-            op: 99,
-            d: {
-              gameId: state.callRoom,
-              chunk: b64,
-              mimeType: mimeType || "audio/webm"
-            }
-          });
-        } catch { /* ignore chunk */ }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      state.cameraStream = stream;
+      state.callCameraEnabled = true;
+      callManager.addLocalStream(stream);
+      for (const track of stream.getVideoTracks()) {
+        track.onended = () => {
+          state.callCameraEnabled = false;
+          state.cameraStream = null;
+          publishCallState(true);
+        };
       }
-      if (state.inCall) scheduleCallChunk();
-    };
-    state.callRecorder = recorder;
-    recorder.start();
-    state.callTimer = setTimeout(() => {
-      if (recorder.state === "recording") {
-        try { recorder.stop(); } catch { /* ignore */ }
+      publishCallState(true);
+    } catch {
+      state.lastError = "Camera access denied.";
+    }
+  }
+
+  async function toggleScreenShare() {
+    if (!state.inCall || !callManager) return;
+    if (state.callScreenEnabled) {
+      callManager.removeLocalTracks((track) => track.kind === "video" && state.screenStream?.getTracks().includes(track));
+      state.screenStream = null;
+      state.callScreenEnabled = false;
+      publishCallState(true);
+      return;
+    }
+
+    try {
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        state.lastError = "Screen sharing is not available in this browser.";
+        return;
       }
-    }, CALL_CHUNK_MS);
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      state.screenStream = stream;
+      state.callScreenEnabled = true;
+      callManager.addLocalStream(stream);
+      for (const track of stream.getVideoTracks()) {
+        track.onended = () => {
+          state.callScreenEnabled = false;
+          state.screenStream = null;
+          publishCallState(true);
+        };
+      }
+      publishCallState(true);
+    } catch {
+      state.lastError = "Screen sharing was cancelled.";
+    }
   }
 
   function tickCall(startedAt) {
@@ -1269,10 +1374,18 @@ export function useMessenger() {
 
   function endCall() {
     const roomId = state.callRoom;
-    if (state.callTimer) { clearTimeout(state.callTimer); state.callTimer = null; }
-    if (state.callRecorder) {
-      try { state.callRecorder.stop(); } catch { /* ignore */ }
-      state.callRecorder = null;
+    const wasInCall = state.inCall;
+    callManager?.close();
+    callManager = null;
+    state.remoteCallStreamsByUser = {};
+    state.remoteCallMediaByUser = {};
+    if (state.cameraStream) {
+      for (const t of state.cameraStream.getTracks()) t.stop();
+      state.cameraStream = null;
+    }
+    if (state.screenStream) {
+      for (const t of state.screenStream.getTracks()) t.stop();
+      state.screenStream = null;
     }
     if (state.callStream) {
       // If a memo is also recording off the same stream, let it finish first.
@@ -1283,12 +1396,15 @@ export function useMessenger() {
       state.callStream = null;
     }
     closeCallAnalyser();
-    if (state.inCall) send({ op: 98, d: { isVoiceChat: false } });
+    if (wasInCall) publishCallState(false);
     state.inCall = false;
     state.voiceEnabled = false;
     state.callRoom = "";
     state.callElapsed = 0;
     state.callMuted = false;
+    state.callCameraEnabled = false;
+    state.callScreenEnabled = false;
+    state.localCallMedia = { ...EMPTY_CALL_MEDIA };
 
     // Remove self from voice members locally.
     const me = sanitizeUsername(state.username);
@@ -1298,25 +1414,46 @@ export function useMessenger() {
     }
   }
 
+  function handleCallState(d) {
+    const roomId = sanitizeRoomId(d?.gameId);
+    const user = sanitizeUsername(d?.user);
+    if (!roomId || !user) return;
+
+    const members = new Set(state.voiceMembersByRoom[roomId] || []);
+    if (d.isVoiceChat === true) {
+      members.add(user);
+      updateRemoteMedia(user, d.media || { audio: true });
+      if (state.inCall && state.callRoom === roomId) callManager?.connectPeer(user);
+    } else {
+      members.delete(user);
+      callManager?.removePeer(user);
+      removeRemoteCallMedia(user);
+    }
+    state.voiceMembersByRoom[roomId] = [...members];
+  }
+
+  function handleCallSignal(d) {
+    if (!state.inCall || !callManager) return;
+    callManager.handleSignal({
+      gameId: sanitizeRoomId(d?.gameId),
+      to: sanitizeUsername(d?.to),
+      from: sanitizeUsername(d?.from),
+      type: d?.type,
+      sdp: typeof d?.sdp === "string" ? d.sdp : undefined,
+      candidate: d?.candidate
+    });
+  }
+
   function handleIncomingCallChunk(d, fromUser) {
+    // Backward compatibility for old clients still sending op 99 chunks.
     if (!d?.chunk) return;
     const roomId = sanitizeRoomId(d.gameId || state.activeRoom);
-    try {
-      const blob = base64ToBlob(d.chunk, d.mimeType || "audio/webm");
-      const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      audio.volume = Math.max(0, Math.min(1, callUserVolume(fromUser) / 100));
-      applyAudioOutput(audio);
-      audio.play().catch(() => { /* autoplay may be blocked before first gesture */ });
-      audio.onended = () => URL.revokeObjectURL(url);
-      if (fromUser && roomId) {
-        if (!state.speakingByRoom[roomId]) state.speakingByRoom[roomId] = {};
-        state.speakingByRoom[roomId][fromUser] = Date.now();
-        // Voice members inferred from activity — register even if we missed op 98
-        const members = state.voiceMembersByRoom[roomId] || [];
-        if (!members.includes(fromUser)) state.voiceMembersByRoom[roomId] = [...members, fromUser];
-      }
-    } catch { /* ignore chunk decode errors */ }
+    if (fromUser && roomId) {
+      if (!state.speakingByRoom[roomId]) state.speakingByRoom[roomId] = {};
+      state.speakingByRoom[roomId][fromUser] = Date.now();
+      const members = state.voiceMembersByRoom[roomId] || [];
+      if (!members.includes(fromUser)) state.voiceMembersByRoom[roomId] = [...members, fromUser];
+    }
   }
 
   function handleVoiceState(d) {
@@ -1324,6 +1461,10 @@ export function useMessenger() {
     if (!roomId) return;
     const user = d?.user;
     if (!user || d?.ok) return;    // our own op 98 ack has {ok} but no user — skip
+    if (d?.media) {
+      handleCallState(d);
+      return;
+    }
     const members = new Set(state.voiceMembersByRoom[roomId] || []);
     if (d.isVoiceChat === true) members.add(user);
     else members.delete(user);
@@ -1564,6 +1705,12 @@ export function useMessenger() {
       case 99:
         handleIncomingCallChunk(d, message.u);
         break;
+      case 110:
+        handleCallState(d);
+        break;
+      case 111:
+        handleCallSignal(d);
+        break;
       default:
         break;
     }
@@ -1578,6 +1725,12 @@ export function useMessenger() {
     }
     if (Array.isArray(d?.voicePlayers)) {
       state.voiceMembersByRoom[roomId] = d.voicePlayers;
+    }
+    if (Array.isArray(d?.callPlayers)) {
+      state.voiceMembersByRoom[roomId] = d.callPlayers.map((player) => sanitizeUsername(player?.user)).filter(Boolean);
+      for (const player of d.callPlayers) {
+        updateRemoteMedia(player?.user, player?.media);
+      }
     }
 
     if (d?.ok && !d?.system) {
@@ -1787,7 +1940,12 @@ export function useMessenger() {
     startCall,
     endCall,
     toggleMute,
+    toggleCamera,
+    toggleScreenShare,
     toggleVoice,
+    localPreviewStream,
+    remoteCallStream,
+    remoteVideoStream,
     toggleReaction,
     deleteMessage,
     findMessageById,

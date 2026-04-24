@@ -107,6 +107,8 @@ pub async fn process_message(
         98 => update_voice_chat(&state, &session_id, payload.d).await,
         99 => relay_voice_data(&state, &session_id, payload.d, payload.u).await,
         100 => update_mute_state(&state, &session_id, payload.d).await,
+        110 => update_call_media_state(&state, &session_id, payload.d).await,
+        111 => relay_call_signal(&state, &session_id, payload.d).await,
         101 => admin_status(&state, &session_id, payload.d).await,
         102 => admin_blacklist(&state, &session_id, payload.d).await,
         103 => admin_unblacklist(&state, &session_id, payload.d).await,
@@ -327,6 +329,7 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
 
     let roster = room_usernames(state, game_id).await;
     let voice_roster = room_voice_usernames(state, game_id).await;
+    let call_players = room_call_players(state, game_id).await;
 
     if !already_in {
         broadcast_to_room(
@@ -339,7 +342,8 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "system": true,
                     "gameId": game_id,
                     "players": roster.clone(),
-                    "voicePlayers": voice_roster.clone()
+                    "voicePlayers": voice_roster.clone(),
+                    "callPlayers": call_players.clone()
                 }
             }),
         )
@@ -357,6 +361,7 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "gameId": game_id,
                     "players": roster,
                     "voicePlayers": voice_roster,
+                    "callPlayers": call_players,
                     "alreadyJoined": already_in
                 }
             }),
@@ -1076,20 +1081,28 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
         .get("isVoiceChat")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let media = normalize_call_media(d.get("media"), is_voice_chat);
     let voice_result = {
         let mut players = state.players.write().await;
         if let Some(player) = players.get_mut(session_id) {
             player.is_voice_chat = is_voice_chat;
+            player.call_camera = media.1;
+            player.call_screen = media.2;
+            if !is_voice_chat {
+                player.call_camera = false;
+                player.call_screen = false;
+            }
             Ok((
                 player.username.clone(),
                 player.rooms.iter().cloned().collect::<Vec<_>>(),
+                call_media_json(player.is_voice_chat, player.call_camera, player.call_screen),
             ))
         } else {
             Err("You need to be identified before")
         }
     };
 
-    let (username, rooms) = match voice_result {
+    let (username, rooms, media_json) = match voice_result {
         Ok(values) => values,
         Err(message) => return respond_error(state, session_id, 98, message, request_id(&d)).await,
     };
@@ -1102,8 +1115,9 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
                 "op": 98,
                 "d": {
                     "gameId": game_id,
-                    "user": username,
-                    "isVoiceChat": is_voice_chat
+                    "user": username.clone(),
+                    "isVoiceChat": is_voice_chat,
+                    "media": media_json.clone()
                 }
             }),
         )
@@ -1217,6 +1231,124 @@ async fn relay_voice_data(
         let _ = target.send(Message::Text(encoded.clone().into()));
     }
 
+    false
+}
+
+async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let is_voice_chat = d
+        .get("isVoiceChat")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let (audio, camera, screen) = normalize_call_media(d.get("media"), is_voice_chat);
+
+    let update_result = {
+        let mut players = state.players.write().await;
+        if let Some(player) = players.get_mut(session_id) {
+            if player.username.is_empty() {
+                Err("You need to be identified before")
+            } else {
+                player.is_voice_chat = is_voice_chat;
+                player.call_camera = camera;
+                player.call_screen = screen;
+                if !is_voice_chat {
+                    player.call_camera = false;
+                    player.call_screen = false;
+                }
+                Ok((
+                    player.username.clone(),
+                    player.rooms.iter().cloned().collect::<Vec<_>>(),
+                    call_media_json(audio && is_voice_chat, player.call_camera, player.call_screen),
+                ))
+            }
+        } else {
+            Err("You need to be identified before")
+        }
+    };
+
+    let (username, rooms, media_json) = match update_result {
+        Ok(values) => values,
+        Err(message) => return respond_error(state, session_id, 110, message, request_id(&d)).await,
+    };
+
+    for game_id in rooms {
+        broadcast_to_room(
+            state,
+            &game_id,
+            json!({
+                "op": 110,
+                "d": {
+                    "gameId": game_id,
+                    "user": username.clone(),
+                    "isVoiceChat": is_voice_chat,
+                    "media": media_json.clone()
+                }
+            }),
+        )
+        .await;
+    }
+
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({ "op": 110, "d": { "ok": true } }), request_id(&d)),
+    )
+    .await;
+
+    false
+}
+
+async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let Some(game_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
+        return respond_error(state, session_id, 111, "Missing gameId", request_id(&d)).await;
+    };
+    if let Err(message) = validate_room_id(game_id) {
+        return respond_error(state, session_id, 111, message, request_id(&d)).await;
+    }
+
+    let Some(to_user) = d.get("to").and_then(Value::as_str).map(str::trim) else {
+        return respond_error(state, session_id, 111, "Missing target", request_id(&d)).await;
+    };
+    let signal_type = d
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if !matches!(signal_type, "offer" | "answer" | "ice") {
+        return respond_error(state, session_id, 111, "Invalid signal type", request_id(&d)).await;
+    }
+
+    let (from_user, target_tx) = {
+        let players = state.players.read().await;
+        let Some(sender) = players.get(session_id) else {
+            return respond_error(state, session_id, 111, "You need to be identified before", request_id(&d)).await;
+        };
+        if !sender.rooms.contains(game_id) || !sender.is_voice_chat {
+            return respond_error(state, session_id, 111, "Not in this call", request_id(&d)).await;
+        }
+
+        let target = players.values().find(|player| {
+            player.username == to_user && player.rooms.contains(game_id) && player.is_voice_chat
+        });
+        let Some(target) = target else {
+            return respond_error(state, session_id, 111, "Target is not in this call", request_id(&d)).await;
+        };
+        (sender.username.clone(), target.tx.clone())
+    };
+
+    let mut clean = json!({
+        "gameId": game_id,
+        "from": from_user,
+        "to": to_user,
+        "type": signal_type
+    });
+    if let Some(sdp) = d.get("sdp").and_then(Value::as_str) {
+        clean["sdp"] = json!(sdp.chars().take(128_000).collect::<String>());
+    }
+    if let Some(candidate) = d.get("candidate").filter(|value| value.is_object()) {
+        clean["candidate"] = candidate.clone();
+    }
+
+    let _ = target_tx.send(Message::Text(json!({ "op": 111, "d": clean }).to_string().into()));
     false
 }
 
@@ -1710,6 +1842,45 @@ async fn room_voice_usernames(state: &SharedState, game_id: &str) -> Vec<String>
         .filter(|player| player.rooms.contains(game_id) && player.is_voice_chat)
         .map(|player| player.username.clone())
         .collect()
+}
+
+async fn room_call_players(state: &SharedState, game_id: &str) -> Vec<Value> {
+    let players = state.players.read().await;
+    players
+        .values()
+        .filter(|player| player.rooms.contains(game_id) && player.is_voice_chat)
+        .map(|player| {
+            json!({
+                "user": player.username,
+                "isVoiceChat": player.is_voice_chat,
+                "media": call_media_json(player.is_voice_chat, player.call_camera, player.call_screen)
+            })
+        })
+        .collect()
+}
+
+fn normalize_call_media(value: Option<&Value>, fallback_audio: bool) -> (bool, bool, bool) {
+    let audio = value
+        .and_then(|media| media.get("audio"))
+        .and_then(Value::as_bool)
+        .unwrap_or(fallback_audio);
+    let camera = value
+        .and_then(|media| media.get("camera"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let screen = value
+        .and_then(|media| media.get("screen"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    (audio, camera, screen)
+}
+
+fn call_media_json(audio: bool, camera: bool, screen: bool) -> Value {
+    json!({
+        "audio": audio,
+        "camera": camera,
+        "screen": screen
+    })
 }
 
 pub async fn broadcast_to_room(state: &SharedState, game_id: &str, payload: Value) {

@@ -1,21 +1,21 @@
-<script setup>
+<script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 
 const props = defineProps({
   messenger: { type: Object, required: true }
 });
 
-const composerRef = ref(null);
-const fileInputRef = ref(null);
-const inputRef = ref(null);
-const emojiWrapRef = ref(null);
-const cameraVideoRef = ref(null);
-const cameraCanvasRef = ref(null);
+const composerRef = ref<HTMLElement | null>(null);
+const fileInputRef = ref<HTMLInputElement | null>(null);
+const inputRef = ref<HTMLInputElement | null>(null);
+const emojiWrapRef = ref<HTMLElement | null>(null);
+const cameraVideoRef = ref<HTMLVideoElement | null>(null);
+const cameraCanvasRef = ref<HTMLCanvasElement | null>(null);
 const pickerOpen = ref(false);
 const cameraOpen = ref(false);
 const cameraBusy = ref(false);
 const cameraError = ref("");
-let cameraStream = null;
+let cameraStream: MediaStream | null = null;
 
 const canSend = computed(() => props.messenger.state.messageInput.trim().length > 0 && !!props.messenger.state.activeRoom);
 const disabled = computed(() => !props.messenger.state.activeRoom);
@@ -57,7 +57,7 @@ function pastedExtension(mimeType) {
   return clean || "bin";
 }
 
-function namePastedFile(file, index) {
+function namePastedFile(file: File, index: number) {
   if (file.name) return file;
   const filename = `pasted-${Date.now()}-${index + 1}.${pastedExtension(file.type)}`;
   try {
@@ -70,34 +70,34 @@ function namePastedFile(file, index) {
   }
 }
 
-function filesFromClipboard(event) {
+function filesFromClipboard(event: ClipboardEvent): File[] {
   const clipboard = event.clipboardData;
   if (!clipboard) return [];
 
   const directFiles = Array.from(clipboard.files || []);
   const files = directFiles.length
     ? directFiles
-    : Array.from(clipboard.items || [])
+    : Array.from((clipboard.items || []) as DataTransferItemList)
         .filter((item) => item.kind === "file")
         .map((item) => item.getAsFile())
-        .filter(Boolean);
+        .filter((file): file is File => Boolean(file));
 
   return files.map(namePastedFile);
 }
 
-function isEditableElement(element) {
+function isEditableElement(element: Element | null) {
   if (!element || element === document.body || element === document.documentElement) return false;
   if (element.isContentEditable) return true;
   return ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName);
 }
 
-async function onPaste(event) {
+async function onPaste(event: ClipboardEvent) {
   if (disabled.value || recording.value) return;
   const files = filesFromClipboard(event);
   if (!files.length) return;
 
   const target = event.target;
-  const isComposerPaste = !!composerRef.value?.contains(target);
+  const isComposerPaste = target instanceof Node && !!composerRef.value?.contains(target);
   if (!isComposerPaste && isEditableElement(document.activeElement)) return;
 
   event.preventDefault();
@@ -122,12 +122,13 @@ async function pickCamera() {
   await openCamera();
 }
 
-async function onFile(event) {
-  const files = Array.from(event.target.files || []);
+async function onFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files || []);
   for (const f of files) {
     await props.messenger.sendAttachment(f);
   }
-  event.target.value = "";
+  input.value = "";
 }
 
 function startHold() {
@@ -150,7 +151,7 @@ function togglePicker() {
   pickerOpen.value = !pickerOpen.value;
 }
 
-async function insertEmoji(emoji) {
+async function insertEmoji(emoji: string) {
   const input = inputRef.value;
   const current = props.messenger.state.messageInput || "";
 
@@ -175,13 +176,13 @@ async function insertEmoji(emoji) {
   try { input.setSelectionRange(pos, pos); } catch { /* some input types throw */ }
 }
 
-function onDocMouseDown(event) {
+function onDocMouseDown(event: MouseEvent) {
   if (!pickerOpen.value) return;
   if (!emojiWrapRef.value) return;
-  if (!emojiWrapRef.value.contains(event.target)) pickerOpen.value = false;
+  if (!(event.target instanceof Node) || !emojiWrapRef.value.contains(event.target)) pickerOpen.value = false;
 }
 
-function onDocKey(event) {
+function onDocKey(event: KeyboardEvent) {
   if (pickerOpen.value && event.key === "Escape") pickerOpen.value = false;
   if (cameraOpen.value && event.key === "Escape") closeCamera();
 }
@@ -240,9 +241,14 @@ async function capturePhoto() {
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    cameraError.value = "Could not capture photo.";
+    cameraBusy.value = false;
+    return;
+  }
   ctx.drawImage(video, 0, 0, width, height);
 
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
   if (!blob) {
     cameraError.value = "Could not capture photo.";
     cameraBusy.value = false;

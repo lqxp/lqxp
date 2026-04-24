@@ -142,6 +142,8 @@ async fn register_connection(
             tx,
             rooms: HashSet::new(),
             is_voice_chat: false,
+            call_camera: false,
+            call_screen: false,
             version: "unknown".to_owned(),
             last_message_timestamp: None,
             last_voice_chunk_timestamp: None,

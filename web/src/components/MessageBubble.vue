@@ -1,4 +1,4 @@
-<script setup>
+<script setup lang="ts">
 import { computed, ref } from "vue";
 import AudioPlayer from "@/components/AudioPlayer.vue";
 import ImageViewer from "@/components/ImageViewer.vue";

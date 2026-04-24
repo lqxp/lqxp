@@ -1,4 +1,4 @@
-<script setup>
+<script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
 const props = defineProps({
@@ -65,6 +65,41 @@ function callElapsed() {
 function volumeOf(username) {
   return props.messenger.callUserVolume(username);
 }
+
+function inputValue(event) {
+  return event.target?.value ?? "";
+}
+
+function mediaOf(username) {
+  if (isSelf(username)) return props.messenger.state.localCallMedia || {};
+  return props.messenger.state.remoteCallMediaByUser[username] || {};
+}
+
+function hasVideo(username) {
+  const media = mediaOf(username);
+  return Boolean(media.camera || media.screen);
+}
+
+function bindLocalPreview(el, kind) {
+  if (!el) return;
+  const stream = props.messenger.localPreviewStream(kind);
+  if (el.srcObject !== stream) el.srcObject = stream;
+}
+
+function bindRemoteVideo(el, username) {
+  if (!el) return;
+  const stream = props.messenger.remoteVideoStream(username);
+  if (el.srcObject !== stream) el.srcObject = stream;
+}
+
+function bindRemoteAudio(el, username) {
+  if (!el) return;
+  const stream = props.messenger.remoteCallStream(username);
+  if (el.srcObject !== stream) el.srcObject = stream;
+  el.volume = Math.max(0, Math.min(1, volumeOf(username) / 100));
+  props.messenger.applyAudioOutput(el);
+  el.play?.().catch?.(() => {});
+}
 </script>
 
 <template>
@@ -87,6 +122,24 @@ function volumeOf(username) {
           <svg v-else viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V5a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
         </button>
         <button
+          class="icon-btn"
+          :class="{ 'icon-btn--active': messenger.state.callCameraEnabled }"
+          type="button"
+          :aria-label="messenger.state.callCameraEnabled ? 'Stop camera' : 'Start camera'"
+          @click="messenger.toggleCamera"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10.5 20 7v10l-5-3.5V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v3.5Z"/></svg>
+        </button>
+        <button
+          class="icon-btn"
+          :class="{ 'icon-btn--active': messenger.state.callScreenEnabled }"
+          type="button"
+          :aria-label="messenger.state.callScreenEnabled ? 'Stop screen share' : 'Share screen'"
+          @click="messenger.toggleScreenShare"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><path d="m9 10 3-3 3 3"/><path d="M12 7v7"/></svg>
+        </button>
+        <button
           class="icon-btn icon-btn--danger"
           type="button"
           aria-label="End call"
@@ -105,16 +158,48 @@ function volumeOf(username) {
         :class="{
           'is-speaking': isSpeaking(u),
           'is-self': isSelf(u),
-          'is-muted': isSelf(u) && messenger.state.callMuted
+          'is-muted': isSelf(u) && messenger.state.callMuted,
+          'has-video': hasVideo(u)
         }"
       >
+        <div v-if="hasVideo(u)" class="calltile__video">
+          <video
+            v-if="isSelf(u) && messenger.state.callCameraEnabled"
+            :ref="(el) => bindLocalPreview(el, 'camera')"
+            autoplay
+            muted
+            playsinline
+          ></video>
+          <video
+            v-else-if="isSelf(u) && messenger.state.callScreenEnabled"
+            :ref="(el) => bindLocalPreview(el, 'screen')"
+            autoplay
+            muted
+            playsinline
+          ></video>
+          <video
+            v-else
+            :ref="(el) => bindRemoteVideo(el, u)"
+            autoplay
+            playsinline
+          ></video>
+        </div>
         <span
+          v-else
           class="calltile__avatar"
           :class="`avatar--${messenger.accentFor(u)}`"
         >{{ initialsOf(u) }}</span>
         <span class="calltile__name">
           {{ u }}<span v-if="isSelf(u)" class="calltile__you"> (you)</span>
+          <span v-if="mediaOf(u).camera" class="calltile__media">cam</span>
+          <span v-if="mediaOf(u).screen" class="calltile__media">screen</span>
         </span>
+        <audio
+          v-if="!isSelf(u)"
+          :ref="(el) => bindRemoteAudio(el, u)"
+          autoplay
+          playsinline
+        ></audio>
         <label v-if="!isSelf(u)" class="calltile__volume" :aria-label="`${u} volume`">
           <svg viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>
           <input
@@ -123,7 +208,7 @@ function volumeOf(username) {
             max="100"
             step="1"
             :value="volumeOf(u)"
-            @input="messenger.setCallUserVolume(u, $event.target.value)"
+            @input="messenger.setCallUserVolume(u, inputValue($event))"
           />
           <span>{{ volumeOf(u) }}%</span>
         </label>
