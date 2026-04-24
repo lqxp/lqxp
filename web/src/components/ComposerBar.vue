@@ -164,8 +164,9 @@ async function insertEmoji(emoji) {
   const before = current.slice(0, start);
   const after = current.slice(end);
   let next = before + emoji + after;
-  // Respect the same 200-char cap the composer enforces via maxlength
-  if (next.length > 200) next = next.slice(0, 200);
+  // Respect the same character cap the composer enforces via maxlength.
+  const limit = props.messenger.MESSAGE_LIMIT || 2000;
+  if (next.length > limit) next = next.slice(0, limit);
   props.messenger.state.messageInput = next;
 
   await nextTick();
@@ -302,16 +303,17 @@ onBeforeUnmount(() => {
       </button>
 
       <label class="composer__input">
-        <input
+        <textarea
           ref="inputRef"
           v-model="messenger.state.messageInput"
-          maxlength="200"
+          :maxlength="messenger.MESSAGE_LIMIT"
+          rows="1"
           :placeholder="disabled ? 'Join a room to start messaging' : 'Message'"
           :disabled="disabled"
           autocomplete="off"
           spellcheck="false"
           @keydown.enter.exact.prevent="send"
-        />
+        ></textarea>
         <span class="composer__emoji-wrap" ref="emojiWrapRef">
           <button
             class="icon-btn"

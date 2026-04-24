@@ -5,7 +5,7 @@ const props = defineProps({
   messenger: { type: Object, required: true }
 });
 
-const name = computed(() => props.messenger.activeConversation.value?.name || props.messenger.roomLabel.value);
+const name = computed(() => props.messenger.displayRoomName(props.messenger.state.activeRoom));
 const accent = computed(() => props.messenger.activeConversation.value?.accent || "slate");
 
 const initials = computed(() => {
@@ -34,10 +34,12 @@ function toggleCall() {
 }
 
 function removeHere() {
-  const id = props.messenger.roomLabel.value;
+  const id = props.messenger.state.activeRoom;
   if (!id) return;
-  if (!confirm(`Remove conversation "${id}" and its messages?`)) return;
-  props.messenger.removeRoom(id);
+  const label = props.messenger.displayRoomName(id);
+  const suffix = props.messenger.state.deleteMessagesOnLeave ? " Local messages will be deleted." : "";
+  if (!confirm(`Leave "${label}"?${suffix}`)) return;
+  props.messenger.leaveRoom(id);
 }
 </script>
 

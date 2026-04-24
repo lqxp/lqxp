@@ -6,6 +6,7 @@ const MAX_ROOMS_SHOWN = 100;
 const MAX_HISTORY_PER_ROOM = 500;
 const ROOM_ID_MIN_LENGTH = 8;
 const ROOM_ID_MAX_LENGTH = 64;
+const MESSAGE_LIMIT = 2000;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const CALL_CHUNK_MS = 800;
 const RANDOM_ROOM_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -157,7 +158,11 @@ function loadPersisted() {
       unreadByRoom,
       selectedAudioInputId: String(raw.selectedAudioInputId || ""),
       selectedAudioOutputId: String(raw.selectedAudioOutputId || ""),
-      microphoneThreshold: Math.max(0, Math.min(100, Number(raw.microphoneThreshold) || 0))
+      microphoneThreshold: Math.max(0, Math.min(100, Number(raw.microphoneThreshold) || 0)),
+      deleteMessagesOnLeave: Boolean(raw.deleteMessagesOnLeave),
+      streamerMode: Boolean(raw.streamerMode),
+      messageSoundEnabled: Boolean(raw.messageSoundEnabled),
+      callUserVolumes: sanitizeCallUserVolumes(raw.callUserVolumes)
     };
   } catch {
     return {
@@ -168,9 +173,24 @@ function loadPersisted() {
       unreadByRoom: {},
       selectedAudioInputId: "",
       selectedAudioOutputId: "",
-      microphoneThreshold: 0
+      microphoneThreshold: 0,
+      deleteMessagesOnLeave: false,
+      streamerMode: false,
+      messageSoundEnabled: false,
+      callUserVolumes: {}
     };
   }
+}
+
+function sanitizeCallUserVolumes(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const next = {};
+  for (const [name, value] of Object.entries(raw)) {
+    const key = sanitizeUsername(name);
+    if (!key) continue;
+    next[key] = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+  }
+  return next;
 }
 
 function stripAttachmentDataForStorage(arr) {
@@ -198,7 +218,11 @@ function savePersisted(state) {
         unreadByRoom: state.unreadByRoom,
         selectedAudioInputId: state.selectedAudioInputId,
         selectedAudioOutputId: state.selectedAudioOutputId,
-        microphoneThreshold: state.microphoneThreshold
+        microphoneThreshold: state.microphoneThreshold,
+        deleteMessagesOnLeave: state.deleteMessagesOnLeave,
+        streamerMode: state.streamerMode,
+        messageSoundEnabled: state.messageSoundEnabled,
+        callUserVolumes: sanitizeCallUserVolumes(state.callUserVolumes)
       })
     );
   } catch {
@@ -389,6 +413,10 @@ export function useMessenger() {
     selectedAudioInputId: persisted.selectedAudioInputId,
     selectedAudioOutputId: persisted.selectedAudioOutputId,
     microphoneThreshold: persisted.microphoneThreshold,
+    deleteMessagesOnLeave: persisted.deleteMessagesOnLeave,
+    streamerMode: persisted.streamerMode,
+    messageSoundEnabled: persisted.messageSoundEnabled,
+    callUserVolumes: persisted.callUserVolumes,
     audioDevicesLoading: false,
     audioDevicesPermission: "unknown",
     micTestActive: false,
@@ -421,6 +449,7 @@ export function useMessenger() {
   let micTestAnalyser = null;
   let micTestAnalyserData = null;
   let micTestSmoothedLevel = 0;
+  let notificationAudioContext = null;
 
   function attachmentUrlFor(message) {
     if (!message?.attachment?.dataB64) return null;
@@ -437,7 +466,7 @@ export function useMessenger() {
   }
 
   const roomLabel = computed(() => state.activeRoom);
-  const roomTitle = computed(() => state.activeRoom || "No conversation");
+  const roomTitle = computed(() => state.activeRoom ? displayRoomName(state.activeRoom) : "No conversation");
 
   const connectionLabel = computed(() => {
     if (state.connected && state.identified) return "online";
@@ -462,7 +491,7 @@ export function useMessenger() {
       .filter((r) => !query || r.roomId.toLowerCase().includes(query) || r.lastPreview.toLowerCase().includes(query))
       .map((r) => ({
         roomId: r.roomId,
-        name: r.roomId,
+        name: displayRoomName(r.roomId),
         accent: accentFor(r.roomId),
         preview: r.lastPreview || "No messages yet",
         timestampLabel: formatSidebarTime(r.lastTimestamp),
@@ -478,7 +507,7 @@ export function useMessenger() {
     if (found) return found;
     return {
       roomId: state.activeRoom,
-      name: state.activeRoom,
+      name: displayRoomName(state.activeRoom),
       accent: accentFor(state.activeRoom),
       active: true,
       preview: "",
@@ -492,6 +521,79 @@ export function useMessenger() {
 
   function persist() {
     savePersisted(state);
+  }
+
+  function displayRoomName(roomId) {
+    const id = sanitizeRoomId(roomId);
+    if (!id) return "";
+    return state.streamerMode ? "Hidden channel" : id;
+  }
+
+  function setDeleteMessagesOnLeave(value) {
+    state.deleteMessagesOnLeave = Boolean(value);
+    persist();
+  }
+
+  function setStreamerMode(value) {
+    state.streamerMode = Boolean(value);
+    persist();
+  }
+
+  function setMessageSoundEnabled(value) {
+    state.messageSoundEnabled = Boolean(value);
+    if (state.messageSoundEnabled) ensureNotificationAudio();
+    persist();
+  }
+
+  function callUserVolume(username) {
+    const key = sanitizeUsername(username);
+    if (!key) return 100;
+    const value = Number(state.callUserVolumes[key]);
+    return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 100;
+  }
+
+  function setCallUserVolume(username, value) {
+    const key = sanitizeUsername(username);
+    if (!key) return;
+    state.callUserVolumes[key] = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+    persist();
+  }
+
+  function ensureNotificationAudio() {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return null;
+      if (!notificationAudioContext) notificationAudioContext = new AudioCtx();
+      if (notificationAudioContext.state === "suspended") {
+        notificationAudioContext.resume().catch(() => {});
+      }
+      return notificationAudioContext;
+    } catch {
+      return null;
+    }
+  }
+
+  function playMessageNotificationSound() {
+    if (!state.messageSoundEnabled) return;
+    const context = ensureNotificationAudio();
+    if (!context) return;
+    try {
+      const now = context.currentTime;
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(740, now);
+      oscillator.frequency.exponentialRampToValueAtTime(980, now + 0.08);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.08, now + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(now);
+      oscillator.stop(now + 0.2);
+    } catch {
+      /* notification audio is best-effort */
+    }
   }
 
   function audioConstraints() {
@@ -688,6 +790,27 @@ export function useMessenger() {
       }
     } else {
       state.rooms.push({ roomId: id, lastPreview: preview, lastTimestamp: ts, lastSender: sender });
+    }
+    persist();
+  }
+
+  function clearRoomMessages(roomId) {
+    const id = sanitizeRoomId(roomId);
+    if (!id) return;
+    for (const message of state.messagesByRoom[id] || []) {
+      try {
+        const url = attachmentUrlCache.get(message.messageId);
+        if (url) URL.revokeObjectURL(url);
+      } catch { /* ignore */ }
+      attachmentUrlCache.delete(message.messageId);
+    }
+    delete state.messagesByRoom[id];
+    delete state.unreadByRoom[id];
+    const room = state.rooms.find((r) => r.roomId === id);
+    if (room) {
+      room.lastPreview = "";
+      room.lastSender = "";
+      room.lastTimestamp = Date.now();
     }
     persist();
   }
@@ -900,7 +1023,7 @@ export function useMessenger() {
     const roomId = state.activeRoom;
     if (!text || !roomId) return;
     if (state.connected && state.identified && state.joinedRooms.includes(roomId)) {
-      const d = { text, gameId: roomId };
+      const d = { text: text.slice(0, MESSAGE_LIMIT), gameId: roomId };
       if (state.replyingTo?.messageId) d.replyToMessageId = state.replyingTo.messageId;
       send({ op: 7, d });
       state.messageInput = "";
@@ -931,7 +1054,7 @@ export function useMessenger() {
       send({
         op: 7,
         d: {
-          text: caption ? String(caption).trim().slice(0, 200) : "",
+          text: caption ? String(caption).trim().slice(0, MESSAGE_LIMIT) : "",
           gameId: roomId,
           ...(state.replyingTo?.messageId ? { replyToMessageId: state.replyingTo.messageId } : {}),
           attachment: {
@@ -1161,6 +1284,7 @@ export function useMessenger() {
       const blob = base64ToBlob(d.chunk, d.mimeType || "audio/webm");
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
+      audio.volume = Math.max(0, Math.min(1, callUserVolume(fromUser) / 100));
       applyAudioOutput(audio);
       audio.play().catch(() => { /* autoplay may be blocked before first gesture */ });
       audio.onended = () => URL.revokeObjectURL(url);
@@ -1309,25 +1433,28 @@ export function useMessenger() {
 
   function pushMessageToRoom(roomId, normalized) {
     const id = sanitizeRoomId(roomId);
-    if (!id) return;
+    if (!id) return false;
     if (!state.messagesByRoom[id]) state.messagesByRoom[id] = [];
     const arr = state.messagesByRoom[id];
     const index = arr.findIndex((m) => m.messageId === normalized.messageId);
     if (index === -1) {
       arr.push(normalized);
       if (arr.length > MAX_HISTORY_PER_ROOM) arr.splice(0, arr.length - MAX_HISTORY_PER_ROOM);
+      return true;
     } else {
       arr[index] = normalized;
+      return false;
     }
   }
 
   function upsertMessage(message) {
     const roomId = sanitizeRoomId(message.roomId || state.activeRoom);
     const normalized = normalizeMessage(message, roomId);
-    pushMessageToRoom(roomId, normalized);
+    const added = pushMessageToRoom(roomId, normalized);
     touchRoom(roomId, normalized);
 
     const mine = isOwnMessage(normalized);
+    if (added && !mine) playMessageNotificationSound();
     if (!mine && roomId !== state.activeRoom) {
       state.unreadByRoom[roomId] = (state.unreadByRoom[roomId] || 0) + 1;
     }
@@ -1444,6 +1571,7 @@ export function useMessenger() {
 
     if (d?.ok) {
       state.joinedRooms = state.joinedRooms.filter((r) => r !== roomId);
+      if (state.deleteMessagesOnLeave) clearRoomMessages(roomId);
       if (roomId === state.activeRoom) state.activeRoom = "";
     } else if (d?.left) {
       const arr = state.usersByRoom[roomId];
@@ -1476,7 +1604,11 @@ export function useMessenger() {
       activeRoom: state.activeRoom,
       rooms: state.rooms,
       messagesByRoom: state.messagesByRoom,
-      unreadByRoom: state.unreadByRoom
+      unreadByRoom: state.unreadByRoom,
+      deleteMessagesOnLeave: state.deleteMessagesOnLeave,
+      streamerMode: state.streamerMode,
+      messageSoundEnabled: state.messageSoundEnabled,
+      callUserVolumes: sanitizeCallUserVolumes(state.callUserVolumes)
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -1548,6 +1680,10 @@ export function useMessenger() {
         if (typeof data.activeRoom === "string") {
           state.activeRoom = isValidRoomId(data.activeRoom) ? sanitizeRoomId(data.activeRoom) : "";
         }
+        if (typeof data.deleteMessagesOnLeave === "boolean") state.deleteMessagesOnLeave = data.deleteMessagesOnLeave;
+        if (typeof data.streamerMode === "boolean") state.streamerMode = data.streamerMode;
+        if (typeof data.messageSoundEnabled === "boolean") state.messageSoundEnabled = data.messageSoundEnabled;
+        state.callUserVolumes = sanitizeCallUserVolumes(data.callUserVolumes);
 
         persist();
         state.lastError = "";
@@ -1566,6 +1702,7 @@ export function useMessenger() {
 
   singleton = {
     QUICK_REACTIONS,
+    MESSAGE_LIMIT,
     state,
     roomTitle,
     roomLabel,
@@ -1583,6 +1720,7 @@ export function useMessenger() {
     formatDuration,
     buildWaveform,
     attachmentUrlFor,
+    displayRoomName,
     validateRoomId,
     isValidRoomId,
 
@@ -1594,6 +1732,11 @@ export function useMessenger() {
     setAudioInput,
     setAudioOutput,
     setMicrophoneThreshold,
+    setDeleteMessagesOnLeave,
+    setStreamerMode,
+    setMessageSoundEnabled,
+    callUserVolume,
+    setCallUserVolume,
     applyAudioOutput,
     connect,
     disconnect,

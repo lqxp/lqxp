@@ -33,7 +33,7 @@ function onComposeKey(event) {
 function removeConversation(event, roomId) {
   event.stopPropagation();
   event.preventDefault();
-  if (!confirm(`Remove conversation "${roomId}" and its messages?`)) return;
+  if (!confirm(`Remove conversation "${props.messenger.displayRoomName(roomId)}" and its messages?`)) return;
   props.messenger.removeRoom(roomId);
 }
 
@@ -134,7 +134,7 @@ function openSettings() {
           <button
             class="conv__remove"
             type="button"
-            :aria-label="`Remove ${c.roomId}`"
+            :aria-label="`Remove ${c.name}`"
             @click="removeConversation($event, c.roomId)"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>

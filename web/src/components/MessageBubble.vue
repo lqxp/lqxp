@@ -53,6 +53,66 @@ const replyText = computed(() => {
   return target.text || "Message";
 });
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function safeHref(value) {
+  const raw = String(value || "").trim();
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    if (["http:", "https:", "mailto:"].includes(parsed.protocol)) return escapeHtml(raw);
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+function codeBlockLabel(value) {
+  const label = String(value || "").trim().replace(/^```+/, "").replace(/[`<>]/g, "");
+  return label.slice(0, 40);
+}
+
+function markdown(value) {
+  const tokens = [];
+  const hold = (html) => {
+    const token = `@@md-${tokens.length}@@`;
+    tokens.push([token, html]);
+    return token;
+  };
+
+  let html = escapeHtml(value);
+  html = html.replace(/```([^\n`]*)\n([\s\S]*?)```/g, (_, rawLabel, code) => {
+    const label = codeBlockLabel(rawLabel);
+    const title = label ? `<div class="codeblock__head">${escapeHtml(label)}</div>` : "";
+    return hold(`<div class="codeblock">${title}<pre><code>${code.replace(/\n$/, "")}</code></pre></div>`);
+  });
+  html = html.replace(/^(#{1,4})[ \t]+(.+)$/gm, (_, marks, title) => (
+    `<h${marks.length} class="markdown__h markdown__h${marks.length}">${title.trim()}</h${marks.length}>`
+  ));
+  html = html.replace(/`([^`\n]+)`/g, (_, code) => hold(`<code>${code}</code>`));
+  html = html.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (match, label, href) => {
+    const safe = safeHref(href);
+    if (!safe) return match;
+    return hold(`<a href="${safe}" target="_blank" rel="noopener noreferrer">${label}</a>`);
+  });
+  html = html
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_\n]+)__/g, "<strong>$1</strong>")
+    .replace(/~~([^~\n]+)~~/g, "<del>$1</del>")
+    .replace(/(^|[^\*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/(^|[^_])_([^_\n]+)_/g, "$1<em>$2</em>")
+    .replace(/\n/g, "<br>");
+
+  for (const [token, value] of tokens) html = html.replaceAll(token, value);
+  return html;
+}
+
 function download() {
   if (!attachmentUrl.value || !props.message.attachment) return;
   const a = document.createElement("a");
@@ -203,7 +263,7 @@ function onDelete() {
           :size-label="messenger.formatSize(message.attachment.size)"
           @close="imageViewerOpen = false"
         />
-        <div v-if="message.text" class="bubble__text">{{ message.text }}</div>
+        <div v-if="message.text" class="bubble__text markdown" v-html="markdown(message.text)"></div>
       </template>
 
       <template v-else-if="attachmentKind === 'audio' && attachmentUrl">
@@ -214,7 +274,7 @@ function onDelete() {
           :fallback-duration="message.voiceDuration || ''"
           :messenger="messenger"
         />
-        <div v-if="message.text && !message.text.startsWith('[voice:')" class="bubble__text">{{ message.text }}</div>
+        <div v-if="message.text && !message.text.startsWith('[voice:')" class="bubble__text markdown" v-html="markdown(message.text)"></div>
       </template>
 
       <template v-else-if="attachmentKind === 'file' && message.attachment">
@@ -233,11 +293,11 @@ function onDelete() {
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           </span>
         </button>
-        <div v-if="message.text" class="bubble__text">{{ message.text }}</div>
+        <div v-if="message.text" class="bubble__text markdown" v-html="markdown(message.text)"></div>
       </template>
 
       <template v-else>
-        <div class="bubble__text">{{ message.text }}</div>
+        <div class="bubble__text markdown" v-html="markdown(message.text)"></div>
       </template>
 
       <a v-if="preview && !deleted" :href="preview.url" target="_blank" rel="noopener noreferrer" class="embed">

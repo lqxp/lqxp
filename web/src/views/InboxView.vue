@@ -13,6 +13,7 @@ const messenger = useMessenger();
 const hasActive = computed(() => !!messenger.roomLabel.value);
 const inCall = computed(() => messenger.state.inCall);
 const callRoom = computed(() => messenger.state.callRoom);
+const callRoomLabel = computed(() => messenger.displayRoomName(callRoom.value));
 const callRoomDifferent = computed(() => inCall.value && callRoom.value !== messenger.state.activeRoom);
 const callElapsed = computed(() => messenger.formatDuration(messenger.state.callElapsed));
 
@@ -55,7 +56,7 @@ function goToCallRoom() {
 
     <div v-if="callRoomDifferent" class="call-pip" @click="goToCallRoom">
       <span class="call-dot"></span>
-      <span>In call · {{ callRoom }} · {{ callElapsed }}</span>
+      <span>In call · {{ callRoomLabel }} · {{ callElapsed }}</span>
       <button type="button" class="btn--ghost" @click.stop="messenger.endCall">end</button>
     </div>
 

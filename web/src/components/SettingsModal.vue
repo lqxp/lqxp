@@ -19,6 +19,8 @@ const meInitials = computed(() => initialsOf(props.messenger.state.username));
 
 const sections = [
   { id: "profile", label: "Profile" },
+  { id: "privacy", label: "Privacy" },
+  { id: "notifications", label: "Notifications" },
   { id: "calls", label: "Calls" },
   { id: "backups", label: "Backups" },
   { id: "about", label: "About" }
@@ -125,6 +127,8 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
           @click="activeSection = section.id"
         >
           <svg v-if="section.id === 'profile'" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+          <svg v-else-if="section.id === 'privacy'" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.5 2.9 8.5 7 10 4.1-1.5 7-5.5 7-10V6l-7-3Z"/><path d="M9.5 12.5 11 14l3.5-4"/></svg>
+          <svg v-else-if="section.id === 'notifications'" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9Z"/><path d="M10 21h4"/></svg>
           <svg v-else-if="section.id === 'calls'" viewBox="0 0 24 24"><path d="M7.6 10.8a14.5 14.5 0 0 0 5.6 5.6l1.9-1.9a1.5 1.5 0 0 1 1.5-.37c1.03.34 2.1.52 3.2.52.83 0 1.5.67 1.5 1.5v3.05c0 .83-.67 1.5-1.5 1.5C10.45 20.7 3.3 13.55 3.3 4.2c0-.83.67-1.5 1.5-1.5h3.05c.83 0 1.5.67 1.5 1.5 0 1.1.18 2.17.52 3.2.17.53.03 1.1-.37 1.5l-1.9 1.9Z"/></svg>
           <svg v-else-if="section.id === 'backups'" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m6 9 6-6 6 6"/><path d="M5 21h14"/></svg>
           <svg v-else viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
@@ -178,6 +182,45 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
         <p class="settings-note">
           Your profile and changes to it will be visible to people you message.
         </p>
+      </section>
+
+      <section v-else-if="activeSection === 'privacy'" class="settings-page">
+        <div class="settings-group">
+          <h4>Privacy</h4>
+          <label class="settings-check">
+            <input
+              type="checkbox"
+              :checked="messenger.state.deleteMessagesOnLeave"
+              @change="messenger.setDeleteMessagesOnLeave($event.target.checked)"
+            />
+            <span>Delete local room messages when leaving</span>
+          </label>
+          <label class="settings-check">
+            <input
+              type="checkbox"
+              :checked="messenger.state.streamerMode"
+              @change="messenger.setStreamerMode($event.target.checked)"
+            />
+            <span>Streamer mode</span>
+          </label>
+          <p class="settings-note">
+            Streamer mode hides room IDs in the interface while keeping your rooms connected.
+          </p>
+        </div>
+      </section>
+
+      <section v-else-if="activeSection === 'notifications'" class="settings-page">
+        <div class="settings-group">
+          <h4>Notifications</h4>
+          <label class="settings-check">
+            <input
+              type="checkbox"
+              :checked="messenger.state.messageSoundEnabled"
+              @change="messenger.setMessageSoundEnabled($event.target.checked)"
+            />
+            <span>Play a sound for new messages</span>
+          </label>
+        </div>
       </section>
 
       <section v-else-if="activeSection === 'calls'" class="settings-page">

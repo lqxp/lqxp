@@ -61,6 +61,10 @@ function isSpeaking(username) {
 function callElapsed() {
   return props.messenger.formatDuration(props.messenger.state.callElapsed);
 }
+
+function volumeOf(username) {
+  return props.messenger.callUserVolume(username);
+}
 </script>
 
 <template>
@@ -68,7 +72,7 @@ function callElapsed() {
     <header class="callpanel__head">
       <div class="callpanel__meta">
         <span class="call-dot"></span>
-        <span class="callpanel__title">Voice — {{ callRoom }}</span>
+        <span class="callpanel__title">Voice — {{ messenger.displayRoomName(callRoom) }}</span>
         <span class="callpanel__time">{{ callElapsed() }}</span>
       </div>
       <div class="callpanel__actions">
@@ -111,6 +115,18 @@ function callElapsed() {
         <span class="calltile__name">
           {{ u }}<span v-if="isSelf(u)" class="calltile__you"> (you)</span>
         </span>
+        <label v-if="!isSelf(u)" class="calltile__volume" :aria-label="`${u} volume`">
+          <svg viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            :value="volumeOf(u)"
+            @input="messenger.setCallUserVolume(u, $event.target.value)"
+          />
+          <span>{{ volumeOf(u) }}%</span>
+        </label>
         <span v-if="isSelf(u) && messenger.state.callMuted" class="calltile__muted-badge" aria-label="muted">
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><path d="M15 9.34V5a3 3 0 0 0-5.94-.6"/></svg>
         </span>

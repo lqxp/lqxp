@@ -18,6 +18,7 @@ const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_ATTACHMENT_B64_LEN: usize = ((MAX_ATTACHMENT_BYTES + 2) / 3) * 4 + 4;
 const MAX_FILENAME_LEN: usize = 128;
 const MAX_MIMETYPE_LEN: usize = 96;
+const MAX_MESSAGE_CHARS: usize = 2000;
 const MIN_ROOM_ID_LEN: usize = 8;
 const MAX_ROOM_ID_LEN: usize = 64;
 // Voice call chunks are ~800ms of Opus at 64–128kbps → 6–13KB raw.
@@ -479,7 +480,7 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
         Err(message) => return respond_error(state, session_id, 7, message, request_id(&d)).await,
     };
 
-    let trimmed = text.trim().chars().take(200).collect::<String>();
+    let trimmed = text.trim().chars().take(MAX_MESSAGE_CHARS).collect::<String>();
     if trimmed.is_empty() && attachment.is_none() {
         return respond_error(state, session_id, 7, "Empty message", request_id(&d)).await;
     }
