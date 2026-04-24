@@ -5,6 +5,7 @@ const props = defineProps({
   messenger: { type: Object, required: true }
 });
 
+const composerRef = ref(null);
 const fileInputRef = ref(null);
 const inputRef = ref(null);
 const emojiWrapRef = ref(null);
@@ -32,6 +33,79 @@ const EMOJIS = [
   "❤️","🧡","💛","💚","💙","💜","🖤","🤍","💔","💘",
   "🔥","✨","⭐","🎉","🎊","💯","💢","💥","💫","☕"
 ];
+
+function pastedExtension(mimeType) {
+  const type = String(mimeType || "").toLowerCase().split(";")[0];
+  const known = {
+    "application/gzip": "gz",
+    "application/pdf": "pdf",
+    "application/zip": "zip",
+    "audio/mpeg": "mp3",
+    "audio/ogg": "ogg",
+    "audio/wav": "wav",
+    "image/gif": "gif",
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "text/plain": "txt",
+    "video/mp4": "mp4",
+    "video/webm": "webm"
+  };
+  if (known[type]) return known[type];
+  const subtype = type.includes("/") ? type.split("/").pop() : "";
+  const clean = String(subtype || "").replace(/[^a-z0-9]/g, "");
+  return clean || "bin";
+}
+
+function namePastedFile(file, index) {
+  if (file.name) return file;
+  const filename = `pasted-${Date.now()}-${index + 1}.${pastedExtension(file.type)}`;
+  try {
+    return new File([file], filename, {
+      type: file.type || "application/octet-stream",
+      lastModified: file.lastModified || Date.now()
+    });
+  } catch {
+    return file;
+  }
+}
+
+function filesFromClipboard(event) {
+  const clipboard = event.clipboardData;
+  if (!clipboard) return [];
+
+  const directFiles = Array.from(clipboard.files || []);
+  const files = directFiles.length
+    ? directFiles
+    : Array.from(clipboard.items || [])
+        .filter((item) => item.kind === "file")
+        .map((item) => item.getAsFile())
+        .filter(Boolean);
+
+  return files.map(namePastedFile);
+}
+
+function isEditableElement(element) {
+  if (!element || element === document.body || element === document.documentElement) return false;
+  if (element.isContentEditable) return true;
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName);
+}
+
+async function onPaste(event) {
+  if (disabled.value || recording.value) return;
+  const files = filesFromClipboard(event);
+  if (!files.length) return;
+
+  const target = event.target;
+  const isComposerPaste = !!composerRef.value?.contains(target);
+  if (!isComposerPaste && isEditableElement(document.activeElement)) return;
+
+  event.preventDefault();
+  pickerOpen.value = false;
+  for (const file of files) {
+    await props.messenger.sendAttachment(file);
+  }
+}
 
 function send() {
   if (!canSend.value) return;
@@ -182,16 +256,18 @@ async function capturePhoto() {
 onMounted(() => {
   document.addEventListener("mousedown", onDocMouseDown);
   document.addEventListener("keydown", onDocKey);
+  document.addEventListener("paste", onPaste);
 });
 onBeforeUnmount(() => {
   document.removeEventListener("mousedown", onDocMouseDown);
   document.removeEventListener("keydown", onDocKey);
+  document.removeEventListener("paste", onPaste);
   stopCameraStream();
 });
 </script>
 
 <template>
-  <footer class="composer">
+  <footer ref="composerRef" class="composer">
     <div v-if="recording" class="composer__recording">
       <span class="rec-dot"></span>
       <span class="rec-label">Recording</span>
