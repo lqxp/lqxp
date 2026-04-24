@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import AudioPlayer from "@/components/AudioPlayer.vue";
 import ImageViewer from "@/components/ImageViewer.vue";
+import VideoPlayer from "@/components/VideoPlayer.vue";
 
 const props = defineProps({
   message: { type: Object, required: true },
@@ -39,6 +40,7 @@ const jumbo = computed(() => props.message.jumboEmoji && !props.message.deleted)
 const deleted = computed(() => props.message.deleted);
 const preview = computed(() => props.message.preview);
 const imageViewerOpen = ref(false);
+const expandedText = ref(false);
 const repliedMessage = computed(() =>
   props.messenger.findMessageById(props.message.roomId, props.message.replyToMessageId)
 );
@@ -48,10 +50,17 @@ const replyText = computed(() => {
   if (!target) return props.message.replyToMessageId ? "Original message is not loaded." : "";
   if (target.deleted) return "Message deleted";
   if (target.kind === "image") return "Photo";
+  if (target.kind === "video") return "Video";
   if (target.kind === "audio" || target.kind === "voice") return "Voice message";
   if (target.kind === "file") return target.attachment?.filename || "File attachment";
   return target.text || "Message";
 });
+const textLineCount = computed(() => String(props.message.text || "").split(/\r?\n/).length);
+const isTextCollapsible = computed(() =>
+  !deleted.value
+  && textLineCount.value > 10
+  && (attachmentKind.value === "text" || attachmentKind.value === "file" || attachmentKind.value === "audio" || attachmentKind.value === "video" || attachmentKind.value === "image")
+);
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -297,7 +306,7 @@ function onDelete() {
       v-else
       class="bubble"
       :class="{
-        'bubble--media': attachmentKind === 'image',
+        'bubble--media': attachmentKind === 'image' || attachmentKind === 'video',
         'bubble--deleted': deleted
       }"
     >
@@ -361,7 +370,34 @@ function onDelete() {
           :size-label="messenger.formatSize(message.attachment.size)"
           @close="imageViewerOpen = false"
         />
-        <div v-if="message.text" class="bubble__text markdown" @click="onCodeCopyClick" v-html="markdown(message.text)"></div>
+        <div
+          v-if="message.text"
+          class="bubble__text markdown"
+          :class="{ 'bubble__text--collapsed': isTextCollapsible && !expandedText }"
+          @click="onCodeCopyClick"
+          v-html="markdown(message.text)"
+        ></div>
+        <button v-if="isTextCollapsible" type="button" class="bubble__more" @click="expandedText = !expandedText">
+          {{ expandedText ? "Show less" : "See more" }}
+        </button>
+      </template>
+
+      <template v-else-if="attachmentKind === 'video' && attachmentUrl">
+        <VideoPlayer
+          :src="attachmentUrl"
+          :filename="message.attachment.filename"
+          :size-label="messenger.formatSize(message.attachment.size)"
+        />
+        <div
+          v-if="message.text"
+          class="bubble__text markdown"
+          :class="{ 'bubble__text--collapsed': isTextCollapsible && !expandedText }"
+          @click="onCodeCopyClick"
+          v-html="markdown(message.text)"
+        ></div>
+        <button v-if="isTextCollapsible" type="button" class="bubble__more" @click="expandedText = !expandedText">
+          {{ expandedText ? "Show less" : "See more" }}
+        </button>
       </template>
 
       <template v-else-if="attachmentKind === 'audio' && attachmentUrl">
@@ -372,7 +408,16 @@ function onDelete() {
           :fallback-duration="message.voiceDuration || ''"
           :messenger="messenger"
         />
-        <div v-if="message.text && !message.text.startsWith('[voice:')" class="bubble__text markdown" @click="onCodeCopyClick" v-html="markdown(message.text)"></div>
+        <div
+          v-if="message.text && !message.text.startsWith('[voice:')"
+          class="bubble__text markdown"
+          :class="{ 'bubble__text--collapsed': isTextCollapsible && !expandedText }"
+          @click="onCodeCopyClick"
+          v-html="markdown(message.text)"
+        ></div>
+        <button v-if="isTextCollapsible && message.text && !message.text.startsWith('[voice:')" type="button" class="bubble__more" @click="expandedText = !expandedText">
+          {{ expandedText ? "Show less" : "See more" }}
+        </button>
       </template>
 
       <template v-else-if="attachmentKind === 'file' && message.attachment">
@@ -391,11 +436,28 @@ function onDelete() {
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           </span>
         </button>
-        <div v-if="message.text" class="bubble__text markdown" @click="onCodeCopyClick" v-html="markdown(message.text)"></div>
+        <div
+          v-if="message.text"
+          class="bubble__text markdown"
+          :class="{ 'bubble__text--collapsed': isTextCollapsible && !expandedText }"
+          @click="onCodeCopyClick"
+          v-html="markdown(message.text)"
+        ></div>
+        <button v-if="isTextCollapsible" type="button" class="bubble__more" @click="expandedText = !expandedText">
+          {{ expandedText ? "Show less" : "See more" }}
+        </button>
       </template>
 
       <template v-else>
-        <div class="bubble__text markdown" @click="onCodeCopyClick" v-html="markdown(message.text)"></div>
+        <div
+          class="bubble__text markdown"
+          :class="{ 'bubble__text--collapsed': isTextCollapsible && !expandedText }"
+          @click="onCodeCopyClick"
+          v-html="markdown(message.text)"
+        ></div>
+        <button v-if="isTextCollapsible" type="button" class="bubble__more" @click="expandedText = !expandedText">
+          {{ expandedText ? "Show less" : "See more" }}
+        </button>
       </template>
 
       <a v-if="preview && !deleted" :href="preview.url" target="_blank" rel="noopener noreferrer" class="embed">

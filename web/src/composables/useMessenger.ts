@@ -11,6 +11,7 @@ const ROOM_ID_MIN_LENGTH = 8;
 const ROOM_ID_MAX_LENGTH = 64;
 const MESSAGE_LIMIT = 2000;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const DUPLICATE_MESSAGE_WINDOW_MS = 10 * 60 * 1000;
 const RANDOM_ROOM_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 
 function inferWebSocketUrl() {
@@ -249,6 +250,48 @@ function formatSize(bytes) {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function messagePreviewLabel(message) {
+  if (!message || message.deleted) return "";
+  if (message.kind === "image") return "Photo";
+  if (message.kind === "video") return "Video";
+  if (message.kind === "audio" || message.kind === "voice") return "Voice message";
+  if (message.kind === "file") return message.attachment?.filename || "File attachment";
+  return String(message.text || "").trim();
+}
+
+function latestVisibleRoomMessage(messages) {
+  for (let i = (messages?.length || 0) - 1; i >= 0; i -= 1) {
+    if (messages[i] && !messages[i].deleted) return messages[i];
+  }
+  return null;
+}
+
+function sameAttachmentPayload(left, right) {
+  if (!left && !right) return true;
+  if (!left || !right) return false;
+  return (
+    String(left.filename || "") === String(right.filename || "")
+    && String(left.mimeType || "") === String(right.mimeType || "")
+    && Number(left.size) === Number(right.size)
+    && String(left.dataB64 || "") === String(right.dataB64 || "")
+  );
+}
+
+function isDuplicateRecentMessage(messages, candidate) {
+  const oldestAllowed = Number(candidate?.timestamp || Date.now()) - DUPLICATE_MESSAGE_WINDOW_MS;
+  for (let i = (messages?.length || 0) - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message || message.deleted) continue;
+    if (Number(message.timestamp || 0) < oldestAllowed) break;
+    if (String(message.username || "") !== String(candidate.username || "")) continue;
+    if (String(message.text || "") !== String(candidate.text || "")) continue;
+    if (String(message.replyToMessageId || "") !== String(candidate.replyToMessageId || "")) continue;
+    if (!sameAttachmentPayload(message.attachment, candidate.attachment)) continue;
+    return true;
+  }
+  return false;
+}
+
 const _emojiSegmenter =
   typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
     ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
@@ -289,6 +332,7 @@ function normalizeMessage(message, fallbackRoomId) {
   else if (attachment) {
     if ((attachment.mimeType || "").startsWith("audio/")) kind = "audio";
     else if ((attachment.mimeType || "").startsWith("image/")) kind = "image";
+    else if ((attachment.mimeType || "").startsWith("video/")) kind = "video";
     else kind = "file";
   }
 
@@ -498,18 +542,24 @@ export function useMessenger() {
     const query = state.searchTerm.trim().toLowerCase();
     return state.rooms
       .slice()
-      .sort((a, b) => (b.lastTimestamp || 0) - (a.lastTimestamp || 0))
-      .filter((r) => !query || r.roomId.toLowerCase().includes(query) || r.lastPreview.toLowerCase().includes(query))
-      .map((r) => ({
-        roomId: r.roomId,
-        name: displayRoomName(r.roomId),
-        accent: accentFor(r.roomId),
-        preview: r.lastPreview || "No messages yet",
-        timestampLabel: formatSidebarTime(r.lastTimestamp),
-        active: r.roomId === state.activeRoom,
-        unread: state.unreadByRoom[r.roomId] || 0,
-        joined: state.joinedRooms.includes(r.roomId)
-      }));
+      .map((r) => {
+        const latest = latestVisibleRoomMessage(state.messagesByRoom[r.roomId] || []);
+        const preview = messagePreviewLabel(latest) || r.lastPreview || "";
+        const timestamp = Number(latest?.timestamp || r.lastTimestamp || 0);
+        return {
+          roomId: r.roomId,
+          name: displayRoomName(r.roomId),
+          accent: accentFor(r.roomId),
+          preview: preview || "No messages yet",
+          timestampLabel: formatSidebarTime(timestamp),
+          timestamp,
+          active: r.roomId === state.activeRoom,
+          unread: state.unreadByRoom[r.roomId] || 0,
+          joined: state.joinedRooms.includes(r.roomId)
+        };
+      })
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+      .filter((r) => !query || r.roomId.toLowerCase().includes(query) || r.preview.toLowerCase().includes(query));
   });
 
   const activeConversation = computed(() => {
@@ -864,16 +914,15 @@ export function useMessenger() {
     const id = sanitizeRoomId(roomId);
     if (!id) return;
     const existing = state.rooms.find((r) => r.roomId === id);
-    const preview = message ? (message.kind === "voice" ? "Voice message" : message.text || "") : "";
-    const sender = message ? message.username : "";
-    const ts = message ? message.timestamp : Date.now();
+    const latest = latestVisibleRoomMessage(state.messagesByRoom[id] || []);
+    const preview = messagePreviewLabel(latest || message);
+    const sender = latest?.username || message?.username || "";
+    const ts = Number(latest?.timestamp || message?.timestamp || 0);
 
     if (existing) {
-      if (ts >= (existing.lastTimestamp || 0)) {
-        existing.lastPreview = preview || existing.lastPreview;
-        existing.lastTimestamp = ts;
-        existing.lastSender = sender || existing.lastSender;
-      }
+      existing.lastPreview = preview;
+      existing.lastTimestamp = ts || existing.lastTimestamp || 0;
+      existing.lastSender = sender;
     } else {
       state.rooms.push({ roomId: id, lastPreview: preview, lastTimestamp: ts, lastSender: sender });
     }
@@ -896,7 +945,7 @@ export function useMessenger() {
     if (room) {
       room.lastPreview = "";
       room.lastSender = "";
-      room.lastTimestamp = Date.now();
+      room.lastTimestamp = 0;
     }
     persist();
   }
@@ -1620,7 +1669,13 @@ export function useMessenger() {
       messageId: message.messageId,
       roomId: message.roomId || state.activeRoom,
       username: message.username || "",
-      text: message.kind === "image" ? "Photo" : message.kind === "file" ? "File attachment" : message.text || ""
+      text: message.kind === "image"
+        ? "Photo"
+        : message.kind === "video"
+          ? "Video"
+          : message.kind === "file"
+            ? "File attachment"
+            : message.text || ""
     };
   }
 
@@ -1677,6 +1732,7 @@ export function useMessenger() {
     if (!id) return false;
     if (!state.messagesByRoom[id]) state.messagesByRoom[id] = [];
     const arr = state.messagesByRoom[id];
+    if (isDuplicateRecentMessage(arr, normalized)) return false;
     const index = arr.findIndex((m) => m.messageId === normalized.messageId);
     if (index === -1) {
       arr.push(normalized);

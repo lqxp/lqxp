@@ -842,6 +842,26 @@ textarea {
   white-space: pre-wrap;
 }
 
+.bubble__text--collapsed {
+  max-height: calc(1.35em * 10);
+  overflow: hidden;
+}
+
+.bubble__more {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: inherit;
+  opacity: 0.8;
+}
+
+.bubble__more:hover {
+  opacity: 1;
+  text-decoration: underline;
+}
+
 .msg.is-own .bubble {
   background: var(--bubble-out);
   color: #fff;
@@ -1459,6 +1479,45 @@ textarea {
 .att-image-link:hover .att-image {
   filter: brightness(1.06);
   transform: scale(1.012);
+}
+
+.video-player {
+  margin: 0;
+  width: min(420px, 78vw);
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.video-player__media {
+  width: 100%;
+  max-height: min(420px, 60vh);
+  display: block;
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.4);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.video-player__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  font-size: 11.5px;
+  opacity: 0.78;
+}
+
+.video-player__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-player__size {
+  flex: none;
 }
 
 .image-viewer {
