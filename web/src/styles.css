@@ -2585,36 +2585,55 @@ textarea {
   display: block;
 }
 
-/* Call overlay panel (Discord-style, docked above composer) */
+/* Call overlay panel (Discord-style, docked below the thread header) */
 .callpanel {
   flex: none;
-  padding: 12px 14px 12px;
-  background: var(--surface);
+  padding: 10px 12px 12px;
+  background: #060709;
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .callpanel__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
+  min-height: 36px;
 }
 
 .callpanel__meta {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  min-width: 0;
   font-size: 13px;
   color: var(--muted);
 }
 
+.callpanel__status {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: rgba(79, 214, 138, 0.12);
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .callpanel__title {
   color: var(--text);
-  font-weight: 500;
+  font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .callpanel__time {
@@ -2626,37 +2645,55 @@ textarea {
 
 .callpanel__actions {
   display: flex;
-  gap: 4px;
+  gap: 6px;
+  flex: none;
 }
 
-.callpanel__tiles {
-  display: flex;
-  flex-wrap: wrap;
+.callpanel__stage {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr));
+  grid-auto-rows: minmax(130px, 1fr);
   gap: 8px;
+  height: clamp(210px, 34vh, 430px);
+  min-height: 0;
+}
+
+.callpanel__stage--solo {
+  grid-template-columns: 1fr;
+}
+
+.callpanel__stage--duo {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.callpanel__stage--grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.callpanel__stage--many {
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
+  grid-auto-rows: minmax(115px, 1fr);
 }
 
 .calltile {
-  display: inline-flex;
+  position: relative;
+  display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 10px 4px 4px;
-  border-radius: 8px;
-  background: var(--surface-2);
-  font-size: 13px;
+  justify-content: center;
   min-width: 0;
-  border: 2px solid transparent;
-  transition: border-color 120ms ease;
-}
-
-.calltile.has-video {
-  flex-direction: column;
-  align-items: stretch;
-  width: min(240px, 100%);
-  padding: 6px;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #15171c;
+  font-size: 13px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.28);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
 .calltile.is-speaking {
   border-color: var(--green);
+  box-shadow: inset 0 0 0 1px rgba(79, 214, 138, 0.35);
 }
 
 .calltile.is-muted {
@@ -2664,23 +2701,33 @@ textarea {
 }
 
 .calltile__avatar {
-  width: 28px;
-  height: 28px;
+  width: clamp(58px, 8vw, 96px);
+  height: clamp(58px, 8vw, 96px);
   border-radius: 50%;
   display: grid;
   place-items: center;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: clamp(20px, 3vw, 34px);
+  font-weight: 800;
   color: #fff;
   flex: none;
 }
 
+.calltile__empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(255, 255, 255, 0.08), transparent 34%),
+    #15171c;
+}
+
 .calltile__video {
+  position: absolute;
+  inset: 0;
   width: 100%;
-  aspect-ratio: 16 / 9;
-  overflow: hidden;
-  border-radius: 6px;
-  background: #05070a;
+  height: 100%;
+  background: #020305;
 }
 
 .calltile__video video {
@@ -2690,23 +2737,45 @@ textarea {
   object-fit: cover;
 }
 
+.calltile.is-screen .calltile__video video {
+  object-fit: contain;
+}
+
+.calltile__overlay {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.58);
+  backdrop-filter: blur(8px);
+}
+
 .calltile__name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 160px;
+  font-weight: 700;
 }
 
 .calltile__you {
-  color: var(--muted);
-  font-weight: normal;
+  color: rgba(255, 255, 255, 0.65);
+  font-weight: 600;
 }
 
-.calltile__media {
-  margin-left: 6px;
-  color: var(--muted);
+.calltile__kind {
+  flex: none;
+  color: rgba(255, 255, 255, 0.68);
   font-size: 11px;
   font-family: var(--mono);
+  text-transform: uppercase;
 }
 
 .calltile__muted-badge {
@@ -2717,15 +2786,27 @@ textarea {
   border-radius: 50%;
   background: rgba(0, 0, 0, 0.35);
   color: var(--red);
-  margin-left: 2px;
+  flex: none;
+}
+
+.callpanel__audio {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 1px;
 }
 
 .calltile__volume {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-width: 120px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
   color: var(--muted);
+  font-size: 12px;
+  flex: none;
 }
 
 .calltile__volume svg {
@@ -2740,7 +2821,7 @@ textarea {
 }
 
 .calltile__volume input {
-  width: 76px;
+  width: 82px;
   accent-color: var(--blue);
 }
 
@@ -2749,6 +2830,18 @@ textarea {
   font-family: var(--mono);
   font-size: 11px;
   text-align: right;
+}
+
+.calltile__volume-name {
+  width: auto !important;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left !important;
+  color: var(--text);
+  font-family: inherit !important;
+  font-size: 12px !important;
 }
 
 /* Responsive */
@@ -2771,6 +2864,31 @@ textarea {
 
   .app.is-thread .thread {
     display: flex;
+  }
+
+  .callpanel {
+    padding: 8px;
+  }
+
+  .callpanel__head {
+    align-items: flex-start;
+  }
+
+  .callpanel__meta {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .callpanel__actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .callpanel__stage,
+  .callpanel__stage--duo,
+  .callpanel__stage--grid {
+    grid-template-columns: 1fr;
+    height: clamp(180px, 34vh, 300px);
   }
 
   .att-image {

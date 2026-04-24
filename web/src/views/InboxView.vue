@@ -42,8 +42,8 @@ function goToCallRoom() {
 
     <main class="thread" v-if="hasActive">
       <ThreadHeader :messenger="messenger" />
-      <MessageList :messenger="messenger" />
       <CallPanel :messenger="messenger" />
+      <MessageList :messenger="messenger" />
       <ComposerBar :messenger="messenger" />
     </main>
 

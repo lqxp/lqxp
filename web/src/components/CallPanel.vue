@@ -31,6 +31,52 @@ const members = computed(() => {
   return sorted;
 });
 
+const remoteMembers = computed(() => members.value.filter((username) => !isSelf(username)));
+
+const callTiles = computed(() => {
+  const tiles = [];
+  for (const username of members.value) {
+    const self = isSelf(username);
+    const media = mediaOf(username);
+    const videoKinds = [];
+    if (media.screen) videoKinds.push("screen");
+    if (media.camera) videoKinds.push("camera");
+
+    if (videoKinds.length) {
+      for (const kind of videoKinds) {
+        tiles.push({
+          id: `${username}-${kind}`,
+          username,
+          kind,
+          video: true,
+          self,
+          media,
+          trackIndex: kind === "screen" && media.camera ? 0 : videoKinds.indexOf(kind)
+        });
+      }
+    } else {
+      tiles.push({
+        id: `${username}-avatar`,
+        username,
+        kind: "audio",
+        video: false,
+        self,
+        media,
+        trackIndex: 0
+      });
+    }
+  }
+  return tiles;
+});
+
+const callGridClass = computed(() => {
+  const count = callTiles.value.length;
+  if (count <= 1) return "callpanel__stage--solo";
+  if (count === 2) return "callpanel__stage--duo";
+  if (count <= 4) return "callpanel__stage--grid";
+  return "callpanel__stage--many";
+});
+
 const speakingSet = computed(() => {
   const roomId = callRoom.value;
   const table = props.messenger.state.speakingByRoom[roomId] || {};
@@ -80,16 +126,28 @@ function hasVideo(username) {
   return Boolean(media.camera || media.screen);
 }
 
+function tileLabel(tile) {
+  if (tile.kind === "screen") return "Screen";
+  if (tile.kind === "camera") return "Camera";
+  return "Voice";
+}
+
 function bindLocalPreview(el, kind) {
   if (!el) return;
   const stream = props.messenger.localPreviewStream(kind);
   if (el.srcObject !== stream) el.srcObject = stream;
 }
 
-function bindRemoteVideo(el, username) {
+function bindRemoteVideo(el, username, trackIndex = 0) {
   if (!el) return;
   const stream = props.messenger.remoteVideoStream(username);
-  if (el.srcObject !== stream) el.srcObject = stream;
+  const track = stream?.getVideoTracks?.()[trackIndex] || stream?.getVideoTracks?.()[0];
+  if (!track) {
+    el.srcObject = null;
+    return;
+  }
+  const existingTrack = el.srcObject?.getVideoTracks?.()[0];
+  if (existingTrack?.id !== track.id) el.srcObject = new MediaStream([track]);
 }
 
 function bindRemoteAudio(el, username) {
@@ -106,8 +164,11 @@ function bindRemoteAudio(el, username) {
   <section class="callpanel" v-if="messenger.state.inCall && messenger.state.callRoom === messenger.state.activeRoom">
     <header class="callpanel__head">
       <div class="callpanel__meta">
-        <span class="call-dot"></span>
-        <span class="callpanel__title">Voice — {{ messenger.displayRoomName(callRoom) }}</span>
+        <span class="callpanel__status">
+          <span class="call-dot"></span>
+          Live
+        </span>
+        <span class="callpanel__title">{{ messenger.displayRoomName(callRoom) }}</span>
         <span class="callpanel__time">{{ callElapsed() }}</span>
       </div>
       <div class="callpanel__actions">
@@ -150,72 +211,71 @@ function bindRemoteAudio(el, username) {
       </div>
     </header>
 
-    <div class="callpanel__tiles">
+    <div class="callpanel__stage" :class="callGridClass">
       <div
-        v-for="u in members"
-        :key="`call-${u}`"
+        v-for="tile in callTiles"
+        :key="tile.id"
         class="calltile"
         :class="{
-          'is-speaking': isSpeaking(u),
-          'is-self': isSelf(u),
-          'is-muted': isSelf(u) && messenger.state.callMuted,
-          'has-video': hasVideo(u)
+          'is-speaking': isSpeaking(tile.username),
+          'is-self': tile.self,
+          'is-muted': tile.self && messenger.state.callMuted,
+          'has-video': tile.video,
+          'is-screen': tile.kind === 'screen'
         }"
       >
-        <div v-if="hasVideo(u)" class="calltile__video">
+        <div v-if="tile.video" class="calltile__video">
           <video
-            v-if="isSelf(u) && messenger.state.callCameraEnabled"
-            :ref="(el) => bindLocalPreview(el, 'camera')"
-            autoplay
-            muted
-            playsinline
-          ></video>
-          <video
-            v-else-if="isSelf(u) && messenger.state.callScreenEnabled"
-            :ref="(el) => bindLocalPreview(el, 'screen')"
+            v-if="tile.self"
+            :ref="(el) => bindLocalPreview(el, tile.kind)"
             autoplay
             muted
             playsinline
           ></video>
           <video
             v-else
-            :ref="(el) => bindRemoteVideo(el, u)"
+            :ref="(el) => bindRemoteVideo(el, tile.username, tile.trackIndex)"
             autoplay
             playsinline
           ></video>
         </div>
-        <span
-          v-else
-          class="calltile__avatar"
-          :class="`avatar--${messenger.accentFor(u)}`"
-        >{{ initialsOf(u) }}</span>
-        <span class="calltile__name">
-          {{ u }}<span v-if="isSelf(u)" class="calltile__you"> (you)</span>
-          <span v-if="mediaOf(u).camera" class="calltile__media">cam</span>
-          <span v-if="mediaOf(u).screen" class="calltile__media">screen</span>
-        </span>
+        <div v-else class="calltile__empty">
+          <span
+            class="calltile__avatar"
+            :class="`avatar--${messenger.accentFor(tile.username)}`"
+          >{{ initialsOf(tile.username) }}</span>
+        </div>
+        <div class="calltile__overlay">
+          <span class="calltile__name">
+            {{ tile.username }}<span v-if="tile.self" class="calltile__you"> (you)</span>
+          </span>
+          <span class="calltile__kind">{{ tileLabel(tile) }}</span>
+          <span v-if="tile.self && messenger.state.callMuted" class="calltile__muted-badge" aria-label="muted">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><path d="M15 9.34V5a3 3 0 0 0-5.94-.6"/></svg>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="callpanel__audio" v-if="remoteMembers.length">
+      <label v-for="u in remoteMembers" :key="`audio-${u}`" class="calltile__volume" :aria-label="`${u} volume`">
         <audio
-          v-if="!isSelf(u)"
           :ref="(el) => bindRemoteAudio(el, u)"
           autoplay
           playsinline
         ></audio>
-        <label v-if="!isSelf(u)" class="calltile__volume" :aria-label="`${u} volume`">
-          <svg viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>
-          <input
-            type="range"
-            min="0"
-            max="100"
-            step="1"
-            :value="volumeOf(u)"
-            @input="messenger.setCallUserVolume(u, inputValue($event))"
-          />
-          <span>{{ volumeOf(u) }}%</span>
-        </label>
-        <span v-if="isSelf(u) && messenger.state.callMuted" class="calltile__muted-badge" aria-label="muted">
-          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><path d="M15 9.34V5a3 3 0 0 0-5.94-.6"/></svg>
-        </span>
-      </div>
+        <span class="calltile__volume-name">{{ u }}</span>
+        <svg viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>
+        <input
+          type="range"
+          min="0"
+          max="100"
+          step="1"
+          :value="volumeOf(u)"
+          @input="messenger.setCallUserVolume(u, inputValue($event))"
+        />
+        <span>{{ volumeOf(u) }}%</span>
+      </label>
     </div>
   </section>
 </template>
