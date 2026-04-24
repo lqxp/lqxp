@@ -5,6 +5,9 @@ interface PeerState {
   stream: MediaStream;
   makingOffer: boolean;
   ignoreOffer: boolean;
+  settingRemoteAnswer: boolean;
+  pendingCandidates: RTCIceCandidateInit[];
+  signalChain: Promise<void>;
 }
 
 interface WebRtcCallManagerOptions {
@@ -83,38 +86,51 @@ export class WebRtcCallManager {
     if (!from || from === this.username || payload.gameId !== this.roomId) return;
 
     const peer = this.peers.get(from) || this.createPeer(from);
+    peer.signalChain = peer.signalChain
+      .then(() => this.applySignal(from, peer, payload))
+      .catch(() => this.removePeer(from));
+    await peer.signalChain;
+  }
+
+  private async applySignal(from: string, peer: PeerState, payload: CallSignalPayload) {
+    if (this.peers.get(from) !== peer) return;
+
     const description = payload.sdp
       ? ({ type: payload.type, sdp: payload.sdp } as RTCSessionDescriptionInit)
       : null;
 
-    try {
-      if (description) {
-        const readyForOffer =
-          !peer.makingOffer &&
-          (peer.pc.signalingState === "stable" || peer.pc.signalingState === "have-local-offer");
-        const offerCollision = description.type === "offer" && !readyForOffer;
-        peer.ignoreOffer = !this.isPolite(from) && offerCollision;
-        if (peer.ignoreOffer) return;
+    if (description) {
+      const readyForOffer =
+        !peer.makingOffer &&
+        (peer.pc.signalingState === "stable" || peer.settingRemoteAnswer);
+      const offerCollision = description.type === "offer" && !readyForOffer;
+      peer.ignoreOffer = !this.isPolite(from) && offerCollision;
+      if (peer.ignoreOffer) return;
 
+      peer.settingRemoteAnswer = description.type === "answer";
+      try {
         await peer.pc.setRemoteDescription(description);
-        if (description.type === "offer") {
-          await peer.pc.setLocalDescription();
-          this.sendSignal({
-            gameId: this.roomId,
-            to: from,
-            type: "answer",
-            sdp: peer.pc.localDescription?.sdp || ""
-          });
-        }
-      } else if (payload.candidate) {
-        try {
-          await peer.pc.addIceCandidate(payload.candidate);
-        } catch (error) {
-          if (!peer.ignoreOffer) throw error;
-        }
+      } finally {
+        peer.settingRemoteAnswer = false;
       }
-    } catch {
-      this.removePeer(from);
+
+      await this.flushPendingCandidates(peer);
+      if (description.type === "offer") {
+        await peer.pc.setLocalDescription();
+        this.sendSignal({
+          gameId: this.roomId,
+          to: from,
+          type: "answer",
+          sdp: peer.pc.localDescription?.sdp || ""
+        });
+      }
+    } else if (payload.candidate) {
+      if (!peer.pc.remoteDescription) {
+        if (peer.ignoreOffer) return;
+        peer.pendingCandidates.push(payload.candidate);
+        return;
+      }
+      await this.addIceCandidate(peer, payload.candidate);
     }
   }
 
@@ -125,12 +141,16 @@ export class WebRtcCallManager {
   private createPeer(peerName: string): PeerState {
     const pc = new RTCPeerConnection(rtcConfig);
     const stream = new MediaStream();
-    const peer: PeerState = { pc, stream, makingOffer: false, ignoreOffer: false };
+    const peer: PeerState = {
+      pc,
+      stream,
+      makingOffer: false,
+      ignoreOffer: false,
+      settingRemoteAnswer: false,
+      pendingCandidates: [],
+      signalChain: Promise.resolve()
+    };
     this.peers.set(peerName, peer);
-
-    for (const track of this.localStream.getTracks()) {
-      pc.addTrack(track, this.localStream);
-    }
 
     pc.onicecandidate = ({ candidate }) => {
       if (!candidate) return;
@@ -156,7 +176,7 @@ export class WebRtcCallManager {
     };
 
     pc.onconnectionstatechange = () => {
-      if (["closed", "failed", "disconnected"].includes(pc.connectionState)) {
+      if (["closed", "failed"].includes(pc.connectionState)) {
         this.removePeer(peerName);
       }
     };
@@ -178,7 +198,26 @@ export class WebRtcCallManager {
       }
     };
 
+    for (const track of this.localStream.getTracks()) {
+      pc.addTrack(track, this.localStream);
+    }
+
     return peer;
+  }
+
+  private async addIceCandidate(peer: PeerState, candidate: RTCIceCandidateInit) {
+    try {
+      await peer.pc.addIceCandidate(candidate);
+    } catch (error) {
+      if (!peer.ignoreOffer) throw error;
+    }
+  }
+
+  private async flushPendingCandidates(peer: PeerState) {
+    const candidates = peer.pendingCandidates.splice(0);
+    for (const candidate of candidates) {
+      await this.addIceCandidate(peer, candidate);
+    }
   }
 
   private isPolite(peerName: string) {
