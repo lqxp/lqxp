@@ -912,7 +912,17 @@ export function useMessenger() {
   function leaveRoom(roomId) {
     const id = sanitizeRoomId(roomId || state.activeRoom);
     if (!id || !isValidRoomId(id)) return;
-    send({ op: 4, d: { gameId: id } });
+
+    if (state.connected && state.identified && state.joinedRooms.includes(id)) {
+      send({ op: 4, d: { gameId: id } });
+    }
+
+    state.joinedRooms = state.joinedRooms.filter((r) => r !== id);
+    state.pendingJoinRooms = state.pendingJoinRooms.filter((r) => r !== id);
+    delete state.usersByRoom[id];
+    if (state.deleteMessagesOnLeave) clearRoomMessages(id);
+    if (state.activeRoom === id) state.activeRoom = "";
+    persist();
   }
 
   function startCompose() {
