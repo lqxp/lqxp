@@ -78,6 +78,59 @@ function codeBlockLabel(value) {
   return label.slice(0, 40);
 }
 
+function renderMarkdownLists(value) {
+  const lines = String(value || "").split("\n");
+  const stack = [];
+  let html = "";
+
+  const openList = (level) => {
+    if (!stack.length && html && !html.endsWith("\n")) html += "\n";
+    html += '<ul class="markdown__list">';
+    stack.push({ level, liOpen: false });
+  };
+  const closeItem = (entry) => {
+    if (!entry?.liOpen) return;
+    html += "</li>";
+    entry.liOpen = false;
+  };
+  const closeList = () => {
+    const entry = stack.pop();
+    closeItem(entry);
+    html += "</ul>";
+  };
+  const appendTextLine = (line) => {
+    while (stack.length) closeList();
+    if (html) html += "\n";
+    html += line;
+  };
+
+  for (const line of lines) {
+    const match = /^([ \t]*)-\s+(.+)$/.exec(line);
+    if (!match) {
+      appendTextLine(line);
+      continue;
+    }
+
+    let level = Math.floor(match[1].replace(/\t/g, "  ").length / 2);
+    if (!stack.length) openList(0);
+
+    let top = stack[stack.length - 1];
+    if (level > top.level && !top.liOpen) level = top.level;
+    if (level > top.level + 1) level = top.level + 1;
+
+    while (stack.length && level < stack[stack.length - 1].level) closeList();
+    while (level > stack[stack.length - 1].level) openList(stack[stack.length - 1].level + 1);
+
+    top = stack[stack.length - 1];
+    closeItem(top);
+    html += `<li>${match[2].trim()}`;
+    top.liOpen = true;
+  }
+
+  while (stack.length) closeList();
+  return html;
+}
+
 function markdown(value) {
   const tokens = [];
   const hold = (html) => {
@@ -89,12 +142,15 @@ function markdown(value) {
   let html = escapeHtml(value);
   html = html.replace(/```([^\n`]*)\n([\s\S]*?)```/g, (_, rawLabel, code) => {
     const label = codeBlockLabel(rawLabel);
-    const title = label ? `<div class="codeblock__head">${escapeHtml(label)}</div>` : "";
-    return hold(`<div class="codeblock">${title}<pre><code>${code.replace(/\n$/, "")}</code></pre></div>`);
+    const title = label ? `<span class="codeblock__label">${escapeHtml(label)}</span>` : "<span></span>";
+    const copyIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+    const copyButton = `<button class="codeblock__copy" type="button" data-code-copy aria-label="Copy code">${copyIcon}<span>Copy</span></button>`;
+    return hold(`<div class="codeblock"><div class="codeblock__head">${title}${copyButton}</div><pre><code>${code.replace(/\n$/, "")}</code></pre></div>`);
   });
   html = html.replace(/^(#{1,4})[ \t]+(.+)$/gm, (_, marks, title) => (
     `<h${marks.length} class="markdown__h markdown__h${marks.length}">${title.trim()}</h${marks.length}>`
   ));
+  html = renderMarkdownLists(html);
   html = html.replace(/`([^`\n]+)`/g, (_, code) => hold(`<code>${code}</code>`));
   html = html.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (match, label, href) => {
     const safe = safeHref(href);
@@ -111,6 +167,48 @@ function markdown(value) {
 
   for (const [token, value] of tokens) html = html.replaceAll(token, value);
   return html;
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return true;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  return copied;
+}
+
+async function onCodeCopyClick(event) {
+  const button = event.target?.closest?.("[data-code-copy]");
+  if (!button) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  const block = button.closest(".codeblock");
+  const text = block?.querySelector("code")?.textContent || "";
+  if (!text) return;
+
+  const copied = await copyText(text);
+  if (!copied) return;
+
+  const label = button.querySelector("span");
+  if (!label) return;
+  label.textContent = "Copied";
+  button.classList.add("is-copied");
+  setTimeout(() => {
+    label.textContent = "Copy";
+    button.classList.remove("is-copied");
+  }, 1200);
 }
 
 function download() {
@@ -263,7 +361,7 @@ function onDelete() {
           :size-label="messenger.formatSize(message.attachment.size)"
           @close="imageViewerOpen = false"
         />
-        <div v-if="message.text" class="bubble__text markdown" v-html="markdown(message.text)"></div>
+        <div v-if="message.text" class="bubble__text markdown" @click="onCodeCopyClick" v-html="markdown(message.text)"></div>
       </template>
 
       <template v-else-if="attachmentKind === 'audio' && attachmentUrl">
@@ -274,7 +372,7 @@ function onDelete() {
           :fallback-duration="message.voiceDuration || ''"
           :messenger="messenger"
         />
-        <div v-if="message.text && !message.text.startsWith('[voice:')" class="bubble__text markdown" v-html="markdown(message.text)"></div>
+        <div v-if="message.text && !message.text.startsWith('[voice:')" class="bubble__text markdown" @click="onCodeCopyClick" v-html="markdown(message.text)"></div>
       </template>
 
       <template v-else-if="attachmentKind === 'file' && message.attachment">
@@ -293,11 +391,11 @@ function onDelete() {
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           </span>
         </button>
-        <div v-if="message.text" class="bubble__text markdown" v-html="markdown(message.text)"></div>
+        <div v-if="message.text" class="bubble__text markdown" @click="onCodeCopyClick" v-html="markdown(message.text)"></div>
       </template>
 
       <template v-else>
-        <div class="bubble__text markdown" v-html="markdown(message.text)"></div>
+        <div class="bubble__text markdown" @click="onCodeCopyClick" v-html="markdown(message.text)"></div>
       </template>
 
       <a v-if="preview && !deleted" :href="preview.url" target="_blank" rel="noopener noreferrer" class="embed">

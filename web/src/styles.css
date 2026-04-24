@@ -925,6 +925,20 @@ textarea {
   font-size: 1em;
 }
 
+.markdown__list {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+.markdown__list .markdown__list {
+  margin: 3px 0 0;
+  padding-left: 18px;
+}
+
+.markdown__list li {
+  margin: 2px 0;
+}
+
 .markdown code {
   padding: 1px 5px;
   border-radius: 5px;
@@ -945,12 +959,56 @@ textarea {
 }
 
 .codeblock__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 30px;
   padding: 6px 10px;
   color: var(--muted);
   font-family: var(--mono);
   font-size: 11px;
   line-height: 1.2;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.codeblock__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codeblock__copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 58px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 6px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+  font-family: var(--font);
+  font-size: 11px;
+  line-height: 1;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.codeblock__copy:hover,
+.codeblock__copy.is-copied {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.codeblock__copy svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex: none;
 }
 
 .codeblock pre {
