@@ -8,7 +8,10 @@ use tracing::error;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
 use crate::{
-    models::{Attachment, BlacklistEntry, ChatMessageRecord, LoggedIpEntry, MessageReaction, PlayerStatus, SocketPayload},
+    models::{
+        Attachment, BlacklistEntry, ChatMessageRecord, LoggedIpEntry, MessageReaction,
+        PlayerStatus, SocketPayload,
+    },
     state::SharedState,
     utils::{admin_allowed, now_ms, random_message_id, request_id, send_json, with_request_id},
 };
@@ -94,6 +97,7 @@ pub async fn process_message(
             false
         }
         7 => send_chat_message(&state, &session_id, payload.d).await,
+        8 => update_client_settings(&state, &session_id, payload.d).await,
         15 => broadcast_alive(&state, &session_id, payload.d).await,
         16 => broadcast_exchange_end(&state, &session_id, payload.d).await,
         17 => exchange_joined(&state, &session_id, payload.d).await,
@@ -209,7 +213,14 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
         }
 
         player.username = candidate.clone();
-        player.is_voice_chat = d.get("isVoiceChat").and_then(Value::as_bool).unwrap_or(false);
+        player.is_voice_chat = d
+            .get("isVoiceChat")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        player.delete_messages_on_leave = d
+            .get("deleteMessagesOnLeave")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         player.version = d
             .get("v")
             .and_then(Value::as_str)
@@ -373,7 +384,7 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
         let mut players = state.players.write().await;
         if let Some(player) = players.get_mut(session_id) {
             if player.rooms.remove(game_id) {
-                Ok(player.username.clone())
+                Ok((player.username.clone(), player.delete_messages_on_leave))
             } else {
                 Err("Not a member of this room")
             }
@@ -382,8 +393,8 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
         }
     };
 
-    let username = match leave_result {
-        Ok(name) => name,
+    let (username, should_clear_messages) = match leave_result {
+        Ok(values) => values,
         Err(message) => return respond_error(state, session_id, 4, message, req_id).await,
     };
 
@@ -400,17 +411,130 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
     )
     .await;
 
+    let deleted_message_ids = if should_clear_messages {
+        delete_user_messages_in_room_and_broadcast(state, game_id, &username).await
+    } else {
+        Vec::new()
+    };
+    let deleted_count = deleted_message_ids.len();
+
     respond_to_sender(
         state,
         session_id,
         with_request_id(
-            json!({ "op": 4, "d": { "ok": true, "gameId": game_id } }),
+            json!({
+                "op": 4,
+                "d": {
+                    "ok": true,
+                    "gameId": game_id,
+                    "messagesDeleted": should_clear_messages,
+                    "deletedCount": deleted_count,
+                    "deletedMessageIds": deleted_message_ids
+                }
+            }),
             req_id,
         ),
     )
     .await;
 
     false
+}
+
+async fn update_client_settings(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let delete_messages_on_leave = d
+        .get("deleteMessagesOnLeave")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let did_update = {
+        let mut players = state.players.write().await;
+        if let Some(player) = players.get_mut(session_id) {
+            player.delete_messages_on_leave = delete_messages_on_leave;
+            true
+        } else {
+            false
+        }
+    };
+
+    if !did_update {
+        return respond_error(
+            state,
+            session_id,
+            8,
+            "You need to be identified before",
+            request_id(&d),
+        )
+        .await;
+    }
+
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(
+            json!({
+                "op": 8,
+                "d": {
+                    "ok": true,
+                    "deleteMessagesOnLeave": delete_messages_on_leave
+                }
+            }),
+            request_id(&d),
+        ),
+    )
+    .await;
+
+    false
+}
+
+pub async fn delete_user_messages_in_room_and_broadcast(
+    state: &SharedState,
+    game_id: &str,
+    deleted_by: &str,
+) -> Vec<String> {
+    let deleted_at = now_ms();
+    let deleted_message_ids = {
+        let mut rooms = state.room_messages.write().await;
+        let Some(messages) = rooms.get_mut(game_id) else {
+            return Vec::new();
+        };
+
+        let mut ids = Vec::new();
+        for message in messages.iter_mut() {
+            if message.deleted || message.username != deleted_by {
+                continue;
+            }
+            message.text.clear();
+            message.attachment = None;
+            message.preview = None;
+            message.reactions.clear();
+            message.deleted = true;
+            ids.push(message.message_id.clone());
+        }
+        ids
+    };
+
+    if deleted_message_ids.is_empty() {
+        return deleted_message_ids;
+    }
+
+    broadcast_to_room(
+        state,
+        game_id,
+        json!({
+            "op": 25,
+            "d": {
+                "ok": true,
+                "gameId": game_id,
+                "deletedBy": deleted_by,
+                "deletedAt": deleted_at,
+                "deletedCount": deleted_message_ids.len(),
+                "messageIds": deleted_message_ids
+            }
+        }),
+    )
+    .await;
+
+    deleted_message_ids
 }
 
 async fn report_kill(state: &SharedState, session_id: &str, d: Value) -> bool {
@@ -437,7 +561,14 @@ async fn report_kill(state: &SharedState, session_id: &str, d: Value) -> bool {
     };
 
     if !is_member {
-        return respond_error(state, session_id, 5, "Not a member of this room", request_id(&d)).await;
+        return respond_error(
+            state,
+            session_id,
+            5,
+            "Not a member of this room",
+            request_id(&d),
+        )
+        .await;
     }
 
     broadcast_to_room(
@@ -458,7 +589,10 @@ async fn report_kill(state: &SharedState, session_id: &str, d: Value) -> bool {
     respond_to_sender(
         state,
         session_id,
-        with_request_id(json!({ "op": 5, "d": { "ok": true, "gameId": game_id } }), request_id(&d)),
+        with_request_id(
+            json!({ "op": 5, "d": { "ok": true, "gameId": game_id } }),
+            request_id(&d),
+        ),
     )
     .await;
     false
@@ -480,7 +614,11 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
         Err(message) => return respond_error(state, session_id, 7, message, request_id(&d)).await,
     };
 
-    let trimmed = text.trim().chars().take(MAX_MESSAGE_CHARS).collect::<String>();
+    let trimmed = text
+        .trim()
+        .chars()
+        .take(MAX_MESSAGE_CHARS)
+        .collect::<String>();
     if trimmed.is_empty() && attachment.is_none() {
         return respond_error(state, session_id, 7, "Empty message", request_id(&d)).await;
     }
@@ -525,7 +663,11 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
     };
 
     let room_name = target_game_id.to_owned();
-    let prefix = if room_name == "lobby" { "[lobby]" } else { "[in-game]" };
+    let prefix = if room_name == "lobby" {
+        "[lobby]"
+    } else {
+        "[in-game]"
+    };
 
     let preview_target = crate::linkpreview::find_first_url(&trimmed);
 
@@ -583,7 +725,8 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
                 {
                     let mut rooms = state_arc.room_messages.write().await;
                     if let Some(messages) = rooms.get_mut(&room) {
-                        if let Some(message) = messages.iter_mut().find(|m| m.message_id == msg_id) {
+                        if let Some(message) = messages.iter_mut().find(|m| m.message_id == msg_id)
+                        {
                             message.preview = Some(preview.clone());
                         }
                     }
@@ -612,7 +755,9 @@ async fn send_room_history(state: &SharedState, session_id: &str, d: Value) -> b
     let requested_room = d.get("gameId").and_then(Value::as_str);
     let room_id = match resolve_room_for_session(state, session_id, requested_room).await {
         Ok(room_id) => room_id,
-        Err(message) => return respond_error(state, session_id, 18, &message, request_id(&d)).await,
+        Err(message) => {
+            return respond_error(state, session_id, 18, &message, request_id(&d)).await
+        }
     };
 
     dispatch_room_history(state, session_id, &room_id, request_id(&d)).await;
@@ -635,19 +780,37 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
         let players = state.players.read().await;
         if let Some(player) = players.get(session_id) {
             if player.username.is_empty() {
-                return respond_error(state, session_id, 19, "You need to be identified before", request_id(&d)).await;
+                return respond_error(
+                    state,
+                    session_id,
+                    19,
+                    "You need to be identified before",
+                    request_id(&d),
+                )
+                .await;
             }
             player.username.clone()
         } else {
-            return respond_error(state, session_id, 19, "You need to be identified before", request_id(&d)).await;
+            return respond_error(
+                state,
+                session_id,
+                19,
+                "You need to be identified before",
+                request_id(&d),
+            )
+            .await;
         }
     };
 
     let room_hint = d.get("gameId").and_then(Value::as_str);
-    let (room_id, reactions) = match update_message_reactions(state, message_id, emoji, &username, room_hint).await {
-        Some(result) => result,
-        None => return respond_error(state, session_id, 19, "Unknown messageId", request_id(&d)).await,
-    };
+    let (room_id, reactions) =
+        match update_message_reactions(state, message_id, emoji, &username, room_hint).await {
+            Some(result) => result,
+            None => {
+                return respond_error(state, session_id, 19, "Unknown messageId", request_id(&d))
+                    .await
+            }
+        };
 
     broadcast_to_room(
         state,
@@ -666,7 +829,10 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
     respond_to_sender(
         state,
         session_id,
-        with_request_id(json!({ "op": 19, "d": { "ok": true, "messageId": message_id } }), request_id(&d)),
+        with_request_id(
+            json!({ "op": 19, "d": { "ok": true, "messageId": message_id } }),
+            request_id(&d),
+        ),
     )
     .await;
     false
@@ -694,7 +860,14 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                 (player.username.clone(), is_admin)
             }
             _ => {
-                return respond_error(state, session_id, 21, "You need to be identified before", request_id(&d)).await;
+                return respond_error(
+                    state,
+                    session_id,
+                    21,
+                    "You need to be identified before",
+                    request_id(&d),
+                )
+                .await;
             }
         }
     };
@@ -718,7 +891,14 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                         break;
                     }
                     if !is_admin && message.username != username {
-                        return respond_error(state, session_id, 21, "Only the author can delete this message", request_id(&d)).await;
+                        return respond_error(
+                            state,
+                            session_id,
+                            21,
+                            "Only the author can delete this message",
+                            request_id(&d),
+                        )
+                        .await;
                     }
                     message.text.clear();
                     message.attachment = None;
@@ -735,7 +915,9 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
 
     let (room_id, already_deleted) = match result {
         Some(v) => v,
-        None => return respond_error(state, session_id, 21, "Unknown messageId", request_id(&d)).await,
+        None => {
+            return respond_error(state, session_id, 21, "Unknown messageId", request_id(&d)).await
+        }
     };
 
     if !already_deleted {
@@ -890,12 +1072,18 @@ async fn exchange_joined(state: &SharedState, session_id: &str, d: Value) -> boo
 }
 
 async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> bool {
-    let is_voice_chat = d.get("isVoiceChat").and_then(Value::as_bool).unwrap_or(false);
+    let is_voice_chat = d
+        .get("isVoiceChat")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let voice_result = {
         let mut players = state.players.write().await;
         if let Some(player) = players.get_mut(session_id) {
             player.is_voice_chat = is_voice_chat;
-            Ok((player.username.clone(), player.rooms.iter().cloned().collect::<Vec<_>>()))
+            Ok((
+                player.username.clone(),
+                player.rooms.iter().cloned().collect::<Vec<_>>(),
+            ))
         } else {
             Err("You need to be identified before")
         }
@@ -946,12 +1134,16 @@ async fn relay_voice_data(
     }
 
     // Size-bound the chunk payload before doing anything else.
-    let chunk = d
-        .get("chunk")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let chunk = d.get("chunk").and_then(Value::as_str).unwrap_or("");
     if chunk.len() > MAX_VOICE_CHUNK_B64_LEN {
-        return respond_error(state, session_id, 99, "Voice chunk too large", request_id(&d)).await;
+        return respond_error(
+            state,
+            session_id,
+            99,
+            "Voice chunk too large",
+            request_id(&d),
+        )
+        .await;
     }
 
     let now = now_ms();
@@ -1051,7 +1243,14 @@ async fn update_mute_state(state: &SharedState, session_id: &str, d: Value) -> b
     };
 
     if !did_update {
-        return respond_error(state, session_id, 100, "You need to be identified before", request_id(&d)).await;
+        return respond_error(
+            state,
+            session_id,
+            100,
+            "You need to be identified before",
+            request_id(&d),
+        )
+        .await;
     }
 
     false
@@ -1078,6 +1277,7 @@ async fn admin_status(state: &SharedState, session_id: &str, d: Value) -> bool {
                     version: player.version.clone(),
                     mobile: player.is_mobile,
                     secure_context: player.is_secure,
+                    delete_messages_on_leave: player.delete_messages_on_leave,
                 }
             })
             .collect::<Vec<_>>()
@@ -1118,7 +1318,14 @@ async fn admin_blacklist(state: &SharedState, session_id: &str, d: Value) -> boo
 
     let mut blacklisted = state.database.blacklisted_ips().await;
     if blacklisted.iter().any(|entry| entry.ip == ip) {
-        return respond_error(state, session_id, 102, "Ip is already blacklisted", request_id(&d)).await;
+        return respond_error(
+            state,
+            session_id,
+            102,
+            "Ip is already blacklisted",
+            request_id(&d),
+        )
+        .await;
     }
 
     let connected_player = {
@@ -1193,7 +1400,14 @@ async fn admin_unblacklist(state: &SharedState, session_id: &str, d: Value) -> b
 
     let mut blacklisted = state.database.blacklisted_ips().await;
     if !blacklisted.iter().any(|entry| entry.ip == ip) {
-        return respond_error(state, session_id, 103, "Ip is not blacklisted", request_id(&d)).await;
+        return respond_error(
+            state,
+            session_id,
+            103,
+            "Ip is not blacklisted",
+            request_id(&d),
+        )
+        .await;
     }
 
     blacklisted.retain(|entry| entry.ip != ip);
@@ -1336,7 +1550,10 @@ async fn resolve_room_for_session(
     session_id: &str,
     requested_room: Option<&str>,
 ) -> Result<String, String> {
-    if let Some(room) = requested_room.map(str::trim).filter(|room| !room.is_empty()) {
+    if let Some(room) = requested_room
+        .map(str::trim)
+        .filter(|room| !room.is_empty())
+    {
         validate_room_id(room).map_err(str::to_owned)?;
         return Ok(room.to_owned());
     }
@@ -1408,7 +1625,10 @@ async fn update_message_reactions(
 
     if let Some(room_id) = room_hint.map(str::trim).filter(|room| !room.is_empty()) {
         if let Some(messages) = rooms.get_mut(room_id) {
-            if let Some(message) = messages.iter_mut().find(|message| message.message_id == message_id) {
+            if let Some(message) = messages
+                .iter_mut()
+                .find(|message| message.message_id == message_id)
+            {
                 toggle_reaction_in_message(message, emoji, username);
                 return Some((room_id.to_owned(), message.reactions.clone()));
             }
@@ -1416,7 +1636,10 @@ async fn update_message_reactions(
     }
 
     for (room_id, messages) in rooms.iter_mut() {
-        if let Some(message) = messages.iter_mut().find(|message| message.message_id == message_id) {
+        if let Some(message) = messages
+            .iter_mut()
+            .find(|message| message.message_id == message_id)
+        {
             toggle_reaction_in_message(message, emoji, username);
             return Some((room_id.clone(), message.reactions.clone()));
         }
@@ -1426,9 +1649,19 @@ async fn update_message_reactions(
 }
 
 fn toggle_reaction_in_message(message: &mut ChatMessageRecord, emoji: &str, username: &str) {
-    if let Some(index) = message.reactions.iter().position(|reaction| reaction.emoji == emoji) {
-        if message.reactions[index].users.iter().any(|user| user == username) {
-            message.reactions[index].users.retain(|user| user != username);
+    if let Some(index) = message
+        .reactions
+        .iter()
+        .position(|reaction| reaction.emoji == emoji)
+    {
+        if message.reactions[index]
+            .users
+            .iter()
+            .any(|user| user == username)
+        {
+            message.reactions[index]
+                .users
+                .retain(|user| user != username);
         } else {
             message.reactions[index].users.push(username.to_owned());
             message.reactions[index].users.sort();
@@ -1567,7 +1800,8 @@ pub async fn broadcast_to_exchange_key_excluding(
         players
             .values()
             .filter(|player| {
-                player.exchange_key.as_deref() == Some(exchange_key) && player.id != excluded_session_id
+                player.exchange_key.as_deref() == Some(exchange_key)
+                    && player.id != excluded_session_id
             })
             .map(|player| player.tx.clone())
             .collect::<Vec<_>>()

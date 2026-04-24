@@ -531,6 +531,7 @@ export function useMessenger() {
 
   function setDeleteMessagesOnLeave(value) {
     state.deleteMessagesOnLeave = Boolean(value);
+    syncClientSettings();
     persist();
   }
 
@@ -868,6 +869,16 @@ export function useMessenger() {
     state.ws.send(JSON.stringify(payload));
   }
 
+  function syncClientSettings() {
+    if (!state.connected || !state.identified) return;
+    send({
+      op: 8,
+      d: {
+        deleteMessagesOnLeave: state.deleteMessagesOnLeave
+      }
+    });
+  }
+
   function requestJoin(roomId) {
     const id = sanitizeRoomId(roomId);
     const validation = validateRoomId(id);
@@ -920,7 +931,6 @@ export function useMessenger() {
     state.joinedRooms = state.joinedRooms.filter((r) => r !== id);
     state.pendingJoinRooms = state.pendingJoinRooms.filter((r) => r !== id);
     delete state.usersByRoom[id];
-    if (state.deleteMessagesOnLeave) clearRoomMessages(id);
     if (state.activeRoom === id) state.activeRoom = "";
     persist();
   }
@@ -1001,6 +1011,7 @@ export function useMessenger() {
         d: {
           username,
           isVoiceChat: state.voiceEnabled,
+          deleteMessagesOnLeave: state.deleteMessagesOnLeave,
           v: "qxprotocol-web-vite-vue",
           isMobile: /Android|iPhone|iPad|iPod/i.test(navigator.userAgent),
           isSecure: window.isSecureContext
@@ -1541,6 +1552,9 @@ export function useMessenger() {
         state.lastError = d?.reason ? `Blacklisted: ${d.reason}` : "Blacklisted.";
         disconnect();
         break;
+      case 25:
+        applyRoomMessagesDeleted(d);
+        break;
       case 87:
         state.systemBanner = d?.msg || state.systemBanner;
         break;
@@ -1581,12 +1595,26 @@ export function useMessenger() {
 
     if (d?.ok) {
       state.joinedRooms = state.joinedRooms.filter((r) => r !== roomId);
-      if (state.deleteMessagesOnLeave) clearRoomMessages(roomId);
+      applyDeletedMessageIds(roomId, d.deletedMessageIds);
       if (roomId === state.activeRoom) state.activeRoom = "";
     } else if (d?.left) {
       const arr = state.usersByRoom[roomId];
       if (arr) state.usersByRoom[roomId] = arr.filter((u) => u !== d.left);
     }
+  }
+
+  function applyDeletedMessageIds(roomId, messageIds) {
+    const id = sanitizeRoomId(roomId);
+    if (!id || !Array.isArray(messageIds)) return;
+    for (const messageId of messageIds) {
+      applyDeletion({ gameId: id, messageId });
+    }
+  }
+
+  function applyRoomMessagesDeleted(d) {
+    const roomId = sanitizeRoomId(d?.gameId);
+    if (!roomId) return;
+    applyDeletedMessageIds(roomId, d.messageIds);
   }
 
   function handleHistoryOp(d) {

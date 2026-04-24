@@ -29,6 +29,8 @@ pub struct PlayerStatus {
     pub mobile: Option<bool>,
     #[serde(rename = "secureContext")]
     pub secure_context: Option<bool>,
+    #[serde(rename = "deleteMessagesOnLeave")]
+    pub delete_messages_on_leave: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

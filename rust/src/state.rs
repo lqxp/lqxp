@@ -1,4 +1,7 @@
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use axum::extract::ws::Message;
 use tokio::sync::{mpsc, RwLock};
@@ -32,4 +35,5 @@ pub struct PlayerSession {
     pub is_mobile: Option<bool>,
     pub is_secure: Option<bool>,
     pub muted_users: HashSet<String>,
+    pub delete_messages_on_leave: bool,
 }

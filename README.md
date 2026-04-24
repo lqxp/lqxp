@@ -48,12 +48,14 @@ Le protocole historique `op` est conserve pour le gameplay/chat/voice :
 - `5`: kill event
 - `6`: version query
 - `7`: chat
+- `8`: client settings update (`deleteMessagesOnLeave`)
 - `15`: alive exchange
 - `16`: game end exchange
 - `17`: exchange joined notification
 - `18`: room message history sync
 - `19`: toggle reaction on a message by `messageId`
 - `20`: reaction update broadcast for a message
+- `25`: room user messages deleted broadcast
 - `98`: voice chat state
 - `99`: voice payload
 - `100`: mute user

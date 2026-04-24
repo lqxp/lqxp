@@ -8,7 +8,10 @@ use serde_json::{json, Value};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{info, warn};
 
-use crate::{state::{PlayerSession, SharedState}, utils::{random_session_id, send_json}};
+use crate::{
+    state::{PlayerSession, SharedState},
+    utils::{random_session_id, send_json},
+};
 
 pub async fn handle_socket(state: SharedState, socket: WebSocket, ip: String) {
     let session_id = random_session_id();
@@ -54,8 +57,14 @@ pub async fn handle_socket(state: SharedState, socket: WebSocket, ip: String) {
             }
             Ok(Message::Binary(payload)) => {
                 let text = String::from_utf8_lossy(&payload).into_owned();
-                let should_close =
-                    protocol::process_message(state.clone(), session_id.clone(), ip.clone(), tx.clone(), text).await;
+                let should_close = protocol::process_message(
+                    state.clone(),
+                    session_id.clone(),
+                    ip.clone(),
+                    tx.clone(),
+                    text,
+                )
+                .await;
                 if should_close {
                     let _ = tx.send(Message::Close(None));
                     break;
@@ -140,6 +149,7 @@ async fn register_connection(
             is_mobile: None,
             is_secure: None,
             muted_users: HashSet::new(),
+            delete_messages_on_leave: false,
         },
     );
 
@@ -182,6 +192,10 @@ pub async fn disconnect_player(state: &SharedState, session_id: &str) {
             }),
         )
         .await;
+
+        if player.delete_messages_on_leave {
+            protocol::delete_user_messages_in_room_and_broadcast(state, game_id, &username).await;
+        }
 
         protocol::broadcast_to_room(
             state,
