@@ -87,7 +87,7 @@ function filesFromClipboard(event: ClipboardEvent): File[] {
 
 function isEditableElement(element: Element | null) {
   if (!element || element === document.body || element === document.documentElement) return false;
-  if (element.isContentEditable) return true;
+  if (element instanceof HTMLElement && element.isContentEditable) return true;
   return ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName);
 }
 

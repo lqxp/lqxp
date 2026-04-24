@@ -1257,7 +1257,11 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
                 Ok((
                     player.username.clone(),
                     player.rooms.iter().cloned().collect::<Vec<_>>(),
-                    call_media_json(audio && is_voice_chat, player.call_camera, player.call_screen),
+                    call_media_json(
+                        audio && is_voice_chat,
+                        player.call_camera,
+                        player.call_screen,
+                    ),
                 ))
             }
         } else {
@@ -1267,7 +1271,9 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
 
     let (username, rooms, media_json) = match update_result {
         Ok(values) => values,
-        Err(message) => return respond_error(state, session_id, 110, message, request_id(&d)).await,
+        Err(message) => {
+            return respond_error(state, session_id, 110, message, request_id(&d)).await
+        }
     };
 
     for game_id in rooms {
@@ -1314,13 +1320,27 @@ async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> b
         .map(str::trim)
         .unwrap_or("");
     if !matches!(signal_type, "offer" | "answer" | "ice") {
-        return respond_error(state, session_id, 111, "Invalid signal type", request_id(&d)).await;
+        return respond_error(
+            state,
+            session_id,
+            111,
+            "Invalid signal type",
+            request_id(&d),
+        )
+        .await;
     }
 
     let (from_user, target_tx) = {
         let players = state.players.read().await;
         let Some(sender) = players.get(session_id) else {
-            return respond_error(state, session_id, 111, "You need to be identified before", request_id(&d)).await;
+            return respond_error(
+                state,
+                session_id,
+                111,
+                "You need to be identified before",
+                request_id(&d),
+            )
+            .await;
         };
         if !sender.rooms.contains(game_id) || !sender.is_voice_chat {
             return respond_error(state, session_id, 111, "Not in this call", request_id(&d)).await;
@@ -1330,7 +1350,14 @@ async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> b
             player.username == to_user && player.rooms.contains(game_id) && player.is_voice_chat
         });
         let Some(target) = target else {
-            return respond_error(state, session_id, 111, "Target is not in this call", request_id(&d)).await;
+            return respond_error(
+                state,
+                session_id,
+                111,
+                "Target is not in this call",
+                request_id(&d),
+            )
+            .await;
         };
         (sender.username.clone(), target.tx.clone())
     };
@@ -1348,7 +1375,9 @@ async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> b
         clean["candidate"] = candidate.clone();
     }
 
-    let _ = target_tx.send(Message::Text(json!({ "op": 111, "d": clean }).to_string().into()));
+    let _ = target_tx.send(Message::Text(
+        json!({ "op": 111, "d": clean }).to_string().into(),
+    ));
     false
 }
 
