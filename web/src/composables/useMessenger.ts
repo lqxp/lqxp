@@ -459,7 +459,7 @@ export function useMessenger() {
   let notificationAudioContext = null;
   let callManager: WebRtcCallManager | null = null;
   let callOutboundStream: MediaStream | null = null;
-  let callGateFrame = 0;
+  let callGateTimer: ReturnType<typeof setInterval> | null = null;
   let callGateOpenUntil = 0;
 
   function attachmentUrlFor(message) {
@@ -689,17 +689,19 @@ export function useMessenger() {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioCtx) return stream;
       const context = new AudioCtx();
-      const source = context.createMediaStreamSource(stream);
+      const monitorStream = new MediaStream(stream.getAudioTracks().map((track) => track.clone()));
+      const monitorSource = context.createMediaStreamSource(monitorStream);
+      const outboundSource = context.createMediaStreamSource(stream);
       const analyser = context.createAnalyser();
       const gate = context.createGain();
       const destination = context.createMediaStreamDestination();
       analyser.fftSize = 1024;
-      gate.gain.value = 1;
-      source.connect(analyser);
-      source.connect(gate);
+      gate.gain.value = Number(state.microphoneThreshold) > 0 ? 0 : 1;
+      monitorSource.connect(analyser);
+      outboundSource.connect(gate);
       gate.connect(destination);
       context.resume?.().catch?.(() => {});
-      state.callAnalyser = { context, analyser, gate };
+      state.callAnalyser = { context, analyser, gate, monitorStream };
       state.callAnalyserData = new Uint8Array(analyser.fftSize);
       return destination.stream;
     } catch {
@@ -710,11 +712,12 @@ export function useMessenger() {
   }
 
   function closeCallAnalyser() {
-    if (callGateFrame) {
-      cancelAnimationFrame(callGateFrame);
-      callGateFrame = 0;
+    if (callGateTimer) {
+      clearInterval(callGateTimer);
+      callGateTimer = null;
     }
     callGateOpenUntil = 0;
+    stopStreamTracks(state.callAnalyser?.monitorStream);
     const context = state.callAnalyser?.context;
     state.callAnalyser = null;
     state.callAnalyserData = null;
@@ -723,9 +726,10 @@ export function useMessenger() {
 
   function isAboveMicrophoneThreshold() {
     const threshold = Number(state.microphoneThreshold) || 0;
+    if (threshold >= 100) return false;
     if (threshold <= 0 || !state.callAnalyser?.analyser || !state.callAnalyserData) return true;
     state.callAnalyser.analyser.getByteTimeDomainData(state.callAnalyserData);
-    return microphoneLevelFromSamples(state.callAnalyserData) >= threshold;
+    return microphoneLevelFromSamples(state.callAnalyserData) > threshold;
   }
 
   function setCallAudioGateOpen(open) {
@@ -735,10 +739,12 @@ export function useMessenger() {
       const now = context.currentTime;
       gate.gain.cancelScheduledValues(now);
       gate.gain.setTargetAtTime(open ? 1 : 0, now, 0.025);
-      return;
     }
 
     for (const track of callOutboundStream?.getAudioTracks?.() || []) {
+      track.enabled = open;
+    }
+    for (const track of state.callStream?.getAudioTracks?.() || []) {
       track.enabled = open;
     }
   }
@@ -748,7 +754,10 @@ export function useMessenger() {
 
     let open = !state.callMuted;
     const threshold = Number(state.microphoneThreshold) || 0;
-    if (open && threshold > 0 && state.callAnalyser?.analyser && state.callAnalyserData) {
+    if (open && threshold >= 100) {
+      open = false;
+      callGateOpenUntil = 0;
+    } else if (open && threshold > 0 && state.callAnalyser?.analyser && state.callAnalyserData) {
       const now = Date.now();
       if (isAboveMicrophoneThreshold()) callGateOpenUntil = now + 220;
       open = now <= callGateOpenUntil;
@@ -760,17 +769,17 @@ export function useMessenger() {
   }
 
   function startCallAudioGate() {
-    if (callGateFrame) cancelAnimationFrame(callGateFrame);
+    if (callGateTimer) clearInterval(callGateTimer);
     const tick = () => {
       if (!state.inCall || !callOutboundStream) {
-        callGateFrame = 0;
+        if (callGateTimer) clearInterval(callGateTimer);
+        callGateTimer = null;
         return;
       }
       updateCallAudioGate();
-      callGateFrame = requestAnimationFrame(tick);
     };
     updateCallAudioGate();
-    callGateFrame = requestAnimationFrame(tick);
+    callGateTimer = setInterval(tick, 30);
   }
 
   function stopMicTest() {
