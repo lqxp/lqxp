@@ -54,15 +54,6 @@ function openSettings() {
         <button class="icon-btn" type="button" aria-label="New conversation" @click="messenger.startCompose">
           <svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>
         </button>
-        <button class="icon-btn" type="button" aria-label="Shuffle playlist room" title="Shuffle playlist room" @click="messenger.createRandomRoom">
-          <svg viewBox="0 0 24 24">
-            <path d="M3 7h3.6c1.5 0 2.7.8 3.5 2.1l3.8 5.8c.8 1.3 2 2.1 3.5 2.1H21"/>
-            <path d="M18 14l3 3-3 3"/>
-            <path d="M3 17h3.6c1.5 0 2.7-.8 3.5-2.1"/>
-            <path d="M13.9 9.1c.8-1.3 2-2.1 3.5-2.1H21"/>
-            <path d="M18 4l3 3-3 3"/>
-          </svg>
-        </button>
         <button class="icon-btn" type="button" aria-label="Settings" @click="openSettings">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="12" cy="19" r="1.2"/></svg>
         </button>

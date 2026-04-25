@@ -2,6 +2,7 @@
 import { computed, onMounted } from "vue";
 import { useMessenger } from "@/composables/useMessenger";
 import MessengerSidebar from "@/components/MessengerSidebar.vue";
+import MemberSidebar from "@/components/MemberSidebar.vue";
 import ThreadHeader from "@/components/ThreadHeader.vue";
 import MessageList from "@/components/MessageList.vue";
 import ComposerBar from "@/components/ComposerBar.vue";
@@ -31,7 +32,7 @@ function goToCallRoom() {
 </script>
 
 <template>
-  <div class="app">
+  <div class="app" :class="{ 'is-thread': hasActive }">
     <MessengerSidebar :messenger="messenger" />
 
     <Transition name="toast">
@@ -41,10 +42,16 @@ function goToCallRoom() {
     </Transition>
 
     <main class="thread" v-if="hasActive">
-      <ThreadHeader :messenger="messenger" />
-      <CallPanel :messenger="messenger" />
-      <MessageList :messenger="messenger" />
-      <ComposerBar :messenger="messenger" />
+      <div class="thread__shell">
+        <section class="thread__main">
+          <ThreadHeader :messenger="messenger" />
+          <CallPanel :messenger="messenger" />
+          <MessageList :messenger="messenger" />
+          <ComposerBar :messenger="messenger" />
+        </section>
+
+        <MemberSidebar :messenger="messenger" />
+      </div>
     </main>
 
     <div class="no-thread" v-else>
