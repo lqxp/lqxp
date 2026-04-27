@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, RwLock};
 use crate::{
     config::Config,
     db::JsonDatabase,
-    models::{ChatMessageRecord, UserProfile},
+    models::{ChatMessageRecord, UserPresenceStatus, UserProfile},
 };
 
 #[derive(Debug, Clone)]
@@ -43,4 +43,5 @@ pub struct PlayerSession {
     pub muted_users: HashSet<String>,
     pub delete_messages_on_leave: bool,
     pub profile: UserProfile,
+    pub status: UserPresenceStatus,
 }

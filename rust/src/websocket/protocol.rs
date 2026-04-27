@@ -10,7 +10,8 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use crate::{
     models::{
         Attachment, BlacklistEntry, ChatMessageRecord, EncryptedPayload, LoggedIpEntry,
-        MessageReaction, PlayerStatus, ProfileImage, SocketPayload, UserProfile,
+        MessageReaction, PlayerStatus, ProfileImage, SocketPayload, UserPresenceStatus,
+        UserProfile,
     },
     state::SharedState,
     utils::{admin_allowed, now_ms, random_message_id, request_id, send_json, with_request_id},
@@ -213,8 +214,9 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
         Ok(profile) => profile,
         Err(message) => return respond_error(state, session_id, 2, message, request_id(&d)).await,
     };
+    let status = parse_user_status(d.get("status").or_else(|| d.get("presenceStatus")));
 
-    let (final_username, exchange_key, voice_chat, version, is_mobile, is_secure, profile) = {
+    let (final_username, exchange_key, voice_chat, version, is_mobile, is_secure, profile, status) = {
         let mut players = state.players.write().await;
         let Some(player) = players.get_mut(session_id) else {
             return false;
@@ -251,6 +253,7 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
         player.is_mobile = d.get("isMobile").and_then(Value::as_bool);
         player.is_secure = d.get("isSecure").and_then(Value::as_bool);
         player.profile = profile;
+        player.status = status;
 
         (
             candidate,
@@ -260,6 +263,7 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
             player.is_mobile,
             player.is_secure,
             player.profile.clone(),
+            player.status,
         )
     };
 
@@ -287,7 +291,8 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
                 "op": 2,
                 "d": {
                     "uuid": session_id,
-                    "profile": profile.clone()
+                    "profile": profile.clone(),
+                    "status": status
                 }
             }),
             request_id(&d),
@@ -295,24 +300,27 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
     )
     .await;
 
-    if let Some(exchange_key) = exchange_key {
-        broadcast_to_exchange_key_excluding(
-            state,
-            &exchange_key,
-            session_id,
-            json!({
-                "op": 13,
-                "d": {
-                    "username": final_username,
-                    "v": version,
-                    "isSecure": is_secure,
-                    "isMobile": is_mobile,
-                    "isVoiceChat": voice_chat,
-                    "profile": profile
-                }
-            }),
-        )
-        .await;
+    if status != UserPresenceStatus::Invisible {
+        if let Some(exchange_key) = exchange_key {
+            broadcast_to_exchange_key_excluding(
+                state,
+                &exchange_key,
+                session_id,
+                json!({
+                    "op": 13,
+                    "d": {
+                        "username": final_username,
+                        "v": version,
+                        "isSecure": is_secure,
+                        "isMobile": is_mobile,
+                        "isVoiceChat": voice_chat,
+                        "profile": profile,
+                        "status": status
+                    }
+                }),
+            )
+            .await;
+        }
     }
 
     false
@@ -346,12 +354,20 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
         Err(message) => return respond_error(state, session_id, 3, message, request_id(&d)).await,
     };
 
-    let roster = room_usernames(state, game_id).await;
-    let profiles = room_profiles(state, game_id).await;
-    let voice_roster = room_voice_usernames(state, game_id).await;
-    let call_players = room_call_players(state, game_id).await;
+    let joining_status = session_status(state, session_id).await;
+    let broadcast_roster = room_usernames(state, game_id, None).await;
+    let broadcast_profiles = room_profiles(state, game_id, None).await;
+    let broadcast_statuses = room_statuses(state, game_id, None).await;
+    let broadcast_voice_roster = room_voice_usernames(state, game_id, None).await;
+    let broadcast_call_players = room_call_players(state, game_id, None).await;
 
-    if !already_in {
+    let roster = room_usernames(state, game_id, Some(session_id)).await;
+    let profiles = room_profiles(state, game_id, Some(session_id)).await;
+    let statuses = room_statuses(state, game_id, Some(session_id)).await;
+    let voice_roster = room_voice_usernames(state, game_id, Some(session_id)).await;
+    let call_players = room_call_players(state, game_id, Some(session_id)).await;
+
+    if !already_in && joining_status != Some(UserPresenceStatus::Invisible) {
         broadcast_to_room(
             state,
             game_id,
@@ -361,10 +377,11 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "ok": true,
                     "system": true,
                     "gameId": game_id,
-                    "players": roster.clone(),
-                    "profiles": profiles.clone(),
-                    "voicePlayers": voice_roster.clone(),
-                    "callPlayers": call_players.clone()
+                    "players": broadcast_roster,
+                    "profiles": broadcast_profiles,
+                    "statuses": broadcast_statuses,
+                    "voicePlayers": broadcast_voice_roster,
+                    "callPlayers": broadcast_call_players
                 }
             }),
         )
@@ -382,6 +399,7 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "gameId": game_id,
                     "players": roster,
                     "profiles": profiles,
+                    "statuses": statuses,
                     "voicePlayers": voice_roster,
                     "callPlayers": call_players,
                     "alreadyJoined": already_in
@@ -484,42 +502,55 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
         None
     };
 
-    let did_update = {
+    let status_update = d
+        .get("status")
+        .or_else(|| d.get("presenceStatus"))
+        .map(|value| parse_user_status(Some(value)));
+
+    let update_context = {
         let mut players = state.players.write().await;
         if let Some(player) = players.get_mut(session_id) {
+            let previous_status = player.status;
+            let previous_voice_chat = player.is_voice_chat;
             player.delete_messages_on_leave = delete_messages_on_leave;
             if let Some(profile) = profile_update.clone() {
                 player.profile = profile;
             }
-            true
+            if let Some(status) = status_update {
+                player.status = status;
+                if status == UserPresenceStatus::Invisible {
+                    player.is_voice_chat = false;
+                    player.call_camera = false;
+                    player.call_screen = false;
+                }
+            }
+            Ok((
+                player.username.clone(),
+                player.profile.clone(),
+                player.status,
+                previous_status,
+                previous_voice_chat,
+                player.rooms.iter().cloned().collect::<Vec<_>>(),
+            ))
         } else {
-            false
+            Err(())
         }
     };
 
-    if !did_update {
-        return respond_error(
-            state,
-            session_id,
-            8,
-            "You need to be identified before",
-            request_id(&d),
-        )
-        .await;
-    }
-
-    let updated_context = if profile_update.is_some() {
-        let players = state.players.read().await;
-        players.get(session_id).map(|player| {
-            (
-                player.username.clone(),
-                player.profile.clone(),
-                player.rooms.iter().cloned().collect::<Vec<_>>(),
-            )
-        })
-    } else {
-        None
-    };
+    let (username, profile, status, previous_status, previous_voice_chat, rooms) =
+        match update_context {
+            Ok(context) => context,
+            Err(_) => {
+                return respond_error(
+                    state,
+                    session_id,
+                    8,
+                    "You need to be identified before",
+                    request_id(&d),
+                )
+                .await
+            }
+        };
 
     respond_to_sender(
         state,
@@ -530,7 +561,8 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
                 "d": {
                     "ok": true,
                     "deleteMessagesOnLeave": delete_messages_on_leave,
-                    "profile": profile_update.clone()
+                    "profile": profile_update.clone(),
+                    "status": status
                 }
             }),
             request_id(&d),
@@ -538,20 +570,57 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
     )
     .await;
 
-    if let Some((username, profile, rooms)) = updated_context {
+    if profile_update.is_some() && status != UserPresenceStatus::Invisible {
+        for room in &rooms {
+            broadcast_to_room(
+                state,
+                room,
+                json!({
+                    "op": 26,
+                    "d": {
+                        "user": username.clone(),
+                        "profile": profile.clone()
+                    }
+                }),
+            )
+            .await;
+        }
+    }
+
+    if status_update.is_some() && status != previous_status {
         for room in rooms {
             broadcast_to_room(
                 state,
                 &room,
                 json!({
-                    "op": 26,
+                    "op": 27,
                     "d": {
-                        "user": username,
-                        "profile": profile
+                        "gameId": room,
+                        "user": username.clone(),
+                        "status": status,
+                        "visible": status != UserPresenceStatus::Invisible,
+                        "profile": profile.clone()
                     }
                 }),
             )
             .await;
+            if status == UserPresenceStatus::Invisible && previous_voice_chat {
+                broadcast_to_room(
+                    state,
+                    &room,
+                    json!({
+                        "op": 110,
+                        "d": {
+                            "gameId": room,
+                            "user": username.clone(),
+                            "status": status,
+                            "isVoiceChat": false,
+                            "media": call_media_json(false, false, false)
+                        }
+                    }),
+                )
+                .await;
+            }
         }
     }
 
@@ -1192,24 +1261,29 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
     let voice_result = {
         let mut players = state.players.write().await;
         if let Some(player) = players.get_mut(session_id) {
-            player.is_voice_chat = is_voice_chat;
-            player.call_camera = media.1;
-            player.call_screen = media.2;
-            if !is_voice_chat {
-                player.call_camera = false;
-                player.call_screen = false;
+            if is_voice_chat && player.status == UserPresenceStatus::Invisible {
+                Err("Invisible users cannot join voice chat")
+            } else {
+                player.is_voice_chat = is_voice_chat;
+                player.call_camera = media.1;
+                player.call_screen = media.2;
+                if !is_voice_chat {
+                    player.call_camera = false;
+                    player.call_screen = false;
+                }
+                Ok((
+                    player.username.clone(),
+                    player.status,
+                    player.rooms.iter().cloned().collect::<Vec<_>>(),
+                    call_media_json(player.is_voice_chat, player.call_camera, player.call_screen),
+                ))
             }
-            Ok((
-                player.username.clone(),
-                player.rooms.iter().cloned().collect::<Vec<_>>(),
-                call_media_json(player.is_voice_chat, player.call_camera, player.call_screen),
-            ))
         } else {
             Err("You need to be identified before")
         }
     };
 
-    let (username, rooms, media_json) = match voice_result {
+    let (username, status, rooms, media_json) = match voice_result {
         Ok(values) => values,
         Err(message) => return respond_error(state, session_id, 98, message, request_id(&d)).await,
     };
@@ -1223,6 +1297,7 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
                 "d": {
                     "gameId": game_id,
                     "user": username.clone(),
+                    "status": status,
                     "isVoiceChat": is_voice_chat,
                     "media": media_json.clone()
                 }
@@ -1353,6 +1428,8 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
         if let Some(player) = players.get_mut(session_id) {
             if player.username.is_empty() {
                 Err("You need to be identified before")
+            } else if is_voice_chat && player.status == UserPresenceStatus::Invisible {
+                Err("Invisible users cannot join calls")
             } else {
                 player.is_voice_chat = is_voice_chat;
                 player.call_camera = camera;
@@ -1363,6 +1440,7 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
                 }
                 Ok((
                     player.username.clone(),
+                    player.status,
                     player.rooms.iter().cloned().collect::<Vec<_>>(),
                     call_media_json(
                         audio && is_voice_chat,
@@ -1376,7 +1454,7 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
         }
     };
 
-    let (username, rooms, media_json) = match update_result {
+    let (username, status, rooms, media_json) = match update_result {
         Ok(values) => values,
         Err(message) => {
             return respond_error(state, session_id, 110, message, request_id(&d)).await
@@ -1392,6 +1470,7 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
                 "d": {
                     "gameId": game_id,
                     "user": username.clone(),
+                    "status": status,
                     "isVoiceChat": is_voice_chat,
                     "media": media_json.clone()
                 }
@@ -1547,6 +1626,7 @@ async fn admin_status(state: &SharedState, session_id: &str, d: Value) -> bool {
                     secure_context: player.is_secure,
                     delete_messages_on_leave: player.delete_messages_on_leave,
                     profile: player.profile.clone(),
+                    status: player.status,
                 }
             })
             .collect::<Vec<_>>()
@@ -1753,7 +1833,7 @@ async fn admin_broadcast(state: &SharedState, session_id: &str, d: Value) -> boo
 async fn stats_query(state: &SharedState, session_id: &str, d: Value) -> bool {
     let game_id = d.get("gameId").and_then(Value::as_str);
     let count = match game_id {
-        Some(game_id) => room_usernames(state, game_id).await.len(),
+        Some(game_id) => room_usernames(state, game_id, None).await.len(),
         None => {
             let players = state.players.read().await;
             players.len()
@@ -2023,46 +2103,96 @@ fn validate_room_id(room_id: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-async fn room_usernames(state: &SharedState, game_id: &str) -> Vec<String> {
+async fn session_status(state: &SharedState, session_id: &str) -> Option<UserPresenceStatus> {
+    let players = state.players.read().await;
+    players.get(session_id).map(|player| player.status)
+}
+
+fn is_visible_to(player: &crate::state::PlayerSession, viewer_session_id: Option<&str>) -> bool {
+    player.status != UserPresenceStatus::Invisible || viewer_session_id == Some(player.id.as_str())
+}
+
+async fn room_usernames(
+    state: &SharedState,
+    game_id: &str,
+    viewer_session_id: Option<&str>,
+) -> Vec<String> {
     let players = state.players.read().await;
     players
         .values()
-        .filter(|player| player.rooms.contains(game_id))
+        .filter(|player| player.rooms.contains(game_id) && is_visible_to(player, viewer_session_id))
         .map(|player| player.username.clone())
         .collect()
 }
 
-async fn room_profiles(state: &SharedState, game_id: &str) -> Value {
+async fn room_profiles(
+    state: &SharedState,
+    game_id: &str,
+    viewer_session_id: Option<&str>,
+) -> Value {
     let players = state.players.read().await;
     let mut profiles = Map::new();
     for player in players
         .values()
-        .filter(|player| player.rooms.contains(game_id))
+        .filter(|player| player.rooms.contains(game_id) && is_visible_to(player, viewer_session_id))
     {
         profiles.insert(player.username.clone(), json!(player.profile));
     }
     Value::Object(profiles)
 }
 
-async fn room_voice_usernames(state: &SharedState, game_id: &str) -> Vec<String> {
+async fn room_statuses(
+    state: &SharedState,
+    game_id: &str,
+    viewer_session_id: Option<&str>,
+) -> Value {
+    let players = state.players.read().await;
+    let mut statuses = Map::new();
+    for player in players
+        .values()
+        .filter(|player| player.rooms.contains(game_id) && is_visible_to(player, viewer_session_id))
+    {
+        statuses.insert(player.username.clone(), json!(player.status));
+    }
+    Value::Object(statuses)
+}
+
+async fn room_voice_usernames(
+    state: &SharedState,
+    game_id: &str,
+    viewer_session_id: Option<&str>,
+) -> Vec<String> {
     let players = state.players.read().await;
     players
         .values()
-        .filter(|player| player.rooms.contains(game_id) && player.is_voice_chat)
+        .filter(|player| {
+            player.rooms.contains(game_id)
+                && player.is_voice_chat
+                && is_visible_to(player, viewer_session_id)
+        })
         .map(|player| player.username.clone())
         .collect()
 }
 
-async fn room_call_players(state: &SharedState, game_id: &str) -> Vec<Value> {
+async fn room_call_players(
+    state: &SharedState,
+    game_id: &str,
+    viewer_session_id: Option<&str>,
+) -> Vec<Value> {
     let players = state.players.read().await;
     players
         .values()
-        .filter(|player| player.rooms.contains(game_id) && player.is_voice_chat)
+        .filter(|player| {
+            player.rooms.contains(game_id)
+                && player.is_voice_chat
+                && is_visible_to(player, viewer_session_id)
+        })
         .map(|player| {
             json!({
                 "user": player.username,
                 "isVoiceChat": player.is_voice_chat,
-                "media": call_media_json(player.is_voice_chat, player.call_camera, player.call_screen)
+                "media": call_media_json(player.is_voice_chat, player.call_camera, player.call_screen),
+                "status": player.status
             })
         })
         .collect()
@@ -2257,6 +2387,14 @@ fn parse_user_profile(raw: Option<&Value>) -> Result<UserProfile, &'static str> 
         description,
         pronouns,
     })
+}
+
+fn parse_user_status(raw: Option<&Value>) -> UserPresenceStatus {
+    match raw.and_then(Value::as_str).map(str::trim) {
+        Some("invisible") => UserPresenceStatus::Invisible,
+        Some("dnd") | Some("doNotDisturb") | Some("do_not_disturb") => UserPresenceStatus::Dnd,
+        _ => UserPresenceStatus::Online,
+    }
 }
 
 fn sanitize_profile_text(value: &str, limit: usize) -> String {

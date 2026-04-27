@@ -14,7 +14,8 @@ const bannerSrc = computed(() => props.messenger.profileImageSrc(profile.value.b
 const accent = computed(() => props.messenger.accentFor(props.username));
 const isSelf = computed(() => String(props.messenger.state.username || "").trim() === props.username);
 const voiceMembers = computed(() => new Set(props.messenger.state.voiceMembersByRoom[props.messenger.state.activeRoom] || []));
-const statusLabel = computed(() => voiceMembers.value.has(props.username) ? "In voice chat" : "Online");
+const status = computed(() => props.messenger.statusFor(props.username));
+const statusLabel = computed(() => voiceMembers.value.has(props.username) ? "In voice chat" : props.messenger.presenceStatusLabel(status.value));
 
 function initialsFor(name: string) {
   const clean = String(name || "?").trim();
@@ -41,7 +42,14 @@ function initialsFor(name: string) {
         <div class="profile-card__identity">
           <strong>{{ username }}</strong>
           <small>
-            <span class="members__dot" :class="{ 'is-call': voiceMembers.has(username) }"></span>
+            <span
+              class="members__dot"
+              :class="{
+                'is-call': voiceMembers.has(username),
+                'is-dnd': status === 'dnd',
+                'is-invisible': status === 'invisible'
+              }"
+            ></span>
             {{ statusLabel }}<template v-if="profile.pronouns"> · {{ profile.pronouns }}</template><template v-if="isSelf"> · you</template>
           </small>
         </div>

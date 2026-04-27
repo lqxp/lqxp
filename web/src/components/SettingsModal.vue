@@ -248,6 +248,26 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
         <div class="settings-group">
           <label class="settings-field">
             <span class="settings-field__icon">
+              <svg viewBox="0 0 24 24"><path d="M12 2v4"/><path d="M12 18v4"/><path d="m4.93 4.93 2.83 2.83"/><path d="m16.24 16.24 2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="m4.93 19.07 2.83-2.83"/><path d="m16.24 7.76 2.83-2.83"/></svg>
+            </span>
+            <span class="settings-field__body">
+              <span class="settings-field__label">Status</span>
+              <span class="settings-field__hint">Controls how you appear in Presence.</span>
+            </span>
+          </label>
+          <label class="settings-select settings-select--offset">
+            <span class="sr-only">Status</span>
+            <select :value="messenger.state.status" @change="messenger.setPresenceStatus(targetValue($event))">
+              <option value="online">En ligne</option>
+              <option value="invisible">Invisible</option>
+              <option value="dnd">Ne pas déranger</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-field">
+            <span class="settings-field__icon">
               <svg viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h13"/><path d="M4 18h9"/></svg>
             </span>
             <span class="settings-field__body">

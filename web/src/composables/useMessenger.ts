@@ -26,6 +26,7 @@ const MAX_PROFILE_BANNER_BYTES = 5 * 1024 * 1024;
 const MAX_PROFILE_DESCRIPTION_LENGTH = 512;
 const MAX_PROFILE_PRONOUNS_LENGTH = 24;
 const PROFILE_IMAGE_MIME_TYPES = new Set(["image/png", "image/apng", "image/gif", "image/jpeg", "image/jpg"]);
+const PRESENCE_STATUSES = ["online", "invisible", "dnd"];
 const DUPLICATE_MESSAGE_WINDOW_MS = 10 * 60 * 1000;
 const RANDOM_ROOM_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 const E2EE_MESSAGE_PLACEHOLDER = "Encrypted message";
@@ -37,6 +38,22 @@ function inferWebSocketUrl() {
 
 function sanitizeUsername(value) {
   return String(value || "").trim().slice(0, 16);
+}
+
+function sanitizePresenceStatus(value) {
+  const status = String(value || "").trim();
+  return PRESENCE_STATUSES.includes(status) ? status : "online";
+}
+
+function presenceStatusLabel(status) {
+  switch (sanitizePresenceStatus(status)) {
+    case "invisible":
+      return "Invisible";
+    case "dnd":
+      return "Ne pas déranger";
+    default:
+      return "En ligne";
+  }
 }
 
 function sanitizeProfileText(value, limit) {
@@ -243,6 +260,7 @@ function loadPersisted() {
 
     return {
       username: sanitizeUsername(raw.username),
+      status: sanitizePresenceStatus(raw.status),
       activeRoom: isValidRoomId(raw.activeRoom) ? sanitizeRoomId(raw.activeRoom) : "",
       rooms,
       messagesByRoom,
@@ -260,6 +278,7 @@ function loadPersisted() {
   } catch {
     return {
       username: "",
+      status: "online",
       activeRoom: "",
       rooms: [],
       messagesByRoom: {},
@@ -315,6 +334,7 @@ function savePersisted(state) {
       JSON.stringify({
         version: 4,
         username: sanitizeUsername(state.username),
+        status: sanitizePresenceStatus(state.status),
         activeRoom: sanitizeRoomId(state.activeRoom),
         rooms: state.rooms,
         messagesByRoom,
@@ -607,6 +627,7 @@ export function useMessenger() {
     manualClose: false,
 
     username: persisted.username,
+    status: persisted.status,
     profile: persisted.profile,
     activeRoom: persisted.activeRoom,
     rooms: persisted.rooms,
@@ -617,6 +638,7 @@ export function useMessenger() {
     messagesByRoom: persisted.messagesByRoom,
     usersByRoom: {},
     profilesByUser: {},
+    statusesByUser: {},
     unreadByRoom: persisted.unreadByRoom,
 
     messageInput: "",
@@ -703,7 +725,7 @@ export function useMessenger() {
   const callsUnavailableReason = computed(() => callsAvailable.value ? "" : relayCallsRequirementMessage());
 
   const connectionLabel = computed(() => {
-    if (state.connected && state.identified) return "online";
+    if (state.connected && state.identified) return presenceStatusLabel(state.status).toLowerCase();
     if (state.connected) return "authenticating";
     return "offline";
   });
@@ -759,6 +781,7 @@ export function useMessenger() {
 
   const memberRoster = computed(() => state.usersByRoom[state.activeRoom] || []);
   const myProfile = computed(() => normalizeProfile(state.profile));
+  const myStatus = computed(() => sanitizePresenceStatus(state.status));
 
   function persist() {
     savePersisted(state);
@@ -769,6 +792,13 @@ export function useMessenger() {
     if (!key) return normalizeProfile(null);
     if (key === sanitizeUsername(state.username)) return myProfile.value;
     return normalizeProfile(state.profilesByUser[key]);
+  }
+
+  function statusFor(username) {
+    const key = sanitizeUsername(username);
+    if (!key) return "online";
+    if (key === sanitizeUsername(state.username)) return myStatus.value;
+    return sanitizePresenceStatus(state.statusesByUser[key]);
   }
 
   function roomKeyFor(roomId) {
@@ -890,6 +920,15 @@ export function useMessenger() {
     state.messageSoundEnabled = Boolean(value);
     if (state.messageSoundEnabled) ensureNotificationAudio();
     persist();
+  }
+
+  function setPresenceStatus(value) {
+    const next = sanitizePresenceStatus(value);
+    if (state.status === next) return;
+    state.status = next;
+    if (next === "invisible" && state.inCall) endCall();
+    persist();
+    syncClientSettings();
   }
 
   function setProfileText(payload: any = {}) {
@@ -1331,6 +1370,7 @@ export function useMessenger() {
     state.pendingJoinRooms = [];
     state.usersByRoom = {};
     state.profilesByUser = {};
+    state.statusesByUser = {};
     state.ws = null;
     if (message) state.systemBanner = message;
   }
@@ -1343,7 +1383,8 @@ export function useMessenger() {
   function syncClientSettings(includeProfile = false) {
     if (!state.connected || !state.identified) return;
     const d: any = {
-      deleteMessagesOnLeave: state.deleteMessagesOnLeave
+      deleteMessagesOnLeave: state.deleteMessagesOnLeave,
+      status: sanitizePresenceStatus(state.status)
     };
     if (includeProfile) d.profile = normalizeProfile(state.profile);
     send({ op: 8, d });
@@ -1500,6 +1541,7 @@ export function useMessenger() {
           username,
           isVoiceChat: state.voiceEnabled,
           deleteMessagesOnLeave: state.deleteMessagesOnLeave,
+          status: sanitizePresenceStatus(state.status),
           profile: normalizeProfile(state.profile),
           v: "qxprotocol-web-vite-vue",
           isMobile: /Android|iPhone|iPad|iPod/i.test(navigator.userAgent),
@@ -1745,6 +1787,11 @@ export function useMessenger() {
   // Calls use WebRTC media and the WebSocket only as a typed signaling relay.
   async function startCall() {
     if (state.inCall) return;
+    if (sanitizePresenceStatus(state.status) === "invisible") {
+      state.lastError = "Switch out of invisible mode before joining a call.";
+      showToast(state.lastError);
+      return;
+    }
     if (!relayCallsConfigured()) {
       const message = relayCallsRequirementMessage();
       state.lastError = message;
@@ -2008,7 +2055,9 @@ export function useMessenger() {
     state.roomKeysByRoom = {};
     state.usersByRoom = {};
     state.profilesByUser = {};
+    state.statusesByUser = {};
     state.profile = normalizeProfile(null);
+    state.status = "online";
     state.activeRoom = "";
     state.joinedRooms = [];
     state.pendingJoinRooms = [];
@@ -2164,6 +2213,7 @@ export function useMessenger() {
         state.uuid = d.uuid;
         state.identified = true;
         if (d?.profile) state.profile = normalizeProfile(d.profile);
+        if (d?.status) state.status = sanitizePresenceStatus(d.status);
         state.systemBanner = "";
         for (const r of state.rooms) requestJoin(r.roomId);
         break;
@@ -2214,6 +2264,9 @@ export function useMessenger() {
       case 26:
         applyProfileUpdate(d);
         break;
+      case 27:
+        applyPresenceStatus(d);
+        break;
       case 87:
         state.systemBanner = d?.msg || state.systemBanner;
         break;
@@ -2244,6 +2297,9 @@ export function useMessenger() {
     if (d?.profiles && typeof d.profiles === "object") {
       applyProfiles(d.profiles);
     }
+    if (d?.statuses && typeof d.statuses === "object") {
+      applyStatuses(d.statuses);
+    }
     if (Array.isArray(d?.voicePlayers)) {
       state.voiceMembersByRoom[roomId] = d.voicePlayers;
     }
@@ -2270,12 +2326,42 @@ export function useMessenger() {
     }
   }
 
+  function applyStatuses(statuses) {
+    for (const [username, status] of Object.entries(statuses || {})) {
+      const key = sanitizeUsername(username);
+      if (key) state.statusesByUser[key] = sanitizePresenceStatus(status);
+    }
+  }
+
   function applyProfileUpdate(d) {
     const key = sanitizeUsername(d?.user);
     if (!key) return;
     const profile = normalizeProfile(d?.profile);
     if (key === sanitizeUsername(state.username)) state.profile = profile;
     state.profilesByUser[key] = profile;
+  }
+
+  function applyPresenceStatus(d) {
+    const roomId = sanitizeRoomId(d?.gameId || state.activeRoom);
+    const key = sanitizeUsername(d?.user);
+    if (!key) return;
+    const status = sanitizePresenceStatus(d?.status);
+    const visible = d?.visible !== false;
+    const me = sanitizeUsername(state.username);
+
+    state.statusesByUser[key] = status;
+    if (d?.profile) state.profilesByUser[key] = normalizeProfile(d.profile);
+    if (key === me) state.status = status;
+
+    if (!roomId) return;
+    const current = new Set(state.usersByRoom[roomId] || []);
+    if (visible || key === me) current.add(key);
+    else current.delete(key);
+    state.usersByRoom[roomId] = [...current];
+    if (!visible && key !== me) {
+      state.voiceMembersByRoom[roomId] = (state.voiceMembersByRoom[roomId] || []).filter((user) => user !== key);
+      removeRemoteCallMedia(key);
+    }
   }
 
   function handleLeaveOp(d) {
@@ -2330,6 +2416,7 @@ export function useMessenger() {
       version: 4,
       exportedAt: new Date().toISOString(),
       username: state.username,
+      status: sanitizePresenceStatus(state.status),
       profile: normalizeProfile(state.profile),
       activeRoom: state.activeRoom,
       rooms: state.rooms,
@@ -2371,6 +2458,7 @@ export function useMessenger() {
         if (usedToBeConnected) disconnect();
 
         if (typeof data.username === "string") state.username = sanitizeUsername(data.username);
+        state.status = sanitizePresenceStatus(data.status);
         state.profile = normalizeProfile(data.profile);
 
         if (Array.isArray(data.rooms)) {
@@ -2439,6 +2527,7 @@ export function useMessenger() {
     MESSAGE_LIMIT,
     MAX_PROFILE_DESCRIPTION_LENGTH,
     MAX_PROFILE_PRONOUNS_LENGTH,
+    PRESENCE_STATUSES,
     state,
     roomTitle,
     roomLabel,
@@ -2452,6 +2541,7 @@ export function useMessenger() {
     activeConversation,
     memberRoster,
     myProfile,
+    myStatus,
     accentFor,
     formatTime,
     formatDay,
@@ -2465,6 +2555,8 @@ export function useMessenger() {
     hasRoomKey,
     roomAccessToken,
     profileFor,
+    statusFor,
+    presenceStatusLabel,
     profileImageSrc,
     showToast,
 
@@ -2479,6 +2571,7 @@ export function useMessenger() {
     setDeleteMessagesOnLeave,
     setStreamerMode,
     setMessageSoundEnabled,
+    setPresenceStatus,
     setProfileText,
     setProfileImageFromFile,
     clearProfileImage,

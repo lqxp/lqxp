@@ -24,6 +24,14 @@ function avatarFor(username: string) {
   return props.messenger.profileImageSrc(props.messenger.profileFor(username).avatar);
 }
 
+function statusFor(username: string) {
+  return props.messenger.statusFor(username);
+}
+
+function statusLabel(username: string) {
+  return props.messenger.presenceStatusLabel(statusFor(username));
+}
+
 const members = computed(() =>
   [...(props.messenger.memberRoster.value || [])].sort((a, b) => a.localeCompare(b))
 );
@@ -111,8 +119,15 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
                 <span v-if="username === me" class="members__badge">you</span>
               </div>
               <div class="members__status">
-                <span class="members__dot" :class="{ 'is-call': voiceMembers.has(username) }"></span>
-                {{ voiceMembers.has(username) ? "In voice chat" : "Online" }}
+                <span
+                  class="members__dot"
+                  :class="{
+                    'is-call': voiceMembers.has(username),
+                    'is-dnd': statusFor(username) === 'dnd',
+                    'is-invisible': statusFor(username) === 'invisible'
+                  }"
+                ></span>
+                {{ voiceMembers.has(username) ? "In voice chat" : statusLabel(username) }}
               </div>
             </div>
           </div>

@@ -9,7 +9,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{info, warn};
 
 use crate::{
-    models::UserProfile,
+    models::{UserPresenceStatus, UserProfile},
     state::{PlayerSession, SharedState},
     utils::{random_session_id, send_json},
 };
@@ -154,6 +154,7 @@ async fn register_connection(
             muted_users: HashSet::new(),
             delete_messages_on_leave: false,
             profile: UserProfile::default(),
+            status: UserPresenceStatus::Online,
         },
     );
 
@@ -184,50 +185,57 @@ pub async fn disconnect_player(state: &SharedState, session_id: &str) {
     let username = player.username.clone();
 
     for game_id in &player.rooms {
-        protocol::broadcast_to_room(
-            state,
-            game_id,
-            json!({
-                "op": 4,
-                "d": {
-                    "gameId": game_id,
-                    "left": username.clone()
-                }
-            }),
-        )
-        .await;
+        if player.status != UserPresenceStatus::Invisible {
+            protocol::broadcast_to_room(
+                state,
+                game_id,
+                json!({
+                    "op": 4,
+                    "d": {
+                        "gameId": game_id,
+                        "left": username.clone()
+                    }
+                }),
+            )
+            .await;
+        }
 
         if player.delete_messages_on_leave {
             protocol::delete_user_messages_in_room_and_broadcast(state, game_id, &username).await;
         }
 
-        protocol::broadcast_to_room(
-            state,
-            game_id,
-            json!({
-                "op": 98,
-                "d": {
-                    "gameId": game_id,
-                    "user": username.clone(),
-                    "isVoiceChat": false
-                }
-            }),
-        )
-        .await;
+        if player.status != UserPresenceStatus::Invisible {
+            protocol::broadcast_to_room(
+                state,
+                game_id,
+                json!({
+                    "op": 98,
+                    "d": {
+                        "gameId": game_id,
+                        "user": username.clone(),
+                        "status": player.status,
+                        "isVoiceChat": false
+                    }
+                }),
+            )
+            .await;
+        }
     }
 
-    if let Some(exchange_key) = &player.exchange_key {
-        protocol::broadcast_to_exchange_key(
-            state,
-            exchange_key,
-            json!({
-                "op": 14,
-                "d": {
-                    "username": player.username.clone()
-                }
-            }),
-        )
-        .await;
+    if player.status != UserPresenceStatus::Invisible {
+        if let Some(exchange_key) = &player.exchange_key {
+            protocol::broadcast_to_exchange_key(
+                state,
+                exchange_key,
+                json!({
+                    "op": 14,
+                    "d": {
+                        "username": player.username.clone()
+                    }
+                }),
+            )
+            .await;
+        }
     }
 
     decrement_ip_connection(state, &player.ip).await;

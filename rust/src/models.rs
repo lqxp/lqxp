@@ -32,6 +32,22 @@ pub struct PlayerStatus {
     #[serde(rename = "deleteMessagesOnLeave")]
     pub delete_messages_on_leave: bool,
     pub profile: UserProfile,
+    pub status: UserPresenceStatus,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum UserPresenceStatus {
+    Online,
+    Invisible,
+    #[serde(rename = "dnd")]
+    Dnd,
+}
+
+impl Default for UserPresenceStatus {
+    fn default() -> Self {
+        Self::Online
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

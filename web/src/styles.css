@@ -960,6 +960,16 @@ textarea {
   box-shadow: 0 0 0 3px rgba(32, 144, 234, 0.14);
 }
 
+.members__dot.is-dnd {
+  background: var(--red);
+  box-shadow: 0 0 0 3px rgba(255, 107, 112, 0.13);
+}
+
+.members__dot.is-invisible {
+  background: var(--dim);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.32);
+}
+
 .members__empty {
   padding: 18px 16px;
   font-size: 13px;
@@ -2832,6 +2842,10 @@ textarea {
 .settings-select:first-of-type,
 .settings-range:first-of-type {
   margin-top: 0;
+}
+
+.settings-select--offset {
+  margin-left: 44px;
 }
 
 .settings-range small {
