@@ -46,7 +46,7 @@ sudo certbot certonly --standalone -d turn.qxp.example.com
 Then copy the certificates into the qxp TURN bundle:
 
 ```bash
-sudo ./scripts/certbot-turn-deploy-hook.sh --turn-domain turn.qxp.example.com --owner-user anaissar --owner-group anaissar
+sudo ./scripts/certbot-turn-deploy-hook.sh --turn-domain turn.qxp.example.com --owner-user root --owner-group root
 ```
 
 If you renew later, re-run the same hook after renewal or wire it into certbot as a deploy hook.
@@ -54,7 +54,7 @@ If you renew later, re-run the same hook after renewal or wire it into certbot a
 Example:
 
 ```bash
-sudo certbot renew --deploy-hook "/absolute/path/to/lqxp/scripts/certbot-turn-deploy-hook.sh --turn-domain turn.qxp.example.com --owner-user anaissar --owner-group anaissar"
+sudo certbot renew --deploy-hook "/absolute/path/to/lqxp/scripts/certbot-turn-deploy-hook.sh --turn-domain turn.qxp.example.com --owner-user root --owner-group root"
 ```
 
 ## 4. Build qxp

@@ -10,7 +10,7 @@ OWNER_GROUP="$(id -gn "$OWNER_USER" 2>/dev/null || echo "$OWNER_USER")"
 usage() {
   cat <<'EOF'
 Usage:
-  ./scripts/certbot-turn-deploy-hook.sh --turn-domain turn.qxp.example.com [--live-dir /etc/letsencrypt/live/turn.qxp.example.com] [--owner-user anaissar] [--owner-group anaissar]
+  ./scripts/certbot-turn-deploy-hook.sh --turn-domain turn.qxp.example.com [--live-dir /etc/letsencrypt/live/turn.qxp.example.com] [--owner-user root] [--owner-group root]
 EOF
 }
 
