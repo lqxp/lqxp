@@ -4,6 +4,7 @@ import { computed } from "vue";
 const props = defineProps({
   messenger: { type: Object, required: true }
 });
+defineEmits(["back"]);
 
 const name = computed(() => props.messenger.displayRoomName(props.messenger.state.activeRoom));
 const accent = computed(() => props.messenger.activeConversation.value?.accent || "slate");
@@ -53,6 +54,15 @@ function removeHere() {
 
 <template>
   <header class="thread__head">
+    <button
+      class="icon-btn thread__back"
+      type="button"
+      aria-label="Back to conversations"
+      @click="$emit('back')"
+    >
+      <svg viewBox="0 0 24 24"><path d="M15 18 9 12l6-6"/></svg>
+    </button>
+
     <div class="thread__who">
       <span class="avatar avatar--md" :class="`avatar--${accent}`">{{ initials }}</span>
       <div>

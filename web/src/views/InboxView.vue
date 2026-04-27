@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { useMessenger } from "@/composables/useMessenger";
 import MessengerSidebar from "@/components/MessengerSidebar.vue";
 import MemberSidebar from "@/components/MemberSidebar.vue";
@@ -11,6 +11,7 @@ import SettingsModal from "@/components/SettingsModal.vue";
 import OnboardingScreen from "@/components/OnboardingScreen.vue";
 
 const messenger = useMessenger();
+const mobileThreadOpen = ref(false);
 
 const needsOnboarding = computed(() => !String(messenger.state.username || "").trim());
 const hasActive = computed(() => !!messenger.roomLabel.value);
@@ -26,6 +27,14 @@ watch(needsOnboarding, (required) => {
   }
 }, { immediate: true });
 
+watch(() => messenger.state.activeRoom, (room) => {
+  mobileThreadOpen.value = !!room;
+}, { immediate: true });
+
+function showConversationList() {
+  mobileThreadOpen.value = false;
+}
+
 function goToCallRoom() {
   if (callRoom.value && callRoom.value !== messenger.state.activeRoom) {
     messenger.selectConversation(callRoom.value);
@@ -36,7 +45,7 @@ function goToCallRoom() {
 <template>
   <OnboardingScreen v-if="needsOnboarding" :messenger="messenger" />
 
-  <div v-else class="app" :class="{ 'is-thread': hasActive }">
+  <div v-else class="app" :class="{ 'is-thread': hasActive && mobileThreadOpen }">
     <MessengerSidebar :messenger="messenger" />
 
     <Transition name="toast">
@@ -48,7 +57,7 @@ function goToCallRoom() {
     <main class="thread" v-if="hasActive">
       <div class="thread__shell">
         <section class="thread__main">
-          <ThreadHeader :messenger="messenger" />
+          <ThreadHeader :messenger="messenger" @back="showConversationList" />
           <CallPanel :messenger="messenger" />
           <MessageList :messenger="messenger" />
           <ComposerBar :messenger="messenger" />
