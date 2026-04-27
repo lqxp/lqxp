@@ -260,6 +260,141 @@ textarea {
 }
 
 /* Messenger app */
+.onboarding {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background: #17171a;
+}
+
+.onboarding__card {
+  width: min(100%, 460px);
+  border-radius: 20px;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+}
+
+.onboarding__hero {
+  padding: 28px 28px 24px;
+  background: #25272c;
+  border-bottom: 1px solid var(--line-strong);
+}
+
+.onboarding__body {
+  padding: 24px 28px 28px;
+}
+
+.onboarding__eyebrow {
+  margin: 0 0 10px;
+  color: #9ecdf6;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.onboarding__card h1 {
+  margin: 0;
+  font-size: clamp(32px, 5vw, 40px);
+  line-height: 0.98;
+  letter-spacing: -0.04em;
+}
+
+.onboarding__copy {
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+
+.onboarding__preview {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+}
+
+.onboarding__preview strong,
+.onboarding__preview small {
+  display: block;
+}
+
+.onboarding__preview strong {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.onboarding__preview small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.onboarding__form {
+  margin-top: 22px;
+}
+
+.onboarding__field {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.onboarding__field span {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.onboarding__field input {
+  height: 52px;
+  padding: 0 16px;
+  border-radius: 12px;
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  color: var(--text);
+  font-size: 16px;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.onboarding__field input:focus {
+  border-color: var(--blue);
+  background: #121316;
+}
+
+.onboarding__field input::placeholder {
+  color: var(--dim);
+}
+
+.onboarding__meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.onboarding__error {
+  margin: 14px 0 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #3b2326;
+  border: 1px solid #6d3a3f;
+  color: #ffd0d3;
+  font-size: 13.5px;
+}
+
+.onboarding__submit {
+  margin-top: 18px;
+}
+
 .app {
   position: relative;
   display: grid;
@@ -3058,6 +3193,20 @@ textarea {
 @media (max-width: 760px) {
   :root {
     --sidebar-w: 100%;
+  }
+
+  .onboarding {
+    padding: 18px;
+  }
+
+  .onboarding__card {
+    border-radius: 18px;
+  }
+
+  .onboarding__hero,
+  .onboarding__body {
+    padding-left: 20px;
+    padding-right: 20px;
   }
 
   .app {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
+import { computed, watch } from "vue";
 import { useMessenger } from "@/composables/useMessenger";
 import MessengerSidebar from "@/components/MessengerSidebar.vue";
 import MemberSidebar from "@/components/MemberSidebar.vue";
@@ -8,9 +8,11 @@ import MessageList from "@/components/MessageList.vue";
 import ComposerBar from "@/components/ComposerBar.vue";
 import CallPanel from "@/components/CallPanel.vue";
 import SettingsModal from "@/components/SettingsModal.vue";
+import OnboardingScreen from "@/components/OnboardingScreen.vue";
 
 const messenger = useMessenger();
 
+const needsOnboarding = computed(() => !String(messenger.state.username || "").trim());
 const hasActive = computed(() => !!messenger.roomLabel.value);
 const inCall = computed(() => messenger.state.inCall);
 const callRoom = computed(() => messenger.state.callRoom);
@@ -18,11 +20,11 @@ const callRoomLabel = computed(() => messenger.displayRoomName(callRoom.value));
 const callRoomDifferent = computed(() => inCall.value && callRoom.value !== messenger.state.activeRoom);
 const callElapsed = computed(() => messenger.formatDuration(messenger.state.callElapsed));
 
-onMounted(() => {
-  if (!messenger.state.connected && !messenger.state.ws) {
+watch(needsOnboarding, (required) => {
+  if (!required && !messenger.state.connected && !messenger.state.ws) {
     messenger.connect();
   }
-});
+}, { immediate: true });
 
 function goToCallRoom() {
   if (callRoom.value && callRoom.value !== messenger.state.activeRoom) {
@@ -32,7 +34,9 @@ function goToCallRoom() {
 </script>
 
 <template>
-  <div class="app" :class="{ 'is-thread': hasActive }">
+  <OnboardingScreen v-if="needsOnboarding" :messenger="messenger" />
+
+  <div v-else class="app" :class="{ 'is-thread': hasActive }">
     <MessengerSidebar :messenger="messenger" />
 
     <Transition name="toast">

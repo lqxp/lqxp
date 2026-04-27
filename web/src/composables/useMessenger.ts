@@ -4,7 +4,7 @@ import type { CallMediaState, CallSignalPayload, RemoteCallMedia } from "@/calls
 import { WebRtcCallManager } from "@/calls/WebRtcCallManager";
 
 const STORAGE_KEY = "qxprotocol-messenger-v4";
-const QUICK_REACTIONS = ["❤️", "👍", "😂", "😮", "😢", "🙏"];
+const QUICK_REACTIONS = ["❤️", "👍", "😂", "😮", "😢", "💀", "🧢"];
 const MAX_ROOMS_SHOWN = 100;
 const MAX_HISTORY_PER_ROOM = 500;
 const ROOM_ID_MIN_LENGTH = 8;
@@ -101,13 +101,6 @@ function formatSidebarTime(timestamp) {
   return date.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
-function createDefaultUsername() {
-  const alphabet = "abcdefghjkmnpqrstuvwxyz";
-  let suffix = "";
-  for (let i = 0; i < 4; i += 1) suffix += alphabet[Math.floor(Math.random() * alphabet.length)];
-  return `echo-${suffix}`;
-}
-
 function accentFor(seed) {
   const palette = ["blue", "green", "amber", "violet", "olive", "slate", "teal", "rose"];
   const s = String(seed || "");
@@ -154,7 +147,7 @@ function loadPersisted() {
     }
 
     return {
-      username: String(raw.username || createDefaultUsername()),
+      username: sanitizeUsername(raw.username),
       activeRoom: isValidRoomId(raw.activeRoom) ? sanitizeRoomId(raw.activeRoom) : "",
       rooms,
       messagesByRoom,
@@ -169,7 +162,7 @@ function loadPersisted() {
     };
   } catch {
     return {
-      username: createDefaultUsername(),
+      username: "",
       activeRoom: "",
       rooms: [],
       messagesByRoom: {},
