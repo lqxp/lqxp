@@ -10,14 +10,6 @@ module.exports = {
       env: {
         RUST_LOG: "info"
       }
-    },
-    {
-      name: "qxp-turn",
-      script: "./scripts/start-turn.sh",
-      cwd: __dirname + "/../..",
-      interpreter: "bash",
-      autorestart: true,
-      max_restarts: 10
     }
   ]
 }

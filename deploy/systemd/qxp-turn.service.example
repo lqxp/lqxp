@@ -1,0 +1,22 @@
+[Unit]
+Description=QxProtocol TURN relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=anaissar
+Group=anaissar
+WorkingDirectory=/home/anaissar/lqxp
+ExecStart=/home/anaissar/lqxp/scripts/start-turn.sh
+Restart=on-failure
+RestartSec=3
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/anaissar/lqxp/deploy/turn
+
+[Install]
+WantedBy=multi-user.target

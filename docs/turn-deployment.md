@@ -1,10 +1,11 @@
 # TURN Packaging For qxp
 
-This repo now supports a packaged TURN sidecar deployment:
+This repo supports a packaged TURN sidecar deployment:
 
-- `qxp` serves the app and runtime RTC config.
-- `coturn` relays all call traffic.
-- the web client refuses direct P2P calls when TURN is not configured.
+- `qxp` serves the app and runtime RTC config
+- `coturn` relays all call traffic
+- direct P2P calls stay disabled unless TURN is configured
+- TURN should be managed by `systemd`, not PM2
 
 ## 1. Install dependencies
 
@@ -13,7 +14,6 @@ Ubuntu/Debian example:
 ```bash
 sudo apt update
 sudo apt install coturn certbot
-sudo npm install -g pm2
 ```
 
 ## 2. Generate qxp + TURN config
@@ -22,9 +22,9 @@ sudo npm install -g pm2
 ./scripts/bootstrap-turn-prod.sh \
   --public-domain qxp.example.com \
   --turn-domain turn.qxp.example.com \
-  --external-ip 192.168.1.1 \
-  --listen-ip 192.168.1.1 \
-  --relay-ip 192.168.1.1
+  --external-ip 179.61.190.52 \
+  --listen-ip 179.61.190.52 \
+  --relay-ip 179.61.190.52
 ```
 
 This generates:
@@ -46,15 +46,16 @@ sudo certbot certonly --standalone -d turn.qxp.example.com
 Then copy the certificates into the qxp TURN bundle:
 
 ```bash
-sudo ./scripts/certbot-turn-deploy-hook.sh --turn-domain turn.qxp.example.com --owner-user root --owner-group root
+sudo ./scripts/certbot-turn-deploy-hook.sh \
+  --turn-domain turn.qxp.example.com \
+  --owner-user anaissar \
+  --owner-group anaissar
 ```
 
-If you renew later, re-run the same hook after renewal or wire it into certbot as a deploy hook.
-
-Example:
+For renewal:
 
 ```bash
-sudo certbot renew --deploy-hook "/absolute/path/to/lqxp/scripts/certbot-turn-deploy-hook.sh --turn-domain turn.qxp.example.com --owner-user root --owner-group root"
+sudo certbot renew --deploy-hook "/absolute/path/to/lqxp/scripts/certbot-turn-deploy-hook.sh --turn-domain turn.qxp.example.com --owner-user anaissar --owner-group anaissar"
 ```
 
 ## 4. Build qxp
@@ -63,32 +64,64 @@ sudo certbot renew --deploy-hook "/absolute/path/to/lqxp/scripts/certbot-turn-de
 cargo build --release
 ```
 
-## 5. Start qxp + TURN with PM2
+## 5. Install TURN as a systemd service
+
+Copy the template:
 
 ```bash
-pm2 start deploy/pm2/ecosystem.config.cjs
-pm2 save
-pm2 startup
+sudo cp deploy/systemd/qxp-turn.service.example /etc/systemd/system/qxp-turn.service
 ```
 
-PM2 docs describe `start`, `save`, and `startup` for daemonized process persistence.
+Edit it if needed for your real:
 
-## 6. Operational notes
+- unix user
+- unix group
+- repo path
 
-- `qxp` runtime TURN config is injected by the Rust server into the served HTML page.
-- `coturn` is started by PM2 in foreground mode. Do not add coturn daemon flags when PM2 manages it.
-- The generated TURN config uses a local writable pidfile under `deploy/turn/run/` so it works under PM2 without root.
-- The generated TURN config also uses a local writable SQLite `userdb` under `deploy/turn/` to avoid coturn's default `/var/lib/turn/turndb` permission warning.
-- The TURN credentials live in:
-  - `files/config.custom.toml`
-  - `deploy/turn/turnserver.conf`
-  - `deploy/turn/credentials.env`
-- Certificates copied by the deploy hook live in:
-  - `deploy/turn/certs/fullchain.pem`
-  - `deploy/turn/certs/privkey.pem`
-- The deploy hook resets certificate ownership and mode so the PM2 user can read them after each renewal.
+Then enable it:
 
-## 7. Firewall
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now qxp-turn
+```
+
+Inspect it:
+
+```bash
+sudo systemctl status qxp-turn --no-pager
+sudo journalctl -u qxp-turn -n 100 --no-pager
+```
+
+## 6. Start qxp app
+
+For the app itself, use whatever you prefer:
+
+- PM2
+- systemd
+- container supervisor
+
+Only TURN is strongly recommended on `systemd`.
+
+## 7. Operational notes
+
+- `qxp` injects TURN runtime config into the served web page
+- `coturn` is started through `scripts/start-turn.sh`
+- the generated TURN config uses a local writable pidfile under `deploy/turn/run/`
+- the generated TURN config uses a local writable SQLite `userdb` under `deploy/turn/`
+- the certbot deploy hook resets owner and mode so the service user can read the certs after renewal
+
+Secrets/config live in:
+
+- `files/config.custom.toml`
+- `deploy/turn/turnserver.conf`
+- `deploy/turn/credentials.env`
+
+Certificates live in:
+
+- `deploy/turn/certs/fullchain.pem`
+- `deploy/turn/certs/privkey.pem`
+
+## 8. Firewall
 
 Open at minimum:
 
@@ -97,17 +130,15 @@ Open at minimum:
 - TCP 5349
 - UDP relay range from your TURN config, default `49152-65535`
 
-## 8. Local restart routines
+## 9. Local restart routines
 
 ```bash
-pm2 restart qxp-app
-pm2 restart qxp-turn
-pm2 logs qxp-app
-pm2 logs qxp-turn
+sudo systemctl restart qxp-turn
+sudo journalctl -u qxp-turn -n 100 --no-pager
 ```
 
-## 9. Security model
+## 10. Security model
 
-- Calls are relay-only when configured through this package.
-- Participant public IP addresses are not exposed directly to one another through WebRTC mesh.
-- TURN credentials generated by the bootstrap script should be treated as secrets.
+- calls are relay-only when configured through this package
+- participant public IP addresses are not exposed directly to one another through WebRTC mesh
+- TURN credentials generated by the bootstrap script should be treated as secrets
