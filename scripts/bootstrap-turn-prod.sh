@@ -205,6 +205,7 @@ Next steps:
      ./scripts/certbot-turn-deploy-hook.sh --turn-domain $TURN_DOMAIN
   3. Build qxp:
      cargo build --release
-  4. Start qxp + coturn with PM2:
-     pm2 start deploy/pm2/ecosystem.config.cjs
+  4. Install TURN as a systemd service:
+     sudo ./scripts/install-turn-systemd.sh --enable
+  5. Start the qxp app with your preferred supervisor.
 EOF

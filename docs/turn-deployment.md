@@ -66,23 +66,16 @@ cargo build --release
 
 ## 5. Install TURN as a systemd service
 
-Copy the template:
+Install or refresh the unit in one command:
 
 ```bash
-sudo cp deploy/systemd/qxp-turn.service.example /etc/systemd/system/qxp-turn.service
+sudo ./scripts/install-turn-systemd.sh --enable
 ```
 
-Edit it if needed for your real:
-
-- unix user
-- unix group
-- repo path
-
-Then enable it:
+If you need a different Unix user/group:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now qxp-turn
+sudo ./scripts/install-turn-systemd.sh --user anaissar --group anaissar --enable
 ```
 
 Inspect it:
@@ -135,6 +128,12 @@ Open at minimum:
 ```bash
 sudo systemctl restart qxp-turn
 sudo journalctl -u qxp-turn -n 100 --no-pager
+```
+
+If the service file changed in the repo, rerun:
+
+```bash
+sudo ./scripts/install-turn-systemd.sh --enable
 ```
 
 ## 10. Security model
