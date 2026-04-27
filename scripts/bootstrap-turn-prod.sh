@@ -7,6 +7,8 @@ TURN_DIR="$ROOT_DIR/deploy/turn"
 TURN_CONF_OUT="$TURN_DIR/turnserver.conf"
 CREDENTIALS_OUT="$TURN_DIR/credentials.env"
 CERTS_DIR="$TURN_DIR/certs"
+RUN_DIR="$TURN_DIR/run"
+PIDFILE_PATH="$RUN_DIR/turnserver.pid"
 
 BIND_HOST="0.0.0.0"
 PUBLIC_DOMAIN=""
@@ -18,6 +20,8 @@ TURN_CREDENTIAL=""
 TURN_PORT="3478"
 TURNS_PORT="5349"
 EXTERNAL_IP=""
+LISTEN_IP=""
+RELAY_IP=""
 MIN_PORT="49152"
 MAX_PORT="65535"
 
@@ -37,6 +41,8 @@ Options:
   --turn-port <port>          TURN UDP/TCP port (default: 3478)
   --turns-port <port>         TURN TLS port (default: 5349)
   --external-ip <ip>          Optional external/public IP for coturn
+  --listen-ip <ip>            Explicit coturn listening IP
+  --relay-ip <ip>             Explicit coturn relay IP
   --min-port <port>           Relay port range start (default: 49152)
   --max-port <port>           Relay port range end (default: 65535)
   --help                      Show this help
@@ -66,6 +72,8 @@ while [[ $# -gt 0 ]]; do
     --turn-port) TURN_PORT="${2:?}"; shift 2 ;;
     --turns-port) TURNS_PORT="${2:?}"; shift 2 ;;
     --external-ip) EXTERNAL_IP="${2:?}"; shift 2 ;;
+    --listen-ip) LISTEN_IP="${2:?}"; shift 2 ;;
+    --relay-ip) RELAY_IP="${2:?}"; shift 2 ;;
     --min-port) MIN_PORT="${2:?}"; shift 2 ;;
     --max-port) MAX_PORT="${2:?}"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
@@ -91,7 +99,15 @@ if [[ -z "$TURN_CREDENTIAL" ]]; then
   TURN_CREDENTIAL="$(random_secret)"
 fi
 
-mkdir -p "$TURN_DIR" "$CERTS_DIR"
+if [[ -z "$LISTEN_IP" && -n "$EXTERNAL_IP" ]]; then
+  LISTEN_IP="$EXTERNAL_IP"
+fi
+
+if [[ -z "$RELAY_IP" && -n "$EXTERNAL_IP" ]]; then
+  RELAY_IP="$EXTERNAL_IP"
+fi
+
+mkdir -p "$TURN_DIR" "$CERTS_DIR" "$RUN_DIR"
 
 if [[ -f "$CONFIG_OUT" ]]; then
   cp "$CONFIG_OUT" "$CONFIG_OUT.bak.$(date +%Y%m%d%H%M%S)"
@@ -139,10 +155,19 @@ no-multicast-peers
 no-loopback-peers
 min-port=$MIN_PORT
 max-port=$MAX_PORT
+pidfile=$PIDFILE_PATH
 
 cert=$CERTS_DIR/fullchain.pem
 pkey=$CERTS_DIR/privkey.pem
 EOF
+
+if [[ -n "$LISTEN_IP" ]]; then
+  echo "listening-ip=$LISTEN_IP" >> "$TURN_CONF_OUT"
+fi
+
+if [[ -n "$RELAY_IP" ]]; then
+  echo "relay-ip=$RELAY_IP" >> "$TURN_CONF_OUT"
+fi
 
 if [[ -n "$EXTERNAL_IP" ]]; then
   echo "external-ip=$EXTERNAL_IP" >> "$TURN_CONF_OUT"
@@ -155,8 +180,13 @@ QXP_TURN_USERNAME=$TURN_USERNAME
 QXP_TURN_CREDENTIAL=$TURN_CREDENTIAL
 QXP_TURN_PORT=$TURN_PORT
 QXP_TURNS_PORT=$TURNS_PORT
+QXP_TURN_LISTEN_IP=$LISTEN_IP
+QXP_TURN_RELAY_IP=$RELAY_IP
+QXP_TURN_EXTERNAL_IP=$EXTERNAL_IP
+QXP_TURN_PIDFILE=$PIDFILE_PATH
 EOF
 
+chmod 700 "$RUN_DIR"
 chmod 600 "$CONFIG_OUT" "$TURN_CONF_OUT" "$CREDENTIALS_OUT"
 
 cat <<EOF

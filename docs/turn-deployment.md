@@ -21,7 +21,10 @@ sudo npm install -g pm2
 ```bash
 ./scripts/bootstrap-turn-prod.sh \
   --public-domain qxp.example.com \
-  --turn-domain turn.qxp.example.com
+  --turn-domain turn.qxp.example.com \
+  --external-ip 192.168.1.1 \
+  --listen-ip 192.168.1.1 \
+  --relay-ip 192.168.1.1
 ```
 
 This generates:
@@ -29,6 +32,7 @@ This generates:
 - `files/config.custom.toml`
 - `deploy/turn/turnserver.conf`
 - `deploy/turn/credentials.env`
+- `deploy/turn/run/turnserver.pid`
 
 ## 3. Obtain TLS certificates with certbot
 
@@ -72,6 +76,7 @@ PM2 docs describe `start`, `save`, and `startup` for daemonized process persiste
 
 - `qxp` runtime TURN config is injected by the Rust server into the served HTML page.
 - `coturn` is started by PM2 in foreground mode. Do not add coturn daemon flags when PM2 manages it.
+- The generated TURN config uses a local writable pidfile under `deploy/turn/run/` so it works under PM2 without root.
 - The TURN credentials live in:
   - `files/config.custom.toml`
   - `deploy/turn/turnserver.conf`
