@@ -72,7 +72,7 @@ function removeHere() {
         aria-label="Copy room token"
         @click="copyInvite"
       >
-        <svg viewBox="0 0 24 24"><path d="M15 8a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3v-6a3 3 0 0 1 3-3"/><path d="M9 8V6a3 3 0 1 1 6 0v2"/><rect x="8" y="8" width="8" height="6" rx="1.5"/></svg>
+        <svg viewBox="0 0 24 24"><path d="M14 5h5v5"/><path d="M10 14 19 5"/><path d="M19 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/></svg>
       </button>
       <button
         v-if="!callActiveHere"
