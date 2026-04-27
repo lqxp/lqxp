@@ -9,6 +9,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{info, warn};
 
 use crate::{
+    models::UserProfile,
     state::{PlayerSession, SharedState},
     utils::{random_session_id, send_json},
 };
@@ -152,6 +153,7 @@ async fn register_connection(
             is_secure: None,
             muted_users: HashSet::new(),
             delete_messages_on_leave: false,
+            profile: UserProfile::default(),
         },
     );
 

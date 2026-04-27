@@ -31,6 +31,30 @@ pub struct PlayerStatus {
     pub secure_context: Option<bool>,
     #[serde(rename = "deleteMessagesOnLeave")]
     pub delete_messages_on_leave: bool,
+    pub profile: UserProfile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProfileImage {
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+    pub size: u64,
+    pub width: u32,
+    pub height: u32,
+    #[serde(rename = "dataB64")]
+    pub data_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<ProfileImage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banner: Option<ProfileImage>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pronouns: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

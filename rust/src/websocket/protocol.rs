@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use axum::extract::ws::Message;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 use tracing::error;
 
@@ -9,8 +9,8 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
 use crate::{
     models::{
-        Attachment, BlacklistEntry, ChatMessageRecord, EncryptedPayload, LoggedIpEntry, MessageReaction,
-        PlayerStatus, SocketPayload,
+        Attachment, BlacklistEntry, ChatMessageRecord, EncryptedPayload, LoggedIpEntry,
+        MessageReaction, PlayerStatus, ProfileImage, SocketPayload, UserProfile,
     },
     state::SharedState,
     utils::{admin_allowed, now_ms, random_message_id, request_id, send_json, with_request_id},
@@ -22,6 +22,12 @@ const MAX_ATTACHMENT_B64_LEN: usize = ((MAX_ATTACHMENT_BYTES + 2) / 3) * 4 + 4;
 const MAX_FILENAME_LEN: usize = 128;
 const MAX_MIMETYPE_LEN: usize = 96;
 const MAX_MESSAGE_CHARS: usize = 2000;
+const MAX_PROFILE_AVATAR_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PROFILE_AVATAR_B64_LEN: usize = ((MAX_PROFILE_AVATAR_BYTES + 2) / 3) * 4 + 4;
+const MAX_PROFILE_BANNER_BYTES: usize = 5 * 1024 * 1024;
+const MAX_PROFILE_BANNER_B64_LEN: usize = ((MAX_PROFILE_BANNER_BYTES + 2) / 3) * 4 + 4;
+const MAX_PROFILE_DESCRIPTION_CHARS: usize = 512;
+const MAX_PROFILE_PRONOUNS_CHARS: usize = 24;
 const MAX_ENCRYPTED_ALG_LEN: usize = 32;
 const MAX_ENCRYPTED_IV_LEN: usize = 128;
 const MAX_ENCRYPTED_CIPHERTEXT_LEN: usize = 18 * 1024 * 1024;
@@ -203,7 +209,12 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
             .collect::<HashSet<_>>()
     };
 
-    let (final_username, exchange_key, voice_chat, version, is_mobile, is_secure) = {
+    let profile = match parse_user_profile(d.get("profile")) {
+        Ok(profile) => profile,
+        Err(message) => return respond_error(state, session_id, 2, message, request_id(&d)).await,
+    };
+
+    let (final_username, exchange_key, voice_chat, version, is_mobile, is_secure, profile) = {
         let mut players = state.players.write().await;
         let Some(player) = players.get_mut(session_id) else {
             return false;
@@ -239,6 +250,7 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
             .filter(|value| !value.trim().is_empty());
         player.is_mobile = d.get("isMobile").and_then(Value::as_bool);
         player.is_secure = d.get("isSecure").and_then(Value::as_bool);
+        player.profile = profile;
 
         (
             candidate,
@@ -247,6 +259,7 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
             player.version.clone(),
             player.is_mobile,
             player.is_secure,
+            player.profile.clone(),
         )
     };
 
@@ -273,7 +286,8 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
             json!({
                 "op": 2,
                 "d": {
-                    "uuid": session_id
+                    "uuid": session_id,
+                    "profile": profile.clone()
                 }
             }),
             request_id(&d),
@@ -293,7 +307,8 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
                     "v": version,
                     "isSecure": is_secure,
                     "isMobile": is_mobile,
-                    "isVoiceChat": voice_chat
+                    "isVoiceChat": voice_chat,
+                    "profile": profile
                 }
             }),
         )
@@ -332,6 +347,7 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
     };
 
     let roster = room_usernames(state, game_id).await;
+    let profiles = room_profiles(state, game_id).await;
     let voice_roster = room_voice_usernames(state, game_id).await;
     let call_players = room_call_players(state, game_id).await;
 
@@ -346,6 +362,7 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "system": true,
                     "gameId": game_id,
                     "players": roster.clone(),
+                    "profiles": profiles.clone(),
                     "voicePlayers": voice_roster.clone(),
                     "callPlayers": call_players.clone()
                 }
@@ -364,6 +381,7 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "ok": true,
                     "gameId": game_id,
                     "players": roster,
+                    "profiles": profiles,
                     "voicePlayers": voice_roster,
                     "callPlayers": call_players,
                     "alreadyJoined": already_in
@@ -455,10 +473,24 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
+    let profile_update = if d.get("profile").is_some() {
+        match parse_user_profile(d.get("profile")) {
+            Ok(profile) => Some(profile),
+            Err(message) => {
+                return respond_error(state, session_id, 8, message, request_id(&d)).await
+            }
+        }
+    } else {
+        None
+    };
+
     let did_update = {
         let mut players = state.players.write().await;
         if let Some(player) = players.get_mut(session_id) {
             player.delete_messages_on_leave = delete_messages_on_leave;
+            if let Some(profile) = profile_update.clone() {
+                player.profile = profile;
+            }
             true
         } else {
             false
@@ -476,6 +508,19 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
         .await;
     }
 
+    let updated_context = if profile_update.is_some() {
+        let players = state.players.read().await;
+        players.get(session_id).map(|player| {
+            (
+                player.username.clone(),
+                player.profile.clone(),
+                player.rooms.iter().cloned().collect::<Vec<_>>(),
+            )
+        })
+    } else {
+        None
+    };
+
     respond_to_sender(
         state,
         session_id,
@@ -484,13 +529,31 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
                 "op": 8,
                 "d": {
                     "ok": true,
-                    "deleteMessagesOnLeave": delete_messages_on_leave
+                    "deleteMessagesOnLeave": delete_messages_on_leave,
+                    "profile": profile_update.clone()
                 }
             }),
             request_id(&d),
         ),
     )
     .await;
+
+    if let Some((username, profile, rooms)) = updated_context {
+        for room in rooms {
+            broadcast_to_room(
+                state,
+                &room,
+                json!({
+                    "op": 26,
+                    "d": {
+                        "user": username,
+                        "profile": profile
+                    }
+                }),
+            )
+            .await;
+        }
+    }
 
     false
 }
@@ -704,12 +767,20 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
         room_id: room_name.clone(),
         user: format!("{} {}", prefix, player_name),
         username: player_name,
-        text: if encrypted.is_some() { String::new() } else { trimmed },
+        text: if encrypted.is_some() {
+            String::new()
+        } else {
+            trimmed
+        },
         timestamp: now,
         system: false,
         reactions: Vec::new(),
         reply_to_message_id,
-        attachment: if encrypted.is_some() { None } else { attachment },
+        attachment: if encrypted.is_some() {
+            None
+        } else {
+            attachment
+        },
         encrypted,
         preview: None,
         deleted: false,
@@ -1475,6 +1546,7 @@ async fn admin_status(state: &SharedState, session_id: &str, d: Value) -> bool {
                     mobile: player.is_mobile,
                     secure_context: player.is_secure,
                     delete_messages_on_leave: player.delete_messages_on_leave,
+                    profile: player.profile.clone(),
                 }
             })
             .collect::<Vec<_>>()
@@ -1825,14 +1897,21 @@ async fn is_duplicate_recent_room_message(
         .timestamp
         .saturating_sub(DUPLICATE_MESSAGE_WINDOW_MS);
 
-    messages.iter().rev().take_while(|message| message.timestamp >= oldest_allowed).any(|message| {
-        !message.deleted
-            && message.username == candidate.username
-            && message.text == candidate.text
-            && message.reply_to_message_id == candidate.reply_to_message_id
-            && encrypted_payloads_match(message.encrypted.as_ref(), candidate.encrypted.as_ref())
-            && attachments_match(message.attachment.as_ref(), candidate.attachment.as_ref())
-    })
+    messages
+        .iter()
+        .rev()
+        .take_while(|message| message.timestamp >= oldest_allowed)
+        .any(|message| {
+            !message.deleted
+                && message.username == candidate.username
+                && message.text == candidate.text
+                && message.reply_to_message_id == candidate.reply_to_message_id
+                && encrypted_payloads_match(
+                    message.encrypted.as_ref(),
+                    candidate.encrypted.as_ref(),
+                )
+                && attachments_match(message.attachment.as_ref(), candidate.attachment.as_ref())
+        })
 }
 
 fn attachments_match(left: Option<&Attachment>, right: Option<&Attachment>) -> bool {
@@ -1951,6 +2030,18 @@ async fn room_usernames(state: &SharedState, game_id: &str) -> Vec<String> {
         .filter(|player| player.rooms.contains(game_id))
         .map(|player| player.username.clone())
         .collect()
+}
+
+async fn room_profiles(state: &SharedState, game_id: &str) -> Value {
+    let players = state.players.read().await;
+    let mut profiles = Map::new();
+    for player in players
+        .values()
+        .filter(|player| player.rooms.contains(game_id))
+    {
+        profiles.insert(player.username.clone(), json!(player.profile));
+    }
+    Value::Object(profiles)
 }
 
 async fn room_voice_usernames(state: &SharedState, game_id: &str) -> Vec<String> {
@@ -2130,6 +2221,185 @@ fn parse_encrypted_payload(raw: Option<&Value>) -> Result<Option<EncryptedPayloa
         iv,
         ciphertext: ciphertext.to_owned(),
     }))
+}
+
+fn parse_user_profile(raw: Option<&Value>) -> Result<UserProfile, &'static str> {
+    let Some(raw) = raw else {
+        return Ok(UserProfile::default());
+    };
+    if raw.is_null() {
+        return Ok(UserProfile::default());
+    }
+
+    let obj = raw.as_object().ok_or("Profile must be an object")?;
+    let avatar = parse_profile_image(
+        obj.get("avatar"),
+        MAX_PROFILE_AVATAR_BYTES,
+        MAX_PROFILE_AVATAR_B64_LEN,
+    )?;
+    let banner = parse_profile_image(
+        obj.get("banner"),
+        MAX_PROFILE_BANNER_BYTES,
+        MAX_PROFILE_BANNER_B64_LEN,
+    )?;
+    let description = sanitize_profile_text(
+        obj.get("description").and_then(Value::as_str).unwrap_or(""),
+        MAX_PROFILE_DESCRIPTION_CHARS,
+    );
+    let pronouns = sanitize_profile_text(
+        obj.get("pronouns").and_then(Value::as_str).unwrap_or(""),
+        MAX_PROFILE_PRONOUNS_CHARS,
+    );
+
+    Ok(UserProfile {
+        avatar,
+        banner,
+        description,
+        pronouns,
+    })
+}
+
+fn sanitize_profile_text(value: &str, limit: usize) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+        .take(limit)
+        .collect()
+}
+
+fn parse_profile_image(
+    raw: Option<&Value>,
+    max_bytes: usize,
+    max_b64_len: usize,
+) -> Result<Option<ProfileImage>, &'static str> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+
+    let obj = raw.as_object().ok_or("Profile image must be an object")?;
+    let data_b64 = obj
+        .get("dataB64")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("Profile image missing dataB64")?;
+    if data_b64.len() > max_b64_len {
+        return Err("Profile image too large");
+    }
+
+    let decoded = B64
+        .decode(data_b64.as_bytes())
+        .map_err(|_| "Profile image dataB64 is not valid base64")?;
+    if decoded.len() > max_bytes {
+        return Err("Profile image too large");
+    }
+
+    let declared_mime = obj
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let (mime_type, width, height) = detect_profile_image(&decoded, declared_mime)?;
+    if width == 0 || height == 0 {
+        return Err("Profile image dimensions are invalid");
+    }
+    Ok(Some(ProfileImage {
+        mime_type: mime_type.to_owned(),
+        size: decoded.len() as u64,
+        width,
+        height,
+        data_b64: data_b64.to_owned(),
+    }))
+}
+
+fn detect_profile_image(
+    bytes: &[u8],
+    declared_mime: &str,
+) -> Result<(&'static str, u32, u32), &'static str> {
+    let declared = declared_mime.to_ascii_lowercase();
+    if bytes.len() >= 24 && bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        if !declared.is_empty() && declared != "image/png" && declared != "image/apng" {
+            return Err("Profile image MIME does not match PNG/APNG data");
+        }
+        let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        return Ok(("image/png", width, height));
+    }
+
+    if bytes.len() >= 10 && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
+        if !declared.is_empty() && declared != "image/gif" {
+            return Err("Profile image MIME does not match GIF data");
+        }
+        let width = u16::from_le_bytes([bytes[6], bytes[7]]) as u32;
+        let height = u16::from_le_bytes([bytes[8], bytes[9]]) as u32;
+        return Ok(("image/gif", width, height));
+    }
+
+    if bytes.len() >= 4 && bytes.starts_with(&[0xff, 0xd8]) {
+        if !declared.is_empty() && declared != "image/jpeg" && declared != "image/jpg" {
+            return Err("Profile image MIME does not match JPEG data");
+        }
+        let (width, height) = jpeg_dimensions(bytes)?;
+        return Ok(("image/jpeg", width, height));
+    }
+
+    Err("Unsupported profile image codec")
+}
+
+fn jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32), &'static str> {
+    let mut i = 2usize;
+    while i + 9 < bytes.len() {
+        if bytes[i] != 0xff {
+            i += 1;
+            continue;
+        }
+        while i < bytes.len() && bytes[i] == 0xff {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let marker = bytes[i];
+        i += 1;
+        if matches!(marker, 0xd8 | 0xd9 | 0x01) {
+            continue;
+        }
+        if i + 1 >= bytes.len() {
+            break;
+        }
+        let len = u16::from_be_bytes([bytes[i], bytes[i + 1]]) as usize;
+        if len < 2 || i + len > bytes.len() {
+            break;
+        }
+        if matches!(
+            marker,
+            0xc0 | 0xc1
+                | 0xc2
+                | 0xc3
+                | 0xc5
+                | 0xc6
+                | 0xc7
+                | 0xc9
+                | 0xca
+                | 0xcb
+                | 0xcd
+                | 0xce
+                | 0xcf
+        ) {
+            if len < 7 || i + 6 >= bytes.len() {
+                break;
+            }
+            let height = u16::from_be_bytes([bytes[i + 3], bytes[i + 4]]) as u32;
+            let width = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
+            return Ok((width, height));
+        }
+        i += len;
+    }
+    Err("JPEG dimensions are invalid")
 }
 
 pub async fn broadcast_to_exchange_key(state: &SharedState, exchange_key: &str, payload: Value) {

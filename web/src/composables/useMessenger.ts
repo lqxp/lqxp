@@ -13,6 +13,7 @@ import {
 } from "@/crypto/e2ee";
 
 const STORAGE_KEY = "qxprotocol-messenger-v4";
+const PROFILE_STORAGE_KEY = "qxprotocol-profile-v1";
 const QUICK_REACTIONS = ["❤️", "👍", "😂", "😮", "😢", "💀", "🧢"];
 const MAX_ROOMS_SHOWN = 100;
 const MAX_HISTORY_PER_ROOM = 500;
@@ -20,6 +21,11 @@ const ROOM_ID_MIN_LENGTH = 8;
 const ROOM_ID_MAX_LENGTH = 64;
 const MESSAGE_LIMIT = 2000;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const MAX_PROFILE_AVATAR_BYTES = 2 * 1024 * 1024;
+const MAX_PROFILE_BANNER_BYTES = 5 * 1024 * 1024;
+const MAX_PROFILE_DESCRIPTION_LENGTH = 512;
+const MAX_PROFILE_PRONOUNS_LENGTH = 24;
+const PROFILE_IMAGE_MIME_TYPES = new Set(["image/png", "image/apng", "image/gif", "image/jpeg", "image/jpg"]);
 const DUPLICATE_MESSAGE_WINDOW_MS = 10 * 60 * 1000;
 const RANDOM_ROOM_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 const E2EE_MESSAGE_PLACEHOLDER = "Encrypted message";
@@ -31,6 +37,46 @@ function inferWebSocketUrl() {
 
 function sanitizeUsername(value) {
   return String(value || "").trim().slice(0, 16);
+}
+
+function sanitizeProfileText(value, limit) {
+  return String(value || "")
+    .trim()
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .slice(0, limit);
+}
+
+function normalizeProfileImage(value, maxBytes) {
+  if (!value || typeof value !== "object") return null;
+  const mimeType = normalizeProfileMime(value.mimeType);
+  const dataB64 = String(value.dataB64 || "").trim();
+  const size = Math.max(0, Number(value.size) || Math.ceil((dataB64.length * 3) / 4));
+  const width = Math.max(0, Math.round(Number(value.width) || 0));
+  const height = Math.max(0, Math.round(Number(value.height) || 0));
+  if (!mimeType || !dataB64 || size > maxBytes || dataB64.length > Math.ceil((maxBytes * 4) / 3) + 8) return null;
+  return { mimeType, size, width, height, dataB64 };
+}
+
+function normalizeProfile(profile) {
+  const source = profile && typeof profile === "object" ? profile : {};
+  return {
+    avatar: normalizeProfileImage(source.avatar, MAX_PROFILE_AVATAR_BYTES),
+    banner: normalizeProfileImage(source.banner, MAX_PROFILE_BANNER_BYTES),
+    description: sanitizeProfileText(source.description, MAX_PROFILE_DESCRIPTION_LENGTH),
+    pronouns: sanitizeProfileText(source.pronouns, MAX_PROFILE_PRONOUNS_LENGTH)
+  };
+}
+
+function normalizeProfileMime(value) {
+  const mime = String(value || "").trim().toLowerCase();
+  if (mime === "image/jpg") return "image/jpeg";
+  if (mime === "image/apng") return "image/png";
+  return PROFILE_IMAGE_MIME_TYPES.has(mime) ? mime : "";
+}
+
+function profileImageSrc(image) {
+  const normalized = normalizeProfileImage(image, MAX_PROFILE_BANNER_BYTES);
+  return normalized ? `data:${normalized.mimeType};base64,${normalized.dataB64}` : "";
 }
 
 function sanitizeRoomId(value) {
@@ -160,6 +206,7 @@ function clearInviteLinkFromUrl() {
 function loadPersisted() {
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+    const profile = loadPersistedProfile();
     const rooms = Array.isArray(raw.rooms)
       ? raw.rooms
           .filter((r) => r && typeof r === "object" && typeof r.roomId === "string")
@@ -207,7 +254,8 @@ function loadPersisted() {
       deleteMessagesOnLeave: Boolean(raw.deleteMessagesOnLeave),
       streamerMode: Boolean(raw.streamerMode),
       messageSoundEnabled: Boolean(raw.messageSoundEnabled),
-      callUserVolumes: sanitizeCallUserVolumes(raw.callUserVolumes)
+      callUserVolumes: sanitizeCallUserVolumes(raw.callUserVolumes),
+      profile
     };
   } catch {
     return {
@@ -223,8 +271,17 @@ function loadPersisted() {
       deleteMessagesOnLeave: false,
       streamerMode: false,
       messageSoundEnabled: false,
-      callUserVolumes: {}
+      callUserVolumes: {},
+      profile: loadPersistedProfile()
     };
+  }
+}
+
+function loadPersistedProfile() {
+  try {
+    return normalizeProfile(JSON.parse(localStorage.getItem(PROFILE_STORAGE_KEY) || "{}"));
+  } catch {
+    return normalizeProfile(null);
   }
 }
 
@@ -274,6 +331,15 @@ function savePersisted(state) {
     );
   } catch {
     /* storage full — attachment bytes alone can exceed quota */
+  }
+  savePersistedProfile(state.profile);
+}
+
+function savePersistedProfile(profile) {
+  try {
+    localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(normalizeProfile(profile)));
+  } catch {
+    /* browser storage can be smaller than the protocol image limits */
   }
 }
 
@@ -453,6 +519,34 @@ function base64ToBlob(b64, mimeType) {
   return new Blob([bytes], { type: mimeType || "application/octet-stream" });
 }
 
+function mimeFromProfileFile(file) {
+  const fromType = normalizeProfileMime(file?.type);
+  if (fromType) return fromType;
+  const name = String(file?.name || "").toLowerCase();
+  if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
+  if (name.endsWith(".png") || name.endsWith(".apng")) return "image/png";
+  if (name.endsWith(".gif")) return "image/gif";
+  return "";
+}
+
+function imageDimensions(file): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const width = img.naturalWidth || 0;
+      const height = img.naturalHeight || 0;
+      URL.revokeObjectURL(url);
+      resolve({ width, height });
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Unsupported image."));
+    };
+    img.src = url;
+  });
+}
+
 function microphoneLevelFromSamples(samples) {
   if (!samples?.length) return 0;
   let peak = 0;
@@ -513,6 +607,7 @@ export function useMessenger() {
     manualClose: false,
 
     username: persisted.username,
+    profile: persisted.profile,
     activeRoom: persisted.activeRoom,
     rooms: persisted.rooms,
     roomKeysByRoom: persisted.roomKeysByRoom,
@@ -521,6 +616,7 @@ export function useMessenger() {
     pendingJoinRooms: [],
     messagesByRoom: persisted.messagesByRoom,
     usersByRoom: {},
+    profilesByUser: {},
     unreadByRoom: persisted.unreadByRoom,
 
     messageInput: "",
@@ -662,9 +758,17 @@ export function useMessenger() {
   });
 
   const memberRoster = computed(() => state.usersByRoom[state.activeRoom] || []);
+  const myProfile = computed(() => normalizeProfile(state.profile));
 
   function persist() {
     savePersisted(state);
+  }
+
+  function profileFor(username) {
+    const key = sanitizeUsername(username);
+    if (!key) return normalizeProfile(null);
+    if (key === sanitizeUsername(state.username)) return myProfile.value;
+    return normalizeProfile(state.profilesByUser[key]);
   }
 
   function roomKeyFor(roomId) {
@@ -786,6 +890,57 @@ export function useMessenger() {
     state.messageSoundEnabled = Boolean(value);
     if (state.messageSoundEnabled) ensureNotificationAudio();
     persist();
+  }
+
+  function setProfileText(payload: any = {}) {
+    const { description, pronouns } = payload;
+    state.profile = normalizeProfile({
+      ...state.profile,
+      ...(description !== undefined ? { description } : {}),
+      ...(pronouns !== undefined ? { pronouns } : {})
+    });
+    persist();
+    syncClientSettings(true);
+  }
+
+  async function setProfileImageFromFile(kind, file) {
+    const isBanner = kind === "banner";
+    const limit = isBanner ? MAX_PROFILE_BANNER_BYTES : MAX_PROFILE_AVATAR_BYTES;
+    if (!file) return false;
+    if (file.size > limit) {
+      state.lastError = `${isBanner ? "Banner" : "Profile image"} too large: ${formatSize(file.size)} > ${formatSize(limit)}`;
+      showToast(state.lastError);
+      return false;
+    }
+
+    const mimeType = mimeFromProfileFile(file);
+    if (!mimeType) {
+      state.lastError = "Profile images support PNG, APNG, GIF and JPEG.";
+      showToast(state.lastError);
+      return false;
+    }
+
+    try {
+      const { width, height } = await imageDimensions(file);
+      if (!width || !height) throw new Error("Invalid image dimensions.");
+      const dataB64 = await blobToBase64(file);
+      const image = { mimeType, size: file.size, width, height, dataB64 };
+      state.profile = normalizeProfile({ ...state.profile, [kind]: image });
+      persist();
+      syncClientSettings(true);
+      return true;
+    } catch (error) {
+      state.lastError = error?.message || "Could not read profile image.";
+      showToast(state.lastError);
+      return false;
+    }
+  }
+
+  function clearProfileImage(kind) {
+    if (kind !== "avatar" && kind !== "banner") return;
+    state.profile = normalizeProfile({ ...state.profile, [kind]: null });
+    persist();
+    syncClientSettings(true);
   }
 
   function callUserVolume(username) {
@@ -1175,6 +1330,7 @@ export function useMessenger() {
     state.joinedRooms = [];
     state.pendingJoinRooms = [];
     state.usersByRoom = {};
+    state.profilesByUser = {};
     state.ws = null;
     if (message) state.systemBanner = message;
   }
@@ -1184,14 +1340,13 @@ export function useMessenger() {
     state.ws.send(JSON.stringify(payload));
   }
 
-  function syncClientSettings() {
+  function syncClientSettings(includeProfile = false) {
     if (!state.connected || !state.identified) return;
-    send({
-      op: 8,
-      d: {
-        deleteMessagesOnLeave: state.deleteMessagesOnLeave
-      }
-    });
+    const d: any = {
+      deleteMessagesOnLeave: state.deleteMessagesOnLeave
+    };
+    if (includeProfile) d.profile = normalizeProfile(state.profile);
+    send({ op: 8, d });
   }
 
   function requestJoin(roomId) {
@@ -1345,6 +1500,7 @@ export function useMessenger() {
           username,
           isVoiceChat: state.voiceEnabled,
           deleteMessagesOnLeave: state.deleteMessagesOnLeave,
+          profile: normalizeProfile(state.profile),
           v: "qxprotocol-web-vite-vue",
           isMobile: /Android|iPhone|iPad|iPod/i.test(navigator.userAgent),
           isSecure: window.isSecureContext
@@ -1851,6 +2007,8 @@ export function useMessenger() {
     state.unreadByRoom = {};
     state.roomKeysByRoom = {};
     state.usersByRoom = {};
+    state.profilesByUser = {};
+    state.profile = normalizeProfile(null);
     state.activeRoom = "";
     state.joinedRooms = [];
     state.pendingJoinRooms = [];
@@ -2005,6 +2163,7 @@ export function useMessenger() {
       case 2:
         state.uuid = d.uuid;
         state.identified = true;
+        if (d?.profile) state.profile = normalizeProfile(d.profile);
         state.systemBanner = "";
         for (const r of state.rooms) requestJoin(r.roomId);
         break;
@@ -2052,6 +2211,9 @@ export function useMessenger() {
       case 25:
         applyRoomMessagesDeleted(d);
         break;
+      case 26:
+        applyProfileUpdate(d);
+        break;
       case 87:
         state.systemBanner = d?.msg || state.systemBanner;
         break;
@@ -2079,6 +2241,9 @@ export function useMessenger() {
     if (Array.isArray(d?.players)) {
       state.usersByRoom[roomId] = d.players;
     }
+    if (d?.profiles && typeof d.profiles === "object") {
+      applyProfiles(d.profiles);
+    }
     if (Array.isArray(d?.voicePlayers)) {
       state.voiceMembersByRoom[roomId] = d.voicePlayers;
     }
@@ -2096,6 +2261,21 @@ export function useMessenger() {
       if (roomId === state.activeRoom) fetchHistory(roomId);
       else if (!state.messagesByRoom[roomId]?.length) fetchHistory(roomId);
     }
+  }
+
+  function applyProfiles(profiles) {
+    for (const [username, profile] of Object.entries(profiles || {})) {
+      const key = sanitizeUsername(username);
+      if (key) state.profilesByUser[key] = normalizeProfile(profile);
+    }
+  }
+
+  function applyProfileUpdate(d) {
+    const key = sanitizeUsername(d?.user);
+    if (!key) return;
+    const profile = normalizeProfile(d?.profile);
+    if (key === sanitizeUsername(state.username)) state.profile = profile;
+    state.profilesByUser[key] = profile;
   }
 
   function handleLeaveOp(d) {
@@ -2150,6 +2330,7 @@ export function useMessenger() {
       version: 4,
       exportedAt: new Date().toISOString(),
       username: state.username,
+      profile: normalizeProfile(state.profile),
       activeRoom: state.activeRoom,
       rooms: state.rooms,
       messagesByRoom: state.messagesByRoom,
@@ -2190,6 +2371,7 @@ export function useMessenger() {
         if (usedToBeConnected) disconnect();
 
         if (typeof data.username === "string") state.username = sanitizeUsername(data.username);
+        state.profile = normalizeProfile(data.profile);
 
         if (Array.isArray(data.rooms)) {
           state.rooms = data.rooms
@@ -2255,6 +2437,8 @@ export function useMessenger() {
   singleton = {
     QUICK_REACTIONS,
     MESSAGE_LIMIT,
+    MAX_PROFILE_DESCRIPTION_LENGTH,
+    MAX_PROFILE_PRONOUNS_LENGTH,
     state,
     roomTitle,
     roomLabel,
@@ -2267,6 +2451,7 @@ export function useMessenger() {
     conversations,
     activeConversation,
     memberRoster,
+    myProfile,
     accentFor,
     formatTime,
     formatDay,
@@ -2279,6 +2464,8 @@ export function useMessenger() {
     isValidRoomId,
     hasRoomKey,
     roomAccessToken,
+    profileFor,
+    profileImageSrc,
     showToast,
 
     persist,
@@ -2292,6 +2479,9 @@ export function useMessenger() {
     setDeleteMessagesOnLeave,
     setStreamerMode,
     setMessageSoundEnabled,
+    setProfileText,
+    setProfileImageFromFile,
+    clearProfileImage,
     callUserVolume,
     setCallUserVolume,
     applyAudioOutput,

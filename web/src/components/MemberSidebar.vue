@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import ProfileCard from "@/components/ProfileCard.vue";
 
 const props = defineProps({
   messenger: { type: Object, required: true }
@@ -19,12 +20,17 @@ function accentFor(name: string) {
   return palette[hash % palette.length];
 }
 
+function avatarFor(username: string) {
+  return props.messenger.profileImageSrc(props.messenger.profileFor(username).avatar);
+}
+
 const members = computed(() =>
   [...(props.messenger.memberRoster.value || [])].sort((a, b) => a.localeCompare(b))
 );
 
 const me = computed(() => String(props.messenger.state.username || "").trim());
 const voiceMembers = computed(() => new Set(props.messenger.state.voiceMembersByRoom[props.messenger.state.activeRoom] || []));
+const selectedProfile = ref("");
 
 const sections = computed(() => {
   const self: string[] = [];
@@ -49,6 +55,23 @@ const sections = computed(() => {
     { key: "online", label: "Online", users: online }
   ].filter((section) => section.users.length);
 });
+
+function openProfile(event: MouseEvent, username: string) {
+  event.preventDefault();
+  event.stopPropagation();
+  selectedProfile.value = username;
+}
+
+function closeProfile() {
+  selectedProfile.value = "";
+}
+
+function onKey(event: KeyboardEvent) {
+  if (event.key === "Escape") closeProfile();
+}
+
+onMounted(() => document.addEventListener("keydown", onKey));
+onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
 </script>
 
 <template>
@@ -64,8 +87,22 @@ const sections = computed(() => {
       <section v-for="section in sections" :key="section.key" class="members__group">
         <div class="members__label">{{ section.label }} — {{ section.users.length }}</div>
         <div class="members__list">
-          <div v-for="username in section.users" :key="username" class="members__item">
-            <span class="avatar avatar--sm" :class="`avatar--${accentFor(username)}`">
+          <div
+            v-for="username in section.users"
+            :key="username"
+            class="members__item"
+            role="button"
+            tabindex="0"
+            :aria-label="`Open profile: ${username}`"
+            @click="openProfile($event, username)"
+            @contextmenu.prevent.stop="openProfile($event, username)"
+            @keydown.enter.prevent="selectedProfile = username"
+            @keydown.space.prevent="selectedProfile = username"
+          >
+            <span v-if="avatarFor(username)" class="members__avatar-image">
+              <img :src="avatarFor(username)" alt="" />
+            </span>
+            <span v-else class="avatar avatar--sm" :class="`avatar--${accentFor(username)}`">
               {{ initialsFor(username) }}
             </span>
             <div class="members__meta">
@@ -84,5 +121,14 @@ const sections = computed(() => {
     </div>
 
     <div v-else class="members__empty">No one is online in this room yet.</div>
+
+    <Teleport to="body">
+      <ProfileCard
+        v-if="selectedProfile"
+        :messenger="messenger"
+        :username="selectedProfile"
+        @close="closeProfile"
+      />
+    </Teleport>
   </aside>
 </template>

@@ -6,7 +6,11 @@ const props = defineProps({
 });
 
 const draftName = ref(props.messenger.state.username || "");
+const draftDescription = ref(props.messenger.state.profile?.description || "");
+const draftPronouns = ref(props.messenger.state.profile?.pronouns || "");
 const fileInputRef = ref(null);
+const avatarInputRef = ref(null);
+const bannerInputRef = ref(null);
 const firstInputRef = ref(null);
 const activeSection = ref("profile");
 
@@ -16,6 +20,13 @@ const nameChanged = computed(() => draftName.value.trim() !== String(props.messe
 const nameValid = computed(() => draftName.value.trim().length > 0 && draftName.value.trim().length <= 16);
 const meAccent = computed(() => props.messenger.accentFor(props.messenger.state.username || "you"));
 const meInitials = computed(() => initialsOf(props.messenger.state.username));
+const profile = computed(() => props.messenger.myProfile.value);
+const avatarSrc = computed(() => props.messenger.profileImageSrc(profile.value.avatar));
+const bannerSrc = computed(() => props.messenger.profileImageSrc(profile.value.banner));
+const profileTextChanged = computed(() =>
+  draftDescription.value.trim() !== String(profile.value.description || "").trim()
+  || draftPronouns.value.trim() !== String(profile.value.pronouns || "").trim()
+);
 
 const sections = [
   { id: "profile", label: "Profile" },
@@ -29,6 +40,8 @@ const sections = [
 watch(isOpen, async (v) => {
   if (v) {
     draftName.value = props.messenger.state.username || "";
+    draftDescription.value = props.messenger.state.profile?.description || "";
+    draftPronouns.value = props.messenger.state.profile?.pronouns || "";
     props.messenger.refreshAudioDevices();
     await nextTick();
     if (activeSection.value === "profile") {
@@ -56,6 +69,26 @@ function close() {
 function saveName() {
   if (!nameValid.value || !nameChanged.value) return;
   props.messenger.changeUsername(draftName.value.trim());
+}
+
+function saveProfileText() {
+  if (!profileTextChanged.value) return;
+  props.messenger.setProfileText({
+    description: draftDescription.value,
+    pronouns: draftPronouns.value
+  });
+}
+
+function onAvatarPicked(event) {
+  const file = event.target.files?.[0];
+  if (file) props.messenger.setProfileImageFromFile("avatar", file);
+  event.target.value = "";
+}
+
+function onBannerPicked(event) {
+  const file = event.target.files?.[0];
+  if (file) props.messenger.setProfileImageFromFile("banner", file);
+  event.target.value = "";
 }
 
 function onExport() { props.messenger.exportData(); }
@@ -152,8 +185,33 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
 
       <section v-if="activeSection === 'profile'" class="settings-page">
         <div class="settings-profile">
-          <span class="avatar settings-profile__avatar" :class="`avatar--${meAccent}`">{{ meInitials }}</span>
-          <button type="button" class="btn settings-profile__photo">Edit photo</button>
+          <div class="settings-profile__banner" :class="{ 'has-image': bannerSrc }">
+            <img v-if="bannerSrc" :src="bannerSrc" alt="" />
+          </div>
+          <span v-if="avatarSrc" class="settings-profile__avatar-image">
+            <img :src="avatarSrc" alt="" />
+          </span>
+          <span v-else class="avatar settings-profile__avatar" :class="`avatar--${meAccent}`">{{ meInitials }}</span>
+          <div class="settings-profile__actions">
+            <button type="button" class="btn settings-profile__photo" @click="avatarInputRef?.click()">Profile image</button>
+            <button type="button" class="btn settings-profile__photo" @click="bannerInputRef?.click()">Banner</button>
+            <button v-if="profile.avatar" type="button" class="btn settings-profile__photo" @click="messenger.clearProfileImage('avatar')">Clear image</button>
+            <button v-if="profile.banner" type="button" class="btn settings-profile__photo" @click="messenger.clearProfileImage('banner')">Clear banner</button>
+          </div>
+          <input
+            ref="avatarInputRef"
+            type="file"
+            accept="image/png,image/apng,image/gif,image/jpeg,.apng"
+            style="display: none"
+            @change="onAvatarPicked"
+          />
+          <input
+            ref="bannerInputRef"
+            type="file"
+            accept="image/png,image/apng,image/gif,image/jpeg,.apng"
+            style="display: none"
+            @change="onBannerPicked"
+          />
         </div>
 
         <div class="settings-group">
@@ -187,8 +245,58 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
           </div>
         </div>
 
+        <div class="settings-group">
+          <label class="settings-field">
+            <span class="settings-field__icon">
+              <svg viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h13"/><path d="M4 18h9"/></svg>
+            </span>
+            <span class="settings-field__body">
+              <span class="settings-field__label">Description</span>
+              <span class="settings-field__hint">{{ draftDescription.length }}/{{ messenger.MAX_PROFILE_DESCRIPTION_LENGTH }}</span>
+            </span>
+          </label>
+          <textarea
+            v-model="draftDescription"
+            class="settings-input settings-textarea"
+            :maxlength="messenger.MAX_PROFILE_DESCRIPTION_LENGTH"
+            spellcheck="true"
+            rows="4"
+            placeholder="Write a short profile description"
+          ></textarea>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-field">
+            <span class="settings-field__icon">
+              <svg viewBox="0 0 24 24"><path d="M5 7h14"/><path d="M8 7v10"/><path d="M16 7v10"/><path d="M4 17h16"/></svg>
+            </span>
+            <span class="settings-field__body">
+              <span class="settings-field__label">Pronouns</span>
+              <span class="settings-field__hint">{{ draftPronouns.length }}/{{ messenger.MAX_PROFILE_PRONOUNS_LENGTH }}</span>
+            </span>
+          </label>
+          <div class="settings-inline">
+            <input
+              v-model="draftPronouns"
+              type="text"
+              :maxlength="messenger.MAX_PROFILE_PRONOUNS_LENGTH"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="e.g. they/them"
+              class="settings-input"
+              @keydown.enter.prevent="saveProfileText"
+            />
+            <button
+              type="button"
+              class="btn btn--primary settings-btn"
+              :disabled="!profileTextChanged"
+              @click="saveProfileText"
+            >Save</button>
+          </div>
+        </div>
+
         <p class="settings-note">
-          Your profile and changes to it will be visible to people you message.
+          Profile image max 2 MB. Banner max 5 MB, PNG/APNG/GIF/JPEG.
         </p>
       </section>
 
