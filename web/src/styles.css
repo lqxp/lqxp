@@ -195,6 +195,16 @@ textarea {
   background: var(--surface-active);
 }
 
+.icon-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.icon-btn:disabled:hover {
+  background: none;
+  color: var(--muted);
+}
+
 .icon-btn svg {
   width: 20px;
   height: 20px;

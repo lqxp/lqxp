@@ -1,6 +1,7 @@
 [api]
 
 domain = ""
+publicDomain = "qxp.example.com"
 port = 4560
 adminPassword = ""
 
@@ -11,3 +12,13 @@ maxConnectionsPerIp = 3
 latestVersion = ""
 publicDir = "serve.public"
 webchatIndex = "index.html"
+
+[rtc]
+
+relayOnly = true
+turnUrls = [
+  "turn:turn.qxp.example.com:3478?transport=udp",
+  "turns:turn.qxp.example.com:5349?transport=tcp",
+]
+turnUsername = "qxp-turn"
+turnCredential = "change-me"

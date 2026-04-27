@@ -22,6 +22,8 @@ const callActiveHere = computed(() =>
 const callElapsed = computed(() => props.messenger.formatDuration(props.messenger.state.callElapsed));
 const roomHasKey = computed(() => props.messenger.hasRoomKey(props.messenger.state.activeRoom));
 const securityLabel = computed(() => roomHasKey.value ? "E2EE ready" : "No room key yet");
+const callsAvailable = computed(() => props.messenger.callsAvailable.value);
+const callsUnavailableReason = computed(() => props.messenger.callsUnavailableReason.value);
 
 function startCall() {
   props.messenger.startCall();
@@ -60,7 +62,8 @@ function removeHere() {
             <span class="call-dot"></span>
             In call · {{ callElapsed }}
           </template>
-          <template v-else>Room conversation · {{ securityLabel }}</template>
+          <template v-else-if="callsAvailable">Room conversation · {{ securityLabel }}</template>
+          <template v-else>Room conversation · {{ securityLabel }} · Calls unavailable: relay not configured</template>
         </div>
       </div>
     </div>
@@ -79,6 +82,8 @@ function removeHere() {
         class="icon-btn"
         type="button"
         aria-label="Start call"
+        :title="callsAvailable ? 'Start call' : callsUnavailableReason"
+        :disabled="!callsAvailable"
         @click="startCall"
       >
         <svg viewBox="0 0 24 24"><path d="M7.6 10.8a14.5 14.5 0 0 0 5.6 5.6l1.9-1.9a1.5 1.5 0 0 1 1.5-.37c1.03.34 2.1.52 3.2.52.83 0 1.5.67 1.5 1.5v3.05c0 .83-.67 1.5-1.5 1.5C10.45 20.7 3.3 13.55 3.3 4.2c0-.83.67-1.5 1.5-1.5h3.05c.83 0 1.5.67 1.5 1.5 0 1.1.18 2.17.52 3.2.17.53.03 1.1-.37 1.5l-1.9 1.9Z"/></svg>

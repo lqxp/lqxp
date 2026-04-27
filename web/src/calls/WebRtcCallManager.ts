@@ -1,4 +1,5 @@
 import type { CallMediaState, CallSignalPayload, RemoteCallMedia } from "./callTypes";
+import { rtcRuntimeConfig } from "@/config/runtime";
 
 interface PeerState {
   pc: RTCPeerConnection;
@@ -19,9 +20,32 @@ interface WebRtcCallManagerOptions {
   onRemoteLeft: (username: string) => void;
 }
 
-const rtcConfig: RTCConfiguration = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-};
+const relayUrls = rtcRuntimeConfig.turnUrls;
+const relayUsername = rtcRuntimeConfig.turnUsername;
+const relayCredential = rtcRuntimeConfig.turnCredential;
+
+export function relayCallsConfigured() {
+  return rtcRuntimeConfig.callsEnabled && relayUrls.length > 0 && !!relayUsername && !!relayCredential;
+}
+
+export function relayCallsRequirementMessage() {
+  return rtcRuntimeConfig.callsUnavailableReason
+    || "Calls are disabled until a TURN relay is configured. Direct peer-to-peer calls were turned off to avoid exposing participant IP addresses.";
+}
+
+const rtcConfig: RTCConfiguration = relayCallsConfigured()
+  ? {
+      iceTransportPolicy: "relay",
+      iceServers: [{
+        urls: relayUrls,
+        username: relayUsername,
+        credential: relayCredential
+      }]
+    }
+  : {
+      iceTransportPolicy: "relay",
+      iceServers: []
+    };
 
 export class WebRtcCallManager {
   private readonly peers = new Map<string, PeerState>();

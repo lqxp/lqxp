@@ -10,6 +10,8 @@ pub struct Config {
     pub api: ApiConfig,
     #[serde(default)]
     pub network: NetworkConfig,
+    #[serde(default)]
+    pub rtc: RtcConfig,
 }
 
 impl Default for Config {
@@ -17,6 +19,7 @@ impl Default for Config {
         Self {
             api: ApiConfig::default(),
             network: NetworkConfig::default(),
+            rtc: RtcConfig::default(),
         }
     }
 }
@@ -25,6 +28,8 @@ impl Default for Config {
 pub struct ApiConfig {
     #[serde(default)]
     pub domain: String,
+    #[serde(default, rename = "publicDomain")]
+    pub public_domain: String,
     #[serde(default = "default_port")]
     pub port: u16,
     #[serde(default, rename = "adminPassword")]
@@ -35,6 +40,7 @@ impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             domain: String::new(),
+            public_domain: String::new(),
             port: default_port(),
             admin_password: String::new(),
         }
@@ -67,6 +73,29 @@ impl Default for NetworkConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct RtcConfig {
+    #[serde(default = "default_relay_only", rename = "relayOnly")]
+    pub relay_only: bool,
+    #[serde(default, rename = "turnUrls")]
+    pub turn_urls: Vec<String>,
+    #[serde(default, rename = "turnUsername")]
+    pub turn_username: String,
+    #[serde(default, rename = "turnCredential")]
+    pub turn_credential: String,
+}
+
+impl Default for RtcConfig {
+    fn default() -> Self {
+        Self {
+            relay_only: default_relay_only(),
+            turn_urls: Vec::new(),
+            turn_username: String::new(),
+            turn_credential: String::new(),
+        }
+    }
+}
+
 fn default_port() -> u16 {
     4560
 }
@@ -85,6 +114,10 @@ fn default_public_dir() -> String {
 
 fn default_webchat_index() -> String {
     "index.html".to_owned()
+}
+
+fn default_relay_only() -> bool {
+    true
 }
 
 

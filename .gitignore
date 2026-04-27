@@ -34,8 +34,11 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .DS_Store
 bun.lock
 files/database.sqlite
-file/config.custom.toml
-file/database.json
+files/config.custom.toml
+files/database.json
+deploy/turn/turnserver.conf
+deploy/turn/credentials.env
+deploy/turn/certs/
 files/database.json
 package-lock.json
 .codex

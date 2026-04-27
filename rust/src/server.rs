@@ -10,6 +10,7 @@ use axum::{
     routing::get,
     Router,
 };
+use serde_json::json;
 use tokio::fs;
 
 use crate::{state::SharedState, utils::extract_client_ip, websocket::handle_socket};
@@ -25,8 +26,8 @@ pub fn build_router(state: SharedState) -> Router {
 async fn webchat_page(State(state): State<SharedState>, headers: HeaderMap) -> impl IntoResponse {
     let path =
         PathBuf::from(&state.config.network.public_dir).join(&state.config.network.webchat_index);
-    let origin = public_origin(&headers, &state.config.api.domain);
-    serve_webchat_index(&path, origin.as_deref()).await
+    let origin = public_origin(&headers, &state.config.api.public_domain);
+    serve_webchat_index(&path, origin.as_deref(), &state).await
 }
 
 async fn public_asset(
@@ -56,13 +57,14 @@ async fn serve_file(path: &Path) -> Response {
     }
 }
 
-async fn serve_webchat_index(path: &Path, origin: Option<&str>) -> Response {
+async fn serve_webchat_index(path: &Path, origin: Option<&str>, state: &SharedState) -> Response {
     match fs::read_to_string(path).await {
         Ok(html) => {
             let html = match origin {
                 Some(origin) => absolutize_social_meta(&html, origin),
                 None => html,
             };
+            let html = inject_runtime_config(&html, state);
 
             Response::builder()
                 .status(StatusCode::OK)
@@ -76,6 +78,37 @@ async fn serve_webchat_index(path: &Path, origin: Option<&str>) -> Response {
         )
             .into_response(),
     }
+}
+
+fn inject_runtime_config(html: &str, state: &SharedState) -> String {
+    let rtc = &state.config.rtc;
+    let relay_ready = !rtc.turn_urls.is_empty()
+        && !rtc.turn_username.trim().is_empty()
+        && !rtc.turn_credential.trim().is_empty();
+    let calls_enabled = if rtc.relay_only { relay_ready } else { true };
+    let calls_unavailable_reason = if calls_enabled {
+        String::new()
+    } else if rtc.relay_only {
+        "Calls are disabled until a TURN relay is configured by the server admin.".to_owned()
+    } else {
+        String::new()
+    };
+
+    let payload = json!({
+        "rtc": {
+            "relayOnly": rtc.relay_only,
+            "turnUrls": rtc.turn_urls,
+            "turnUsername": rtc.turn_username,
+            "turnCredential": rtc.turn_credential,
+            "callsEnabled": calls_enabled,
+            "callsUnavailableReason": calls_unavailable_reason
+        }
+    });
+    let script = format!(
+        r#"<script>window.__QXP_RUNTIME__ = {};</script>"#,
+        payload
+    );
+    html.replace("</head>", &format!("{script}\n  </head>"))
 }
 
 fn absolutize_social_meta(html: &str, origin: &str) -> String {

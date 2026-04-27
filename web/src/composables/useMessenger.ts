@@ -1,7 +1,7 @@
 import { computed, nextTick, reactive } from "vue";
 import { EMPTY_CALL_MEDIA, normalizeCallMedia } from "@/calls/callTypes";
 import type { CallMediaState, CallSignalPayload, RemoteCallMedia } from "@/calls/callTypes";
-import { WebRtcCallManager } from "@/calls/WebRtcCallManager";
+import { WebRtcCallManager, relayCallsConfigured, relayCallsRequirementMessage } from "@/calls/WebRtcCallManager";
 import {
   cryptoAvailable,
   decryptRoomPayload,
@@ -603,6 +603,8 @@ export function useMessenger() {
 
   const roomLabel = computed(() => state.activeRoom);
   const roomTitle = computed(() => state.activeRoom ? displayRoomName(state.activeRoom) : "No conversation");
+  const callsAvailable = computed(() => relayCallsConfigured());
+  const callsUnavailableReason = computed(() => callsAvailable.value ? "" : relayCallsRequirementMessage());
 
   const connectionLabel = computed(() => {
     if (state.connected && state.identified) return "online";
@@ -1587,6 +1589,12 @@ export function useMessenger() {
   // Calls use WebRTC media and the WebSocket only as a typed signaling relay.
   async function startCall() {
     if (state.inCall) return;
+    if (!relayCallsConfigured()) {
+      const message = relayCallsRequirementMessage();
+      state.lastError = message;
+      showToast(message);
+      return;
+    }
     const roomId = state.activeRoom;
     if (!roomId || !state.joinedRooms.includes(roomId)) {
       state.lastError = "Join a room first.";
@@ -2251,6 +2259,8 @@ export function useMessenger() {
     roomTitle,
     roomLabel,
     connectionLabel,
+    callsAvailable,
+    callsUnavailableReason,
     onlineCount,
     canSend,
     sortedMessages,

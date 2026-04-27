@@ -1,6 +1,7 @@
 [api]
 
 domain = ""
+publicDomain = ""
 port = 4560
 adminPassword = ""
 
@@ -11,3 +12,10 @@ maxConnectionsPerIp = 3
 latestVersion = ""
 publicDir = "serve.public"
 webchatIndex = "index.html"
+
+[rtc]
+
+relayOnly = true
+turnUrls = []
+turnUsername = ""
+turnCredential = ""
