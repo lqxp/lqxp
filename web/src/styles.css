@@ -1393,7 +1393,7 @@ textarea {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 14px 16px 18px;
+  padding: 14px 16px 52px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1815,15 +1815,19 @@ textarea {
   opacity: 0.8;
 }
 
-/* Keep the hover toolbar inside the scrollable feed so it cannot be clipped
-   when a long message history is scrolled near the viewport edges. */
+/* Keep the hover toolbar below the message so it never covers the text. */
 .bubble-actions {
   position: absolute;
-  top: 6px;
+  top: 100%;
   z-index: 10;
   opacity: 0;
+  padding-top: 4px;
   pointer-events: none;
   transition: opacity 100ms ease;
+}
+
+.msg.has-reactions .bubble>.bubble-actions {
+  padding-top: 24px;
 }
 
 .msg:not(.is-own) .bubble-actions {
@@ -4007,7 +4011,7 @@ textarea {
   }
 
   .feed {
-    padding: 10px 10px 12px;
+    padding: 10px 10px calc(52px + env(safe-area-inset-bottom));
     overscroll-behavior: contain;
   }
 
