@@ -9,6 +9,7 @@ CREDENTIALS_OUT="$TURN_DIR/credentials.env"
 CERTS_DIR="$TURN_DIR/certs"
 RUN_DIR="$TURN_DIR/run"
 PIDFILE_PATH="$RUN_DIR/turnserver.pid"
+TURN_DB_PATH="$TURN_DIR/turndb"
 
 BIND_HOST="0.0.0.0"
 PUBLIC_DOMAIN=""
@@ -152,10 +153,10 @@ tls-listening-port=$TURNS_PORT
 fingerprint
 no-cli
 no-multicast-peers
-no-loopback-peers
 min-port=$MIN_PORT
 max-port=$MAX_PORT
 pidfile=$PIDFILE_PATH
+userdb=$TURN_DB_PATH
 
 cert=$CERTS_DIR/fullchain.pem
 pkey=$CERTS_DIR/privkey.pem
@@ -184,6 +185,7 @@ QXP_TURN_LISTEN_IP=$LISTEN_IP
 QXP_TURN_RELAY_IP=$RELAY_IP
 QXP_TURN_EXTERNAL_IP=$EXTERNAL_IP
 QXP_TURN_PIDFILE=$PIDFILE_PATH
+QXP_TURN_USERDB=$TURN_DB_PATH
 EOF
 
 chmod 700 "$RUN_DIR"

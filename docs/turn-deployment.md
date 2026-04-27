@@ -33,6 +33,7 @@ This generates:
 - `deploy/turn/turnserver.conf`
 - `deploy/turn/credentials.env`
 - `deploy/turn/run/turnserver.pid`
+- `deploy/turn/turndb`
 
 ## 3. Obtain TLS certificates with certbot
 
@@ -77,6 +78,7 @@ PM2 docs describe `start`, `save`, and `startup` for daemonized process persiste
 - `qxp` runtime TURN config is injected by the Rust server into the served HTML page.
 - `coturn` is started by PM2 in foreground mode. Do not add coturn daemon flags when PM2 manages it.
 - The generated TURN config uses a local writable pidfile under `deploy/turn/run/` so it works under PM2 without root.
+- The generated TURN config also uses a local writable SQLite `userdb` under `deploy/turn/` to avoid coturn's default `/var/lib/turn/turndb` permission warning.
 - The TURN credentials live in:
   - `files/config.custom.toml`
   - `deploy/turn/turnserver.conf`
