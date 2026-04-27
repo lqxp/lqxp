@@ -9,7 +9,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
 use crate::{
     models::{
-        Attachment, BlacklistEntry, ChatMessageRecord, LoggedIpEntry, MessageReaction,
+        Attachment, BlacklistEntry, ChatMessageRecord, EncryptedPayload, LoggedIpEntry, MessageReaction,
         PlayerStatus, SocketPayload,
     },
     state::SharedState,
@@ -22,6 +22,9 @@ const MAX_ATTACHMENT_B64_LEN: usize = ((MAX_ATTACHMENT_BYTES + 2) / 3) * 4 + 4;
 const MAX_FILENAME_LEN: usize = 128;
 const MAX_MIMETYPE_LEN: usize = 96;
 const MAX_MESSAGE_CHARS: usize = 2000;
+const MAX_ENCRYPTED_ALG_LEN: usize = 32;
+const MAX_ENCRYPTED_IV_LEN: usize = 128;
+const MAX_ENCRYPTED_CIPHERTEXT_LEN: usize = 18 * 1024 * 1024;
 const MIN_ROOM_ID_LEN: usize = 8;
 const MAX_ROOM_ID_LEN: usize = 64;
 // Voice call chunks are ~800ms of Opus at 64–128kbps → 6–13KB raw.
@@ -511,6 +514,7 @@ pub async fn delete_user_messages_in_room_and_broadcast(
             }
             message.text.clear();
             message.attachment = None;
+            message.encrypted = None;
             message.preview = None;
             message.reactions.clear();
             message.deleted = true;
@@ -619,13 +623,27 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
         Ok(value) => value,
         Err(message) => return respond_error(state, session_id, 7, message, request_id(&d)).await,
     };
+    let encrypted = match parse_encrypted_payload(d.get("encrypted")) {
+        Ok(value) => value,
+        Err(message) => return respond_error(state, session_id, 7, message, request_id(&d)).await,
+    };
 
     let trimmed = text
         .trim()
         .chars()
         .take(MAX_MESSAGE_CHARS)
         .collect::<String>();
-    if trimmed.is_empty() && attachment.is_none() {
+    if encrypted.is_some() && (!trimmed.is_empty() || attachment.is_some()) {
+        return respond_error(
+            state,
+            session_id,
+            7,
+            "Encrypted messages cannot include plaintext fields",
+            request_id(&d),
+        )
+        .await;
+    }
+    if trimmed.is_empty() && attachment.is_none() && encrypted.is_none() {
         return respond_error(state, session_id, 7, "Empty message", request_id(&d)).await;
     }
     let reply_to_message_id = d
@@ -675,19 +693,24 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
         "[in-game]"
     };
 
-    let preview_target = crate::linkpreview::find_first_url(&trimmed);
+    let preview_target = if encrypted.is_some() {
+        None
+    } else {
+        crate::linkpreview::find_first_url(&trimmed)
+    };
 
     let message_record = ChatMessageRecord {
         message_id: random_message_id(),
         room_id: room_name.clone(),
         user: format!("{} {}", prefix, player_name),
         username: player_name,
-        text: trimmed,
+        text: if encrypted.is_some() { String::new() } else { trimmed },
         timestamp: now,
         system: false,
         reactions: Vec::new(),
         reply_to_message_id,
-        attachment,
+        attachment: if encrypted.is_some() { None } else { attachment },
+        encrypted,
         preview: None,
         deleted: false,
     };
@@ -919,6 +942,7 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                     }
                     message.text.clear();
                     message.attachment = None;
+                    message.encrypted = None;
                     message.preview = None;
                     message.reactions.clear();
                     message.deleted = true;
@@ -1806,6 +1830,7 @@ async fn is_duplicate_recent_room_message(
             && message.username == candidate.username
             && message.text == candidate.text
             && message.reply_to_message_id == candidate.reply_to_message_id
+            && encrypted_payloads_match(message.encrypted.as_ref(), candidate.encrypted.as_ref())
             && attachments_match(message.attachment.as_ref(), candidate.attachment.as_ref())
     })
 }
@@ -1818,6 +1843,22 @@ fn attachments_match(left: Option<&Attachment>, right: Option<&Attachment>) -> b
                 && left.mime_type == right.mime_type
                 && left.size == right.size
                 && left.data_b64 == right.data_b64
+        }
+        _ => false,
+    }
+}
+
+fn encrypted_payloads_match(
+    left: Option<&EncryptedPayload>,
+    right: Option<&EncryptedPayload>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.v == right.v
+                && left.alg == right.alg
+                && left.iv == right.iv
+                && left.ciphertext == right.ciphertext
         }
         _ => false,
     }
@@ -2030,6 +2071,64 @@ fn parse_attachment(raw: Option<&Value>) -> Result<Option<Attachment>, &'static 
         mime_type,
         size: decoded.len() as u64,
         data_b64: data_b64.to_owned(),
+    }))
+}
+
+fn parse_encrypted_payload(raw: Option<&Value>) -> Result<Option<EncryptedPayload>, &'static str> {
+    let Some(obj) = raw else {
+        return Ok(None);
+    };
+    if obj.is_null() {
+        return Ok(None);
+    }
+
+    let obj = obj
+        .as_object()
+        .ok_or("Encrypted payload must be an object")?;
+
+    let v = obj
+        .get("v")
+        .and_then(Value::as_u64)
+        .ok_or("Encrypted payload missing version")?;
+    if v != 1 {
+        return Err("Unsupported encrypted payload version");
+    }
+
+    let alg = obj
+        .get("alg")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("Encrypted payload missing algorithm")?
+        .chars()
+        .take(MAX_ENCRYPTED_ALG_LEN)
+        .collect::<String>();
+
+    let iv = obj
+        .get("iv")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("Encrypted payload missing iv")?
+        .chars()
+        .take(MAX_ENCRYPTED_IV_LEN)
+        .collect::<String>();
+
+    let ciphertext = obj
+        .get("ciphertext")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("Encrypted payload missing ciphertext")?;
+    if ciphertext.len() > MAX_ENCRYPTED_CIPHERTEXT_LEN {
+        return Err("Encrypted payload too large");
+    }
+
+    Ok(Some(EncryptedPayload {
+        v: 1,
+        alg,
+        iv,
+        ciphertext: ciphertext.to_owned(),
     }))
 }
 

@@ -50,6 +50,14 @@ pub struct Attachment {
     pub data_b64: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptedPayload {
+    pub v: u8,
+    pub alg: String,
+    pub iv: String,
+    pub ciphertext: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LinkPreview {
     pub url: String,
@@ -83,6 +91,8 @@ pub struct ChatMessageRecord {
     pub reply_to_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment: Option<Attachment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted: Option<EncryptedPayload>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<LinkPreview>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

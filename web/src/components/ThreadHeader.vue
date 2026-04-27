@@ -20,9 +20,23 @@ const callActiveHere = computed(() =>
 );
 
 const callElapsed = computed(() => props.messenger.formatDuration(props.messenger.state.callElapsed));
+const roomHasKey = computed(() => props.messenger.hasRoomKey(props.messenger.state.activeRoom));
+const securityLabel = computed(() => roomHasKey.value ? "E2EE ready" : "No room key yet");
 
 function startCall() {
   props.messenger.startCall();
+}
+
+function copyInvite() {
+  const id = props.messenger.state.activeRoom;
+  if (!id) return;
+  props.messenger.copyRoomInvite(id)
+    .then(() => {
+      props.messenger.showToast("Encrypted invite link copied.");
+    })
+    .catch((error) => {
+      props.messenger.state.lastError = error?.message || "Could not copy invite link.";
+    });
 }
 
 function removeHere() {
@@ -46,12 +60,20 @@ function removeHere() {
             <span class="call-dot"></span>
             In call · {{ callElapsed }}
           </template>
-          <template v-else>Room conversation</template>
+          <template v-else>Room conversation · {{ securityLabel }}</template>
         </div>
       </div>
     </div>
 
     <div class="thread__tools">
+      <button
+        class="icon-btn"
+        type="button"
+        aria-label="Copy encrypted invite link"
+        @click="copyInvite"
+      >
+        <svg viewBox="0 0 24 24"><path d="M15 8a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3v-6a3 3 0 0 1 3-3"/><path d="M9 8V6a3 3 0 1 1 6 0v2"/><rect x="8" y="8" width="8" height="6" rx="1.5"/></svg>
+      </button>
       <button
         v-if="!callActiveHere"
         class="icon-btn"

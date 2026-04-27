@@ -2,6 +2,13 @@ import { computed, nextTick, reactive } from "vue";
 import { EMPTY_CALL_MEDIA, normalizeCallMedia } from "@/calls/callTypes";
 import type { CallMediaState, CallSignalPayload, RemoteCallMedia } from "@/calls/callTypes";
 import { WebRtcCallManager } from "@/calls/WebRtcCallManager";
+import {
+  cryptoAvailable,
+  decryptRoomPayload,
+  encryptRoomPayload,
+  generateRoomKey,
+  normalizeRoomKey
+} from "@/crypto/e2ee";
 
 const STORAGE_KEY = "qxprotocol-messenger-v4";
 const QUICK_REACTIONS = ["❤️", "👍", "😂", "😮", "😢", "💀", "🧢"];
@@ -13,6 +20,7 @@ const MESSAGE_LIMIT = 2000;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const DUPLICATE_MESSAGE_WINDOW_MS = 10 * 60 * 1000;
 const RANDOM_ROOM_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+const E2EE_MESSAGE_PLACEHOLDER = "Encrypted message";
 
 function inferWebSocketUrl() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -109,6 +117,44 @@ function accentFor(seed) {
   return palette[h % palette.length];
 }
 
+function sanitizeRoomKeys(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const next = {};
+  for (const [roomId, roomKey] of Object.entries(raw)) {
+    const id = sanitizeRoomId(roomId);
+    if (!isValidRoomId(id)) continue;
+    try {
+      next[id] = normalizeRoomKey(String(roomKey || ""));
+    } catch {
+      /* ignore malformed room keys */
+    }
+  }
+  return next;
+}
+
+function parseInviteLink() {
+  try {
+    const hash = String(window.location.hash || "");
+    const queryIndex = hash.indexOf("?");
+    if (queryIndex === -1) return null;
+    const params = new URLSearchParams(hash.slice(queryIndex + 1));
+    const roomId = sanitizeRoomId(params.get("room") || "");
+    const key = String(params.get("key") || "").trim();
+    if (!isValidRoomId(roomId) || !key) return null;
+    return { roomId, roomKey: normalizeRoomKey(key) };
+  } catch {
+    return null;
+  }
+}
+
+function clearInviteLinkFromUrl() {
+  try {
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#/`);
+  } catch {
+    /* hash cleanup is best effort */
+  }
+}
+
 function loadPersisted() {
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
@@ -152,6 +198,7 @@ function loadPersisted() {
       rooms,
       messagesByRoom,
       unreadByRoom,
+      roomKeysByRoom: sanitizeRoomKeys(raw.roomKeysByRoom),
       selectedAudioInputId: String(raw.selectedAudioInputId || ""),
       selectedAudioOutputId: String(raw.selectedAudioOutputId || ""),
       microphoneThreshold: Math.max(0, Math.min(100, Number(raw.microphoneThreshold) || 0)),
@@ -167,6 +214,7 @@ function loadPersisted() {
       rooms: [],
       messagesByRoom: {},
       unreadByRoom: {},
+      roomKeysByRoom: {},
       selectedAudioInputId: "",
       selectedAudioOutputId: "",
       microphoneThreshold: 0,
@@ -212,6 +260,7 @@ function savePersisted(state) {
         rooms: state.rooms,
         messagesByRoom,
         unreadByRoom: state.unreadByRoom,
+        roomKeysByRoom: sanitizeRoomKeys(state.roomKeysByRoom),
         selectedAudioInputId: state.selectedAudioInputId,
         selectedAudioOutputId: state.selectedAudioOutputId,
         microphoneThreshold: state.microphoneThreshold,
@@ -270,6 +319,17 @@ function sameAttachmentPayload(left, right) {
   );
 }
 
+function sameEncryptedPayload(left, right) {
+  if (!left && !right) return true;
+  if (!left || !right) return false;
+  return (
+    Number(left.v) === Number(right.v)
+    && String(left.alg || "") === String(right.alg || "")
+    && String(left.iv || "") === String(right.iv || "")
+    && String(left.ciphertext || "") === String(right.ciphertext || "")
+  );
+}
+
 function isDuplicateRecentMessage(messages, candidate) {
   const oldestAllowed = Number(candidate?.timestamp || Date.now()) - DUPLICATE_MESSAGE_WINDOW_MS;
   for (let i = (messages?.length || 0) - 1; i >= 0; i -= 1) {
@@ -279,6 +339,7 @@ function isDuplicateRecentMessage(messages, candidate) {
     if (String(message.username || "") !== String(candidate.username || "")) continue;
     if (String(message.text || "") !== String(candidate.text || "")) continue;
     if (String(message.replyToMessageId || "") !== String(candidate.replyToMessageId || "")) continue;
+    if (!sameEncryptedPayload(message.encrypted, candidate.encrypted)) continue;
     if (!sameAttachmentPayload(message.attachment, candidate.attachment)) continue;
     return true;
   }
@@ -318,6 +379,14 @@ function normalizeMessage(message, fallbackRoomId) {
         dataB64: String(message.attachment.dataB64 || "")
       }
     : null;
+  const encrypted = message.encrypted && typeof message.encrypted === "object"
+    ? {
+        v: Number(message.encrypted.v) || 0,
+        alg: String(message.encrypted.alg || ""),
+        iv: String(message.encrypted.iv || ""),
+        ciphertext: String(message.encrypted.ciphertext || "")
+      }
+    : null;
 
   let kind = "text";
   if (message.deleted) kind = "deleted";
@@ -355,10 +424,12 @@ function normalizeMessage(message, fallbackRoomId) {
     reactions: Array.isArray(message.reactions) ? message.reactions : [],
     replyToMessageId: String(message.replyToMessageId || ""),
     attachment,
+    encrypted,
     preview,
     kind,
     voiceDuration,
-    jumboEmoji
+    jumboEmoji,
+    locked: Boolean(message.locked)
   };
 }
 
@@ -414,6 +485,20 @@ export function useMessenger() {
   if (singleton) return singleton;
 
   const persisted = loadPersisted();
+  const importedInvite = parseInviteLink();
+  if (importedInvite) {
+    persisted.roomKeysByRoom[importedInvite.roomId] = importedInvite.roomKey;
+    persisted.activeRoom = importedInvite.roomId;
+    if (!persisted.rooms.some((room) => room.roomId === importedInvite.roomId)) {
+      persisted.rooms.unshift({
+        roomId: importedInvite.roomId,
+        lastPreview: "",
+        lastTimestamp: 0,
+        lastSender: ""
+      });
+    }
+    clearInviteLinkFromUrl();
+  }
   let toastTimer = null;
 
   const state = reactive({
@@ -428,6 +513,7 @@ export function useMessenger() {
     username: persisted.username,
     activeRoom: persisted.activeRoom,
     rooms: persisted.rooms,
+    roomKeysByRoom: persisted.roomKeysByRoom,
 
     joinedRooms: [],
     pendingJoinRooms: [],
@@ -575,6 +661,105 @@ export function useMessenger() {
 
   function persist() {
     savePersisted(state);
+  }
+
+  function roomKeyFor(roomId) {
+    const id = sanitizeRoomId(roomId);
+    return id ? String(state.roomKeysByRoom[id] || "") : "";
+  }
+
+  function hasRoomKey(roomId) {
+    return !!roomKeyFor(roomId);
+  }
+
+  function ensureRoomKey(roomId) {
+    const id = sanitizeRoomId(roomId);
+    if (!id || !isValidRoomId(id)) throw new Error("Invalid room ID.");
+    const current = roomKeyFor(id);
+    if (current) return current;
+    if (!cryptoAvailable()) throw new Error("Web Crypto is unavailable in this browser.");
+    const next = generateRoomKey();
+    state.roomKeysByRoom[id] = next;
+    persist();
+    return next;
+  }
+
+  function importRoomKey(roomId, roomKey) {
+    const id = sanitizeRoomId(roomId);
+    if (!id || !isValidRoomId(id)) throw new Error("Invalid room ID.");
+    const normalized = normalizeRoomKey(roomKey);
+    state.roomKeysByRoom[id] = normalized;
+    touchRoom(id);
+    persist();
+    return normalized;
+  }
+
+  function roomInviteLink(roomId) {
+    const id = sanitizeRoomId(roomId);
+    const key = roomKeyFor(id);
+    if (!id || !key) return "";
+    const params = new URLSearchParams({ room: id, key });
+    return `${window.location.origin}${window.location.pathname}${window.location.search}#/?${params.toString()}`;
+  }
+
+  async function copyRoomInvite(roomId, { createIfMissing = true } = {}) {
+    const id = sanitizeRoomId(roomId);
+    if (!id || !isValidRoomId(id)) throw new Error("Invalid room ID.");
+    const key = roomKeyFor(id) || (createIfMissing ? ensureRoomKey(id) : "");
+    if (!key) throw new Error("No room key available.");
+    const link = roomInviteLink(id);
+    await copyTextToClipboard(link);
+    return link;
+  }
+
+  function encryptedPlaceholderMessage(message, roomId, reason = "") {
+    const hint = reason ? ` (${reason})` : "";
+    return normalizeMessage({
+      ...message,
+      roomId,
+      text: E2EE_MESSAGE_PLACEHOLDER,
+      attachment: null,
+      preview: null,
+      locked: true,
+      system: false
+    }, roomId);
+  }
+
+  async function hydrateIncomingMessage(message, fallbackRoomId) {
+    const roomId = sanitizeRoomId(message?.roomId || fallbackRoomId || "");
+    if (!message?.encrypted) return normalizeMessage(message, roomId);
+    const roomKey = roomKeyFor(roomId);
+    if (!roomKey) {
+      return encryptedPlaceholderMessage(message, roomId, "invite link required");
+    }
+    try {
+      const decrypted = await decryptRoomPayload(roomKey, roomId, message.encrypted);
+      return normalizeMessage({
+        ...message,
+        text: String(decrypted?.text || ""),
+        attachment: decrypted?.attachment && typeof decrypted.attachment === "object"
+          ? {
+              filename: String(decrypted.attachment.filename || "file"),
+              mimeType: String(decrypted.attachment.mimeType || "application/octet-stream"),
+              size: Number(decrypted.attachment.size) || 0,
+              dataB64: String(decrypted.attachment.dataB64 || "")
+            }
+          : null,
+        preview: null,
+        locked: false
+      }, roomId);
+    } catch {
+      return encryptedPlaceholderMessage(message, roomId, "wrong room key");
+    }
+  }
+
+  async function buildEncryptedOutgoingMessage(roomId, payload) {
+    const id = sanitizeRoomId(roomId);
+    const roomKey = roomKeyFor(id);
+    if (!roomKey) {
+      throw new Error("This room needs an invite link key before you can send encrypted messages.");
+    }
+    return encryptRoomPayload(roomKey, id, payload);
   }
 
   function displayRoomName(roomId) {
@@ -1082,7 +1267,19 @@ export function useMessenger() {
     }
     state.composing = false;
     state.composeInput = "";
+    try {
+      ensureRoomKey(id);
+    } catch (error) {
+      state.lastError = error?.message || "Could not create an encrypted room key.";
+      showToast(state.lastError);
+      return;
+    }
     selectConversation(id);
+    copyRoomInvite(id).then(() => {
+      showToast("Encrypted invite link copied.");
+    }).catch(() => {
+      showToast("Room created. Invite link copy failed.");
+    });
   }
 
   function showToast(message) {
@@ -1098,6 +1295,7 @@ export function useMessenger() {
     let id = "";
     try {
       id = generateRandomRoomId();
+      ensureRoomKey(id);
     } catch (error) {
       state.lastError = error.message;
       showToast("Could not generate a secure room.");
@@ -1106,10 +1304,10 @@ export function useMessenger() {
 
     selectConversation(id);
     try {
-      await copyTextToClipboard(id);
-      showToast("Room ID copied.");
+      await copyRoomInvite(id);
+      showToast("Encrypted invite link copied.");
     } catch {
-      showToast("Room opened. Copy failed.");
+      showToast("Room opened. Invite link copy failed.");
     }
   }
 
@@ -1171,11 +1369,18 @@ export function useMessenger() {
     const roomId = state.activeRoom;
     if (!text || !roomId) return;
     if (state.connected && state.identified && state.joinedRooms.includes(roomId)) {
-      const d: any = { text: text.slice(0, MESSAGE_LIMIT), gameId: roomId };
-      if (state.replyingTo?.messageId) d.replyToMessageId = state.replyingTo.messageId;
-      send({ op: 7, d });
-      state.messageInput = "";
-      state.replyingTo = null;
+      buildEncryptedOutgoingMessage(roomId, { text: text.slice(0, MESSAGE_LIMIT), attachment: null })
+        .then((encrypted) => {
+          const d: any = { text: "", gameId: roomId, encrypted };
+          if (state.replyingTo?.messageId) d.replyToMessageId = state.replyingTo.messageId;
+          send({ op: 7, d });
+          state.messageInput = "";
+          state.replyingTo = null;
+        })
+        .catch((error) => {
+          state.lastError = error?.message || "Message encryption failed.";
+          showToast(state.lastError);
+        });
     } else {
       state.lastError = "Not joined to this room yet.";
     }
@@ -1199,18 +1404,22 @@ export function useMessenger() {
 
     try {
       const dataB64 = await blobToBase64(file);
+      const encrypted = await buildEncryptedOutgoingMessage(roomId, {
+        text: caption ? String(caption).trim().slice(0, MESSAGE_LIMIT) : "",
+        attachment: {
+          filename: String(file.name || "file").slice(0, 128),
+          mimeType: file.type || "application/octet-stream",
+          size: file.size,
+          dataB64
+        }
+      });
       send({
         op: 7,
         d: {
-          text: caption ? String(caption).trim().slice(0, MESSAGE_LIMIT) : "",
+          text: "",
           gameId: roomId,
           ...(state.replyingTo?.messageId ? { replyToMessageId: state.replyingTo.messageId } : {}),
-          attachment: {
-            filename: String(file.name || "file").slice(0, 128),
-            mimeType: file.type || "application/octet-stream",
-            size: file.size,
-            dataB64
-          }
+          encrypted
         }
       });
       state.replyingTo = null;
@@ -1626,6 +1835,7 @@ export function useMessenger() {
     state.rooms = [];
     state.messagesByRoom = {};
     state.unreadByRoom = {};
+    state.roomKeysByRoom = {};
     state.usersByRoom = {};
     state.activeRoom = "";
     state.joinedRooms = [];
@@ -1737,9 +1947,9 @@ export function useMessenger() {
     }
   }
 
-  function upsertMessage(message) {
+  async function upsertMessage(message) {
     const roomId = sanitizeRoomId(message.roomId || state.activeRoom);
-    const normalized = normalizeMessage(message, roomId);
+    const normalized = await hydrateIncomingMessage(message, roomId);
     const added = pushMessageToRoom(roomId, normalized);
     touchRoom(roomId, normalized);
 
@@ -1795,7 +2005,9 @@ export function useMessenger() {
           state.lastError = d.error;
         } else if (d?.messageId && typeof d?.timestamp === "number") {
           // Full broadcast frame ({messageId, text, username, timestamp, ...}).
-          upsertMessage(d);
+          upsertMessage(d).catch(() => {
+            state.lastError = "Could not process encrypted message.";
+          });
         }
         // else: {messageId, ok: true} sender-ack — ignored, we already got the broadcast.
         break;
@@ -1806,7 +2018,9 @@ export function useMessenger() {
         }
         break;
       case 18:
-        handleHistoryOp(d);
+        handleHistoryOp(d).catch(() => {
+          state.lastError = "Could not decrypt room history.";
+        });
         break;
       case 20:
         applyReactions(d);
@@ -1898,11 +2112,13 @@ export function useMessenger() {
     applyDeletedMessageIds(roomId, d.messageIds);
   }
 
-  function handleHistoryOp(d) {
+  async function handleHistoryOp(d) {
     if (!d?.ok) return;
     const roomId = sanitizeRoomId(d.roomId);
     if (!roomId) return;
-    const messages = Array.isArray(d.messages) ? d.messages.map((m) => normalizeMessage(m, roomId)) : [];
+    const messages = Array.isArray(d.messages)
+      ? await Promise.all(d.messages.map((m) => hydrateIncomingMessage(m, roomId)))
+      : [];
     state.messagesByRoom[roomId] = messages;
     const last = messages[messages.length - 1];
     if (last) touchRoom(roomId, last);
@@ -1924,6 +2140,7 @@ export function useMessenger() {
       rooms: state.rooms,
       messagesByRoom: state.messagesByRoom,
       unreadByRoom: state.unreadByRoom,
+      roomKeysByRoom: sanitizeRoomKeys(state.roomKeysByRoom),
       deleteMessagesOnLeave: state.deleteMessagesOnLeave,
       streamerMode: state.streamerMode,
       messageSoundEnabled: state.messageSoundEnabled,
@@ -1996,6 +2213,8 @@ export function useMessenger() {
           state.unreadByRoom = next;
         }
 
+        state.roomKeysByRoom = sanitizeRoomKeys(data.roomKeysByRoom);
+
         if (typeof data.activeRoom === "string") {
           state.activeRoom = isValidRoomId(data.activeRoom) ? sanitizeRoomId(data.activeRoom) : "";
         }
@@ -2042,6 +2261,9 @@ export function useMessenger() {
     displayRoomName,
     validateRoomId,
     isValidRoomId,
+    hasRoomKey,
+    roomInviteLink,
+    showToast,
 
     persist,
     refreshAudioDevices,
@@ -2085,6 +2307,7 @@ export function useMessenger() {
     cancelCompose,
     submitCompose,
     createRandomRoom,
+    copyRoomInvite,
     removeRoom,
     touchRoom,
     exportData,
