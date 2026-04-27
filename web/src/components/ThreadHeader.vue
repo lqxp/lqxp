@@ -32,10 +32,10 @@ function copyInvite() {
   if (!id) return;
   props.messenger.copyRoomInvite(id)
     .then(() => {
-      props.messenger.showToast("Encrypted invite link copied.");
+      props.messenger.showToast("Room token copied.");
     })
     .catch((error) => {
-      props.messenger.state.lastError = error?.message || "Could not copy invite link.";
+      props.messenger.state.lastError = error?.message || "Could not copy room token.";
     });
 }
 
@@ -69,7 +69,7 @@ function removeHere() {
       <button
         class="icon-btn"
         type="button"
-        aria-label="Copy encrypted invite link"
+        aria-label="Copy room token"
         @click="copyInvite"
       >
         <svg viewBox="0 0 24 24"><path d="M15 8a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3v-6a3 3 0 0 1 3-3"/><path d="M9 8V6a3 3 0 1 1 6 0v2"/><rect x="8" y="8" width="8" height="6" rx="1.5"/></svg>

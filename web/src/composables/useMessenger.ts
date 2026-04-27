@@ -6,7 +6,9 @@ import {
   cryptoAvailable,
   decryptRoomPayload,
   encryptRoomPayload,
+  generateRoomAccessToken,
   generateRoomKey,
+  parseRoomAccessToken,
   normalizeRoomKey
 } from "@/crypto/e2ee";
 
@@ -694,12 +696,11 @@ export function useMessenger() {
     return normalized;
   }
 
-  function roomInviteLink(roomId) {
+  function roomAccessToken(roomId) {
     const id = sanitizeRoomId(roomId);
     const key = roomKeyFor(id);
     if (!id || !key) return "";
-    const params = new URLSearchParams({ room: id, key });
-    return `${window.location.origin}${window.location.pathname}${window.location.search}#/?${params.toString()}`;
+    return `${id}${key}`;
   }
 
   async function copyRoomInvite(roomId, { createIfMissing = true } = {}) {
@@ -707,9 +708,9 @@ export function useMessenger() {
     if (!id || !isValidRoomId(id)) throw new Error("Invalid room ID.");
     const key = roomKeyFor(id) || (createIfMissing ? ensureRoomKey(id) : "");
     if (!key) throw new Error("No room key available.");
-    const link = roomInviteLink(id);
-    await copyTextToClipboard(link);
-    return link;
+    const token = roomAccessToken(id);
+    await copyTextToClipboard(token);
+    return token;
   }
 
   function encryptedPlaceholderMessage(message, roomId, reason = "") {
@@ -730,7 +731,7 @@ export function useMessenger() {
     if (!message?.encrypted) return normalizeMessage(message, roomId);
     const roomKey = roomKeyFor(roomId);
     if (!roomKey) {
-      return encryptedPlaceholderMessage(message, roomId, "invite link required");
+      return encryptedPlaceholderMessage(message, roomId, "room token required");
     }
     try {
       const decrypted = await decryptRoomPayload(roomKey, roomId, message.encrypted);
@@ -757,7 +758,7 @@ export function useMessenger() {
     const id = sanitizeRoomId(roomId);
     const roomKey = roomKeyFor(id);
     if (!roomKey) {
-      throw new Error("This room needs an invite link key before you can send encrypted messages.");
+      throw new Error("This room needs its room token key before you can send encrypted messages.");
     }
     return encryptRoomPayload(roomKey, id, payload);
   }
@@ -1258,28 +1259,30 @@ export function useMessenger() {
   }
 
   function submitCompose() {
-    const id = sanitizeRoomId(state.composeInput);
-    const validation = validateRoomId(id);
-    if (validation) {
-      state.lastError = validation;
-      showToast(validation);
+    const raw = String(state.composeInput || "").trim();
+    let id = "";
+    try {
+      if (/^[0-9a-f]{64}$/i.test(raw)) {
+        const parsed = parseRoomAccessToken(raw);
+        id = parsed.roomId;
+        importRoomKey(parsed.roomId, parsed.roomKey);
+      } else {
+        id = sanitizeRoomId(raw);
+        const validation = validateRoomId(id);
+        if (validation) {
+          state.lastError = validation;
+          showToast(validation);
+          return;
+        }
+      }
+    } catch (error) {
+      state.lastError = error?.message || "Invalid room token.";
+      showToast(state.lastError);
       return;
     }
     state.composing = false;
     state.composeInput = "";
-    try {
-      ensureRoomKey(id);
-    } catch (error) {
-      state.lastError = error?.message || "Could not create an encrypted room key.";
-      showToast(state.lastError);
-      return;
-    }
     selectConversation(id);
-    copyRoomInvite(id).then(() => {
-      showToast("Encrypted invite link copied.");
-    }).catch(() => {
-      showToast("Room created. Invite link copy failed.");
-    });
   }
 
   function showToast(message) {
@@ -1294,20 +1297,23 @@ export function useMessenger() {
   async function createRandomRoom() {
     let id = "";
     try {
-      id = generateRandomRoomId();
-      ensureRoomKey(id);
+      const token = generateRoomAccessToken();
+      id = token.roomId;
+      importRoomKey(token.roomId, token.roomKey);
     } catch (error) {
       state.lastError = error.message;
       showToast("Could not generate a secure room.");
       return;
     }
 
+    state.composing = false;
+    state.composeInput = "";
     selectConversation(id);
     try {
       await copyRoomInvite(id);
-      showToast("Encrypted invite link copied.");
+      showToast("Room token copied.");
     } catch {
-      showToast("Room opened. Invite link copy failed.");
+      showToast("Room opened. Token copy failed.");
     }
   }
 
@@ -2262,7 +2268,7 @@ export function useMessenger() {
     validateRoomId,
     isValidRoomId,
     hasRoomKey,
-    roomInviteLink,
+    roomAccessToken,
     showToast,
 
     persist,

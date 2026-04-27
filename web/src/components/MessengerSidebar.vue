@@ -40,6 +40,10 @@ function removeConversation(event, roomId) {
 function openSettings() {
   props.messenger.state.settingsOpen = true;
 }
+
+function createRoom() {
+  props.messenger.createRandomRoom();
+}
 </script>
 
 <template>
@@ -70,12 +74,15 @@ function openSettings() {
         pattern="[A-Za-z0-9]{8,64}"
         autocomplete="off"
         spellcheck="false"
-        placeholder="Room ID, 8-64 letters/numbers"
+        placeholder="Paste room token"
         @keydown.enter.prevent="messenger.submitCompose"
         @keydown="onComposeKey"
         @blur="messenger.state.composeInput ? null : messenger.cancelCompose()"
       />
-      <button type="button" aria-label="Cancel" @click="messenger.cancelCompose">
+      <button type="button" aria-label="Generate room token" @mousedown.prevent @click="createRoom">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h11"/><path d="M4 17h9"/><path d="M15 7l2 2 3-5"/><path d="m13 17 2 2 5-5"/></svg>
+      </button>
+      <button type="button" aria-label="Cancel" @mousedown.prevent @click="messenger.cancelCompose">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
       </button>
     </div>

@@ -1,10 +1,27 @@
-const ROOM_KEY_BYTES = 32;
+const ROOM_ID_BYTES = 16;
+const ROOM_KEY_BYTES = 16;
 const IV_BYTES = 12;
 const TEXT_ENCODER = new TextEncoder();
 const TEXT_DECODER = new TextDecoder();
 
 export const E2EE_ENVELOPE_VERSION = 1;
-export const E2EE_ALGORITHM = "A256GCM";
+export const E2EE_ALGORITHM = "A128GCM";
+
+function bytesToHex(bytes: Uint8Array) {
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+function hexToBytes(value: string) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!/^[0-9a-f]+$/.test(normalized) || normalized.length % 2 !== 0) {
+    throw new Error("Invalid hex payload.");
+  }
+  const bytes = new Uint8Array(normalized.length / 2);
+  for (let index = 0; index < normalized.length; index += 2) {
+    bytes[index / 2] = Number.parseInt(normalized.slice(index, index + 2), 16);
+  }
+  return bytes;
+}
 
 function bytesToBase64(bytes: Uint8Array) {
   let binary = "";
@@ -40,23 +57,55 @@ export function cryptoAvailable() {
 }
 
 export function normalizeRoomKey(rawValue: string) {
-  const bytes = decodeBase64Url(String(rawValue || "").trim());
+  const bytes = hexToBytes(String(rawValue || "").trim());
   if (bytes.length !== ROOM_KEY_BYTES) {
     throw new Error("Invalid room key.");
   }
-  return encodeBase64Url(bytes);
+  return bytesToHex(bytes);
 }
 
 export function generateRoomKey() {
   if (!cryptoAvailable()) throw new Error("Web Crypto is unavailable.");
   const bytes = new Uint8Array(ROOM_KEY_BYTES);
   globalThis.crypto.getRandomValues(bytes);
-  return encodeBase64Url(bytes);
+  return bytesToHex(bytes);
+}
+
+export function normalizeRoomAccessToken(rawValue: string) {
+  const normalized = String(rawValue || "").trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(normalized)) {
+    throw new Error("Invalid room token.");
+  }
+  return normalized;
+}
+
+export function generateRoomAccessToken() {
+  if (!cryptoAvailable()) throw new Error("Web Crypto is unavailable.");
+  const roomIdBytes = new Uint8Array(ROOM_ID_BYTES);
+  const roomKeyBytes = new Uint8Array(ROOM_KEY_BYTES);
+  globalThis.crypto.getRandomValues(roomIdBytes);
+  globalThis.crypto.getRandomValues(roomKeyBytes);
+  const roomId = bytesToHex(roomIdBytes);
+  const roomKey = bytesToHex(roomKeyBytes);
+  return {
+    roomId,
+    roomKey,
+    token: `${roomId}${roomKey}`
+  };
+}
+
+export function parseRoomAccessToken(rawValue: string) {
+  const token = normalizeRoomAccessToken(rawValue);
+  return {
+    token,
+    roomId: token.slice(0, ROOM_ID_BYTES * 2),
+    roomKey: token.slice(ROOM_ID_BYTES * 2)
+  };
 }
 
 async function importRoomKey(roomKey: string) {
   if (!cryptoAvailable()) throw new Error("Web Crypto is unavailable.");
-  const raw = decodeBase64Url(roomKey);
+  const raw = hexToBytes(roomKey);
   if (raw.length !== ROOM_KEY_BYTES) throw new Error("Invalid room key.");
   return globalThis.crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
 }
