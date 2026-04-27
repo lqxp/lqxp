@@ -73,17 +73,6 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocumentClick));
 
 <template>
   <aside class="side">
-    <div class="side__top">
-      <div class="side__actions">
-        <button class="icon-btn" type="button" aria-label="New conversation" @click="messenger.startCompose">
-          <svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>
-        </button>
-        <button class="icon-btn" type="button" aria-label="Settings" @click="openSettings">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="12" cy="19" r="1.2"/></svg>
-        </button>
-      </div>
-    </div>
-
     <div v-if="messenger.state.composing" class="compose">
       <input
         ref="composeRef"
@@ -117,6 +106,12 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocumentClick));
           aria-label="Search conversations"
         />
       </label>
+      <button class="icon-btn side__shuffle" type="button" aria-label="Generate room token" @click="createRoom">
+        <svg viewBox="0 0 24 24"><path d="M16 3h5v5"/><path d="M4 20 21 3"/><path d="M21 16v5h-5"/><path d="M15 15 21 21"/><path d="M4 4l5 5"/></svg>
+      </button>
+      <button class="icon-btn side__compose" type="button" aria-label="New conversation" @click="messenger.startCompose">
+        <svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>
+      </button>
     </div>
 
     <div class="side__list">

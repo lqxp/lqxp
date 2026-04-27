@@ -455,8 +455,8 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  padding: 10px 14px;
-  height: var(--header-h);
+  padding: 10px 14px 4px;
+  height: 52px;
   flex: none;
 }
 
@@ -531,11 +531,16 @@ textarea {
 }
 
 .side__search {
-  padding: 0 12px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 10px;
   flex: none;
 }
 
 .search {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -572,6 +577,19 @@ textarea {
 
 .search input::placeholder {
   color: var(--muted);
+}
+
+.side__shuffle,
+.side__compose {
+  flex: none;
+  width: 36px;
+  height: 36px;
+}
+
+.side__shuffle svg,
+.side__compose svg {
+  width: 18px;
+  height: 18px;
 }
 
 /* Compose inline */
