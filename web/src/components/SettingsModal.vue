@@ -258,9 +258,9 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
           <label class="settings-select settings-select--offset">
             <span class="sr-only">Status</span>
             <select :value="messenger.state.status" @change="messenger.setPresenceStatus(targetValue($event))">
-              <option value="online">En ligne</option>
+              <option value="online">Online</option>
               <option value="invisible">Invisible</option>
-              <option value="dnd">Ne pas déranger</option>
+              <option value="dnd">Do Not Disturb</option>
             </select>
           </label>
         </div>

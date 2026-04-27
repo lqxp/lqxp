@@ -50,9 +50,9 @@ function presenceStatusLabel(status) {
     case "invisible":
       return "Invisible";
     case "dnd":
-      return "Ne pas déranger";
+      return "Do Not Disturb";
     default:
-      return "En ligne";
+      return "Online";
   }
 }
 
