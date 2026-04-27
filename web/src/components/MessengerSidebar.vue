@@ -80,7 +80,7 @@ function createRoom() {
         @blur="messenger.state.composeInput ? null : messenger.cancelCompose()"
       />
       <button type="button" aria-label="Generate room token" @mousedown.prevent @click="createRoom">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h11"/><path d="M4 17h9"/><path d="M15 7l2 2 3-5"/><path d="m13 17 2 2 5-5"/></svg>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M4 20 21 3"/><path d="M21 16v5h-5"/><path d="M15 15 21 21"/><path d="M4 4l5 5"/></svg>
       </button>
       <button type="button" aria-label="Cancel" @mousedown.prevent @click="messenger.cancelCompose">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
