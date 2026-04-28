@@ -1953,6 +1953,15 @@ textarea {
   background: rgba(255, 90, 95, 0.14);
 }
 
+.pick__edit {
+  color: var(--text);
+}
+
+.pick__edit svg {
+  width: 14px;
+  height: 14px;
+}
+
 /* Composer */
 .composer {
   display: flex;
@@ -1986,6 +1995,14 @@ textarea {
   color: var(--blue);
   font-size: 12px;
   font-weight: 600;
+}
+
+.edit-draft {
+  border-left-color: var(--green);
+}
+
+.edit-draft .reply-draft__label {
+  color: var(--green);
 }
 
 .reply-draft__text {

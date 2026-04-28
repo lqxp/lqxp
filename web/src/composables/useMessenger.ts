@@ -545,6 +545,7 @@ function normalizeMessage(message, fallbackRoomId) {
     voiceDuration,
     jumboEmoji,
     locked: Boolean(message.locked),
+    editedAt: Number(message.editedAt) || 0,
     mentioned: Boolean(message.mentioned)
   };
 }
@@ -688,6 +689,7 @@ export function useMessenger() {
 
     settingsOpen: false,
     replyingTo: null,
+    editingMessage: null,
 
     audioDevices: [],
     selectedAudioInputId: persisted.selectedAudioInputId,
@@ -1647,6 +1649,7 @@ export function useMessenger() {
     }
     state.activeRoom = id;
     state.unreadByRoom[id] = 0;
+    if (state.editingMessage?.roomId !== id) cancelEditMessage();
     touchRoom(id);
     persist();
     if (state.connected && state.identified) {
@@ -1802,6 +1805,10 @@ export function useMessenger() {
     const text = state.messageInput.trim();
     const roomId = state.activeRoom;
     if (!text || !roomId) return;
+    if (state.editingMessage) {
+      editCurrentMessage(text);
+      return;
+    }
     if (state.connected && state.identified && state.joinedRooms.includes(roomId)) {
       buildEncryptedOutgoingMessage(roomId, { text: text.slice(0, MESSAGE_LIMIT), attachment: null })
         .then((encrypted) => {
@@ -2334,7 +2341,79 @@ export function useMessenger() {
     if (!state.connected || !state.identified || !message?.messageId) return;
     const gameId = message.roomId || state.activeRoom;
     if (!gameId) return;
+    if (state.editingMessage?.messageId === message.messageId) cancelEditMessage();
     send({ op: 21, d: { messageId: message.messageId, gameId } });
+  }
+
+  function canEditMessage(message) {
+    return Boolean(
+      message
+      && isOwnMessage(message)
+      && !message.deleted
+      && !message.locked
+      && !message.system
+      && !message.attachment
+      && message.kind === "text"
+    );
+  }
+
+  function startEditMessage(message) {
+    if (!canEditMessage(message)) return;
+    const roomId = sanitizeRoomId(message.roomId || state.activeRoom);
+    if (!roomId || !message.messageId) return;
+    state.replyingTo = null;
+    state.editingMessage = {
+      messageId: message.messageId,
+      roomId,
+      text: message.rawText || message.text || ""
+    };
+    state.messageInput = message.rawText || message.text || "";
+    nextTick(() => {
+      const input = document.querySelector(".composer__input textarea") as HTMLTextAreaElement | null;
+      input?.focus();
+      try {
+        input?.setSelectionRange(input.value.length, input.value.length);
+      } catch {
+        /* selection is best effort */
+      }
+    });
+  }
+
+  function cancelEditMessage() {
+    state.editingMessage = null;
+    state.messageInput = "";
+  }
+
+  function editCurrentMessage(text) {
+    const draft = state.editingMessage;
+    if (!draft?.messageId) return;
+    const roomId = sanitizeRoomId(draft.roomId || state.activeRoom);
+    const nextText = String(text || "").trim().slice(0, MESSAGE_LIMIT);
+    if (!roomId || !nextText) return;
+    if (!state.connected || !state.identified || !state.joinedRooms.includes(roomId)) {
+      state.lastError = "Not joined to this room yet.";
+      showToast(state.lastError);
+      return;
+    }
+
+    buildEncryptedOutgoingMessage(roomId, { text: nextText, attachment: null })
+      .then((encrypted) => {
+        send({
+          op: 29,
+          d: {
+            messageId: draft.messageId,
+            gameId: roomId,
+            text: "",
+            encrypted
+          }
+        });
+        state.messageInput = "";
+        state.editingMessage = null;
+      })
+      .catch((error) => {
+        state.lastError = error?.message || "Message edit failed.";
+        showToast(state.lastError);
+      });
   }
 
   function logoutLocal() {
@@ -2372,6 +2451,7 @@ export function useMessenger() {
 
   function startReply(message) {
     if (!message?.messageId || message.deleted) return;
+    state.editingMessage = null;
     state.replyingTo = {
       messageId: message.messageId,
       roomId: message.roomId || state.activeRoom,
@@ -2436,6 +2516,7 @@ export function useMessenger() {
   function applyDeletion(payload) {
     const messageId = payload?.messageId;
     if (!messageId) return;
+    if (state.editingMessage?.messageId === messageId) cancelEditMessage();
     const targetRoom = sanitizeRoomId(payload?.gameId || "");
     const rooms = targetRoom ? [targetRoom] : Object.keys(state.messagesByRoom);
     for (const id of rooms) {
@@ -2452,6 +2533,7 @@ export function useMessenger() {
         attachment: null,
         preview: null,
         reactions: [],
+        editedAt: 0,
         deleted: true
       }, id);
       persist();
@@ -2464,9 +2546,9 @@ export function useMessenger() {
     if (!id) return false;
     if (!state.messagesByRoom[id]) state.messagesByRoom[id] = [];
     const arr = state.messagesByRoom[id];
-    if (isDuplicateRecentMessage(arr, normalized)) return false;
     const index = arr.findIndex((m) => m.messageId === normalized.messageId);
     if (index === -1) {
+      if (isDuplicateRecentMessage(arr, normalized)) return false;
       arr.push(normalized);
       if (arr.length > MAX_HISTORY_PER_ROOM) arr.splice(0, arr.length - MAX_HISTORY_PER_ROOM);
       return true;
@@ -2591,6 +2673,19 @@ export function useMessenger() {
         break;
       case 28:
         if (d?.error) state.lastError = d.error;
+        break;
+      case 29:
+        if (d?.error) {
+          state.lastError = d.error;
+          showToast(d.error);
+        }
+        break;
+      case 30:
+        if (d?.messageId && typeof d?.timestamp === "number") {
+          upsertMessage(d).catch(() => {
+            state.lastError = "Could not process edited message.";
+          });
+        }
         break;
       case 87:
         state.systemBanner = d?.msg || state.systemBanner;
@@ -2933,6 +3028,9 @@ export function useMessenger() {
     remoteVideoStream,
     toggleReaction,
     deleteMessage,
+    canEditMessage,
+    startEditMessage,
+    cancelEditMessage,
     findMessageById,
     startReply,
     cancelReply,

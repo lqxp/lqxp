@@ -114,6 +114,7 @@ pub async fn process_message(
         18 => send_room_history(&state, &session_id, payload.d).await,
         19 => toggle_message_reaction(&state, &session_id, payload.d).await,
         21 => delete_message(&state, &session_id, payload.d).await,
+        29 => edit_message(&state, &session_id, payload.d).await,
         28 => request_link_preview(&state, &session_id, payload.d).await,
         98 => update_voice_chat(&state, &session_id, payload.d).await,
         99 => relay_voice_data(&state, &session_id, payload.d, payload.u).await,
@@ -843,6 +844,7 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
             trimmed
         },
         timestamp: now,
+        edited_at: None,
         system: false,
         reactions: Vec::new(),
         reply_to_message_id,
@@ -908,7 +910,11 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
                     if let Some(messages) = rooms.get_mut(&room) {
                         if let Some(message) = messages.iter_mut().find(|m| m.message_id == msg_id)
                         {
-                            message.preview = Some(preview.clone());
+                            if !message.deleted && message.edited_at.is_none() {
+                                message.preview = Some(preview.clone());
+                            } else {
+                                return;
+                            }
                         }
                     }
                 }
@@ -1007,7 +1013,7 @@ async fn request_link_preview(state: &SharedState, session_id: &str, d: Value) -
         }
     }
 
-    {
+    let requested_edited_at = {
         let rooms = state.room_messages.read().await;
         let Some(messages) = rooms.get(room_id) else {
             return respond_error(state, session_id, 28, "Unknown messageId", request_id(&d)).await;
@@ -1041,7 +1047,8 @@ async fn request_link_preview(state: &SharedState, session_id: &str, d: Value) -
             .await;
             return false;
         }
-    }
+        message.edited_at
+    };
 
     respond_to_sender(
         state,
@@ -1069,7 +1076,11 @@ async fn request_link_preview(state: &SharedState, session_id: &str, d: Value) -
             let Some(message) = messages.iter_mut().find(|m| m.message_id == msg_id) else {
                 return;
             };
-            if message.deleted || message.encrypted.is_none() || message.preview.is_some() {
+            if message.deleted
+                || message.encrypted.is_none()
+                || message.preview.is_some()
+                || message.edited_at != requested_edited_at
+            {
                 false
             } else {
                 message.preview = Some(preview.clone());
@@ -1238,6 +1249,7 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                     message.encrypted = None;
                     message.preview = None;
                     message.reactions.clear();
+                    message.edited_at = None;
                     message.deleted = true;
                     hit = Some((room_id, false));
                     break;
@@ -1287,6 +1299,204 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
         ),
     )
     .await;
+    false
+}
+
+async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let Some(message_id) = d.get("messageId").and_then(Value::as_str).map(str::trim) else {
+        return respond_error(state, session_id, 29, "Missing messageId", request_id(&d)).await;
+    };
+    if message_id.is_empty() {
+        return respond_error(state, session_id, 29, "Missing messageId", request_id(&d)).await;
+    }
+
+    let Some(room_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
+        return respond_error(state, session_id, 29, "Missing gameId", request_id(&d)).await;
+    };
+    if let Err(message) = validate_room_id(room_id) {
+        return respond_error(state, session_id, 29, message, request_id(&d)).await;
+    }
+
+    let encrypted = match parse_encrypted_payload(d.get("encrypted")) {
+        Ok(value) => value,
+        Err(message) => return respond_error(state, session_id, 29, message, request_id(&d)).await,
+    };
+    let text = d.get("text").and_then(Value::as_str).unwrap_or("");
+    let trimmed = text
+        .trim()
+        .chars()
+        .take(MAX_MESSAGE_CHARS)
+        .collect::<String>();
+
+    if encrypted.is_some() && !trimmed.is_empty() {
+        return respond_error(
+            state,
+            session_id,
+            29,
+            "Encrypted edits cannot include plaintext fields",
+            request_id(&d),
+        )
+        .await;
+    }
+    if encrypted.is_none() && trimmed.is_empty() {
+        return respond_error(state, session_id, 29, "Empty message", request_id(&d)).await;
+    }
+
+    let username = {
+        let players = state.players.read().await;
+        match players.get(session_id) {
+            Some(player) if !player.username.is_empty() => {
+                if !player.rooms.contains(room_id) {
+                    return respond_error(
+                        state,
+                        session_id,
+                        29,
+                        "Not a member of this room",
+                        request_id(&d),
+                    )
+                    .await;
+                }
+                player.username.clone()
+            }
+            _ => {
+                return respond_error(
+                    state,
+                    session_id,
+                    29,
+                    "You need to be identified before",
+                    request_id(&d),
+                )
+                .await;
+            }
+        }
+    };
+
+    let edited_at = now_ms();
+    let preview_target = if encrypted.is_some() {
+        None
+    } else {
+        crate::linkpreview::find_first_url(&trimmed)
+    };
+
+    let edited_message = {
+        let mut rooms = state.room_messages.write().await;
+        let Some(messages) = rooms.get_mut(room_id) else {
+            return respond_error(state, session_id, 29, "Unknown messageId", request_id(&d)).await;
+        };
+        let Some(message) = messages.iter_mut().find(|m| m.message_id == message_id) else {
+            return respond_error(state, session_id, 29, "Unknown messageId", request_id(&d)).await;
+        };
+        if message.deleted {
+            return respond_error(state, session_id, 29, "Message was deleted", request_id(&d))
+                .await;
+        }
+        if message.system {
+            return respond_error(
+                state,
+                session_id,
+                29,
+                "System messages cannot be edited",
+                request_id(&d),
+            )
+            .await;
+        }
+        if message.username != username {
+            return respond_error(
+                state,
+                session_id,
+                29,
+                "Only the author can edit this message",
+                request_id(&d),
+            )
+            .await;
+        }
+
+        message.text = if encrypted.is_some() {
+            String::new()
+        } else {
+            trimmed
+        };
+        message.attachment = None;
+        message.encrypted = encrypted;
+        message.preview = None;
+        message.edited_at = Some(edited_at);
+        message.clone()
+    };
+
+    broadcast_to_room(
+        state,
+        room_id,
+        json!({
+            "op": 30,
+            "d": edited_message
+        }),
+    )
+    .await;
+
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(
+            json!({
+                "op": 29,
+                "d": {
+                    "ok": true,
+                    "gameId": room_id,
+                    "messageId": message_id,
+                    "editedAt": edited_at
+                }
+            }),
+            request_id(&d),
+        ),
+    )
+    .await;
+
+    if let Some(url) = preview_target {
+        let state_arc = state.clone();
+        let room = room_id.to_owned();
+        let msg_id = message_id.to_owned();
+        tokio::spawn(async move {
+            let Some(preview) = crate::linkpreview::fetch_preview(&url).await else {
+                return;
+            };
+
+            let should_broadcast = {
+                let mut rooms = state_arc.room_messages.write().await;
+                let Some(messages) = rooms.get_mut(&room) else {
+                    return;
+                };
+                let Some(message) = messages.iter_mut().find(|m| m.message_id == msg_id) else {
+                    return;
+                };
+                if message.deleted
+                    || message.preview.is_some()
+                    || message.edited_at != Some(edited_at)
+                {
+                    false
+                } else {
+                    message.preview = Some(preview.clone());
+                    true
+                }
+            };
+
+            if should_broadcast {
+                broadcast_to_room(
+                    &state_arc,
+                    &room,
+                    json!({
+                        "op": 23,
+                        "d": {
+                            "gameId": room,
+                            "messageId": msg_id,
+                            "preview": preview
+                        }
+                    }),
+                )
+                .await;
+            }
+        });
+    }
+
     false
 }
 

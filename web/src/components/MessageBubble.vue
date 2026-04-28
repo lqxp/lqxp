@@ -39,6 +39,8 @@ const attachmentKind = computed(() => props.message.kind);
 const jumbo = computed(() => props.message.jumboEmoji && !props.message.deleted);
 const deleted = computed(() => props.message.deleted);
 const preview = computed(() => props.message.preview);
+const edited = computed(() => Number(props.message.editedAt || 0) > 0 && !props.message.deleted);
+const canEdit = computed(() => props.messenger.canEditMessage?.(props.message));
 const imageViewerOpen = ref(false);
 const expandedText = ref(false);
 const repliedMessage = computed(() =>
@@ -263,7 +265,9 @@ function onDelete() {
     <div v-if="jumbo" class="jumbo">
       <div v-if="showAuthor && !isOwn" class="jumbo__author">{{ message.username }}</div>
       <div class="jumbo__glyph">{{ message.text }}</div>
-      <span v-if="showTimestamp" class="jumbo__time">{{ messenger.formatTime(message.timestamp) }}</span>
+      <span v-if="showTimestamp" class="jumbo__time">
+        {{ messenger.formatTime(message.timestamp) }}<span v-if="edited"> · edited</span>
+      </span>
       <div v-if="message.reactions.length" class="reactions reactions--standalone">
         <button
           v-for="reaction in message.reactions"
@@ -290,6 +294,15 @@ function onDelete() {
             @click="messenger.startReply(message)"
           >
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17 4 12l5-5"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
+          </button>
+          <button
+            v-if="canEdit"
+            type="button"
+            class="pick__edit"
+            aria-label="Edit"
+            @click="messenger.startEditMessage(message)"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
           </button>
           <button
             v-if="isOwn"
@@ -327,6 +340,15 @@ function onDelete() {
             @click="messenger.startReply(message)"
           >
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17 4 12l5-5"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
+          </button>
+          <button
+            v-if="canEdit"
+            type="button"
+            class="pick__edit"
+            aria-label="Edit"
+            @click="messenger.startEditMessage(message)"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
           </button>
           <button
             v-if="isOwn && !deleted"
@@ -473,7 +495,9 @@ function onDelete() {
         </div>
       </a>
 
-      <span v-if="showTimestamp && !deleted" class="bubble__time">{{ messenger.formatTime(message.timestamp) }}</span>
+      <span v-if="showTimestamp && !deleted" class="bubble__time">
+        {{ messenger.formatTime(message.timestamp) }}<span v-if="edited"> · edited</span>
+      </span>
 
       <div v-if="message.reactions.length && !deleted" class="reactions">
         <button

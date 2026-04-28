@@ -19,6 +19,8 @@ let cameraStream: MediaStream | null = null;
 
 const canSend = computed(() => props.messenger.state.messageInput.trim().length > 0 && !!props.messenger.state.activeRoom);
 const disabled = computed(() => !props.messenger.state.activeRoom);
+const editing = computed(() => !!props.messenger.state.editingMessage);
+const mediaDisabled = computed(() => disabled.value || editing.value);
 const recording = computed(() => !!props.messenger.state.recording);
 
 // Curated emoji palette — intentionally compact (80 glyphs) so it fits one screenful
@@ -92,7 +94,7 @@ function isEditableElement(element: Element | null) {
 }
 
 async function onPaste(event: ClipboardEvent) {
-  if (disabled.value || recording.value) return;
+  if (mediaDisabled.value || recording.value) return;
   const files = filesFromClipboard(event);
   if (!files.length) return;
 
@@ -113,12 +115,12 @@ function send() {
 }
 
 function pickFile() {
-  if (disabled.value) return;
+  if (mediaDisabled.value) return;
   fileInputRef.value?.click();
 }
 
 async function pickCamera() {
-  if (disabled.value) return;
+  if (mediaDisabled.value) return;
   await openCamera();
 }
 
@@ -132,7 +134,7 @@ async function onFile(event: Event) {
 }
 
 function startHold() {
-  if (disabled.value || recording.value) return;
+  if (mediaDisabled.value || recording.value) return;
   props.messenger.startRecordingVoiceMemo();
 }
 
@@ -292,7 +294,16 @@ onBeforeUnmount(() => {
         style="display: none"
         @change="onFile"
       />
-      <div v-if="messenger.state.replyingTo" class="reply-draft">
+      <div v-if="messenger.state.editingMessage" class="reply-draft edit-draft">
+        <div>
+          <span class="reply-draft__label">Editing message</span>
+          <span class="reply-draft__text">{{ messenger.state.editingMessage.text }}</span>
+        </div>
+        <button type="button" class="icon-btn" aria-label="Cancel edit" @click="messenger.cancelEditMessage">
+          <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div v-else-if="messenger.state.replyingTo" class="reply-draft">
         <div>
           <span class="reply-draft__label">Replying to {{ messenger.state.replyingTo.username || "message" }}</span>
           <span class="reply-draft__text">{{ messenger.state.replyingTo.text }}</span>
@@ -301,10 +312,10 @@ onBeforeUnmount(() => {
           <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
         </button>
       </div>
-      <button class="icon-btn" type="button" aria-label="Attach file" :disabled="disabled" @click="pickFile">
+      <button class="icon-btn" type="button" aria-label="Attach file" :disabled="mediaDisabled" @click="pickFile">
         <svg viewBox="0 0 24 24"><path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 1 1 5.66 5.66l-9.2 9.19a2 2 0 1 1-2.83-2.83L14.83 7"/></svg>
       </button>
-      <button class="icon-btn" type="button" aria-label="Take photo" :disabled="disabled" @click="pickCamera">
+      <button class="icon-btn" type="button" aria-label="Take photo" :disabled="mediaDisabled" @click="pickCamera">
         <svg viewBox="0 0 24 24"><path d="M4 7h3l1.4-2h7.2L17 7h3a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Z"/><circle cx="12" cy="13" r="3.5"/></svg>
       </button>
 
@@ -314,7 +325,7 @@ onBeforeUnmount(() => {
           v-model="messenger.state.messageInput"
           :maxlength="messenger.MESSAGE_LIMIT"
           rows="1"
-          :placeholder="disabled ? 'Join a room to start messaging' : 'Message'"
+          :placeholder="disabled ? 'Join a room to start messaging' : editing ? 'Edit message' : 'Message'"
           :disabled="disabled"
           autocomplete="off"
           spellcheck="false"
@@ -359,7 +370,7 @@ onBeforeUnmount(() => {
         class="icon-btn composer__mic"
         type="button"
         aria-label="Hold to record voice"
-        :disabled="disabled"
+        :disabled="mediaDisabled"
         @mousedown.prevent="startHold"
         @mouseup.prevent="endHold"
         @mouseleave="endHold"
