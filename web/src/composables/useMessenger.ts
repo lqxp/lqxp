@@ -30,6 +30,8 @@ const PRESENCE_STATUSES = ["online", "invisible", "dnd"];
 const DUPLICATE_MESSAGE_WINDOW_MS = 10 * 60 * 1000;
 const RANDOM_ROOM_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 const E2EE_MESSAGE_PLACEHOLDER = "Encrypted message";
+const LINK_PREVIEW_URL_RE = /https?:\/\/[^\s<>"'`\\]+/i;
+const pendingLinkPreviewRequests = new Set<string>();
 
 function inferWebSocketUrl() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -69,6 +71,11 @@ function sanitizeProfileText(value, limit) {
     .trim()
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
     .slice(0, limit);
+}
+
+function findFirstLinkPreviewUrl(text) {
+  const match = String(text || "").match(LINK_PREVIEW_URL_RE);
+  return match ? match[0] : "";
 }
 
 function normalizeProfileImage(value, maxBytes) {
@@ -1102,7 +1109,7 @@ export function useMessenger() {
               dataB64: String(decrypted.attachment.dataB64 || "")
             }
           : null,
-        preview: null,
+        preview: message.preview || null,
         locked: false
       }, roomId);
     } catch {
@@ -2401,6 +2408,31 @@ export function useMessenger() {
     }
   }
 
+  function requestEncryptedLinkPreview(message) {
+    if (!message?.encrypted || message.preview || message.deleted || message.locked) return;
+    if (!state.connected || !state.identified || !state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+
+    const roomId = sanitizeRoomId(message.roomId || state.activeRoom);
+    const messageId = String(message.messageId || "");
+    if (!roomId || !messageId || !state.joinedRooms.includes(roomId)) return;
+
+    const url = findFirstLinkPreviewUrl(message.rawText || message.text || "");
+    if (!url) return;
+
+    const key = `${roomId}:${messageId}:${url}`;
+    if (pendingLinkPreviewRequests.has(key)) return;
+    pendingLinkPreviewRequests.add(key);
+
+    send({
+      op: 28,
+      d: {
+        gameId: roomId,
+        messageId,
+        url
+      }
+    });
+  }
+
   function applyDeletion(payload) {
     const messageId = payload?.messageId;
     if (!messageId) return;
@@ -2462,6 +2494,7 @@ export function useMessenger() {
     }
 
     if (roomId === state.activeRoom) scrollToBottom();
+    requestEncryptedLinkPreview(normalized);
     persist();
   }
 
@@ -2555,6 +2588,9 @@ export function useMessenger() {
         break;
       case 27:
         applyPresenceStatus(d);
+        break;
+      case 28:
+        if (d?.error) state.lastError = d.error;
         break;
       case 87:
         state.systemBanner = d?.msg || state.systemBanner;
@@ -2691,6 +2727,7 @@ export function useMessenger() {
     state.messagesByRoom[roomId] = messages;
     const last = messages[messages.length - 1];
     if (last) touchRoom(roomId, last);
+    for (const message of messages) requestEncryptedLinkPreview(message);
     if (roomId === state.activeRoom) scrollToBottom();
     persist();
   }

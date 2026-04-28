@@ -30,6 +30,7 @@ const MAX_PROFILE_PRONOUNS_CHARS: usize = 24;
 const MAX_ENCRYPTED_ALG_LEN: usize = 32;
 const MAX_ENCRYPTED_IV_LEN: usize = 128;
 const MAX_ENCRYPTED_CIPHERTEXT_LEN: usize = 18 * 1024 * 1024;
+const MAX_PREVIEW_URL_LEN: usize = 2048;
 const MIN_ROOM_ID_LEN: usize = 8;
 const MAX_ROOM_ID_LEN: usize = 64;
 // Voice call chunks are ~800ms of Opus at 64–128kbps → 6–13KB raw.
@@ -113,6 +114,7 @@ pub async fn process_message(
         18 => send_room_history(&state, &session_id, payload.d).await,
         19 => toggle_message_reaction(&state, &session_id, payload.d).await,
         21 => delete_message(&state, &session_id, payload.d).await,
+        28 => request_link_preview(&state, &session_id, payload.d).await,
         98 => update_voice_chat(&state, &session_id, payload.d).await,
         99 => relay_voice_data(&state, &session_id, payload.d, payload.u).await,
         100 => update_mute_state(&state, &session_id, payload.d).await,
@@ -940,6 +942,158 @@ async fn send_room_history(state: &SharedState, session_id: &str, d: Value) -> b
     };
 
     dispatch_room_history(state, session_id, &room_id, request_id(&d)).await;
+    false
+}
+
+async fn request_link_preview(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let Some(room_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
+        return respond_error(state, session_id, 28, "Missing gameId", request_id(&d)).await;
+    };
+    if let Err(message) = validate_room_id(room_id) {
+        return respond_error(state, session_id, 28, message, request_id(&d)).await;
+    }
+
+    let Some(message_id) = d.get("messageId").and_then(Value::as_str).map(str::trim) else {
+        return respond_error(state, session_id, 28, "Missing messageId", request_id(&d)).await;
+    };
+    if message_id.is_empty() {
+        return respond_error(state, session_id, 28, "Missing messageId", request_id(&d)).await;
+    }
+
+    let Some(url) = d
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return respond_error(state, session_id, 28, "Missing url", request_id(&d)).await;
+    };
+    if url.chars().count() > MAX_PREVIEW_URL_LEN {
+        return respond_error(state, session_id, 28, "URL too long", request_id(&d)).await;
+    }
+    let url = url.to_owned();
+
+    {
+        let players = state.players.read().await;
+        let Some(player) = players.get(session_id) else {
+            return respond_error(
+                state,
+                session_id,
+                28,
+                "You need to be identified before",
+                request_id(&d),
+            )
+            .await;
+        };
+        if player.username.is_empty() {
+            return respond_error(
+                state,
+                session_id,
+                28,
+                "You need to be identified before",
+                request_id(&d),
+            )
+            .await;
+        }
+        if !player.rooms.contains(room_id) {
+            return respond_error(
+                state,
+                session_id,
+                28,
+                "Not a member of this room",
+                request_id(&d),
+            )
+            .await;
+        }
+    }
+
+    {
+        let rooms = state.room_messages.read().await;
+        let Some(messages) = rooms.get(room_id) else {
+            return respond_error(state, session_id, 28, "Unknown messageId", request_id(&d)).await;
+        };
+        let Some(message) = messages.iter().find(|m| m.message_id == message_id) else {
+            return respond_error(state, session_id, 28, "Unknown messageId", request_id(&d)).await;
+        };
+        if message.deleted {
+            return respond_error(state, session_id, 28, "Message was deleted", request_id(&d))
+                .await;
+        }
+        if message.encrypted.is_none() {
+            return respond_error(
+                state,
+                session_id,
+                28,
+                "Preview requests are only needed for encrypted messages",
+                request_id(&d),
+            )
+            .await;
+        }
+        if message.preview.is_some() {
+            respond_to_sender(
+                state,
+                session_id,
+                with_request_id(
+                    json!({ "op": 28, "d": { "ok": true, "messageId": message_id } }),
+                    request_id(&d),
+                ),
+            )
+            .await;
+            return false;
+        }
+    }
+
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(
+            json!({ "op": 28, "d": { "ok": true, "messageId": message_id } }),
+            request_id(&d),
+        ),
+    )
+    .await;
+
+    let state_arc = state.clone();
+    let room = room_id.to_owned();
+    let msg_id = message_id.to_owned();
+    tokio::spawn(async move {
+        let Some(preview) = crate::linkpreview::fetch_preview(&url).await else {
+            return;
+        };
+
+        let should_broadcast = {
+            let mut rooms = state_arc.room_messages.write().await;
+            let Some(messages) = rooms.get_mut(&room) else {
+                return;
+            };
+            let Some(message) = messages.iter_mut().find(|m| m.message_id == msg_id) else {
+                return;
+            };
+            if message.deleted || message.encrypted.is_none() || message.preview.is_some() {
+                false
+            } else {
+                message.preview = Some(preview.clone());
+                true
+            }
+        };
+
+        if should_broadcast {
+            broadcast_to_room(
+                &state_arc,
+                &room,
+                json!({
+                    "op": 23,
+                    "d": {
+                        "gameId": room,
+                        "messageId": msg_id,
+                        "preview": preview
+                    }
+                }),
+            )
+            .await;
+        }
+    });
+
     false
 }
 
