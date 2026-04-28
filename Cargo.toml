@@ -11,6 +11,7 @@ path = "rust/src/main.rs"
 argon2 = "0.5"
 axum = { version = "0.7", features = ["ws"] }
 base64 = "0.22"
+bip39 = "2"
 futures-util = "0.3"
 http = "1"
 mime_guess = "2"

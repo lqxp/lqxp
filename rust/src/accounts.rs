@@ -1,11 +1,15 @@
 use std::{path::Path, str::FromStr, sync::Arc};
 
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{
+        rand_core::OsRng as PasswordOsRng, PasswordHash, PasswordHasher, PasswordVerifier,
+        SaltString,
+    },
     Argon2,
 };
 use base64::Engine as _;
-use rand::{seq::SliceRandom, thread_rng, Rng};
+use bip39::Language;
+use rand::{rngs::OsRng, thread_rng, Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -29,6 +33,7 @@ const USERNAME_MIN: usize = 2;
 const USERNAME_MAX: usize = 32;
 const PASSWORD_MIN: usize = 8;
 const PASSWORD_MAX: usize = 128;
+const RECOVERY_WORD_COUNT: usize = 16;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -800,7 +805,7 @@ pub fn username_hits_blocklist(username: &str, blocklist_terms: &[String]) -> bo
 }
 
 fn hash_secret(secret: &str) -> AccountResult<String> {
-    let salt = SaltString::generate(&mut OsRng);
+    let salt = SaltString::generate(&mut PasswordOsRng);
     Argon2::default()
         .hash_password(secret.as_bytes(), &salt)
         .map(|hash| hash.to_string())
@@ -813,7 +818,7 @@ fn verify_secret(secret: &str, hash: &str) -> Result<(), argon2::password_hash::
 }
 
 fn random_token() -> String {
-    let mut rng = thread_rng();
+    let mut rng = OsRng;
     let mut bytes = [0u8; 48];
     rng.fill(bytes.as_mut_slice());
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -833,10 +838,15 @@ fn generate_snowflake_id() -> String {
 }
 
 fn generate_recovery_words() -> Vec<String> {
-    let mut rng = thread_rng();
-    RECOVERY_WORDS
-        .choose_multiple(&mut rng, 16)
-        .map(|word| (*word).to_owned())
+    let mut rng = OsRng;
+    // BIP-39 English word list: 2048 audited words used by mnemonic recovery systems.
+    // QXP keeps its 16-word account recovery format, backed by this standard list.
+    let words = Language::English.word_list();
+    (0..RECOVERY_WORD_COUNT)
+        .map(|_| {
+            let index = (rng.next_u32() as usize) & (words.len() - 1);
+            words[index].to_owned()
+        })
         .collect()
 }
 
@@ -874,39 +884,3 @@ pub fn user_response(user: PublicUser, token: String) -> serde_json::Value {
 }
 
 pub type SharedAccounts = Arc<AccountDatabase>;
-
-const RECOVERY_WORDS: &[&str] = &[
-    "able", "about", "above", "absorb", "access", "acid", "acorn", "across", "act", "adapt", "add",
-    "adjust", "admit", "adult", "aerobic", "affair", "again", "agent", "agree", "ahead", "aim",
-    "air", "alarm", "album", "alert", "alien", "allow", "alpha", "always", "amazing", "amount",
-    "anchor", "ancient", "angle", "animal", "annual", "answer", "apart", "apple", "april", "arch",
-    "arena", "argue", "arise", "army", "around", "arrow", "artist", "asset", "atom", "audit",
-    "august", "aunt", "auto", "avoid", "awake", "aware", "axis", "bacon", "badge", "balance",
-    "bamboo", "basic", "beach", "bean", "beauty", "because", "become", "before", "begin", "behind",
-    "believe", "bench", "best", "better", "beyond", "bicycle", "bird", "birth", "bitter", "black",
-    "blade", "blanket", "blend", "blind", "blue", "board", "bonus", "book", "boost", "border",
-    "borrow", "bottom", "brain", "brand", "brave", "bread", "breeze", "brick", "bridge", "brief",
-    "bright", "bring", "broad", "broken", "brown", "brush", "bubble", "budget", "build", "bullet",
-    "bundle", "cable", "camera", "camp", "canal", "candy", "carbon", "career", "cargo", "carpet",
-    "castle", "casual", "cause", "center", "chair", "change", "charge", "chase", "cheap", "check",
-    "cheese", "cherry", "choice", "circle", "city", "claim", "class", "clean", "client", "clock",
-    "close", "cloud", "coach", "coast", "coffee", "color", "column", "comfort", "comic", "common",
-    "company", "concert", "conduct", "confirm", "connect", "control", "cook", "corner", "correct",
-    "cost", "cotton", "craft", "crash", "credit", "crisp", "cross", "crowd", "crystal", "culture",
-    "curious", "custom", "cycle", "daily", "damage", "dance", "danger", "daring", "data",
-    "daughter", "dawn", "dealer", "debate", "decide", "deck", "deep", "define", "degree",
-    "deliver", "demand", "depend", "design", "detail", "detect", "device", "diamond", "dinner",
-    "direct", "discover", "doctor", "domain", "donor", "double", "draft", "dragon", "dream",
-    "dress", "drift", "drive", "during", "early", "earth", "easily", "east", "echo", "edge",
-    "edit", "educate", "effort", "eight", "either", "electric", "element", "elite", "else",
-    "embark", "embody", "emerge", "emotion", "enable", "energy", "engine", "enjoy", "enough",
-    "enter", "equal", "error", "escape", "estate", "ethics", "even", "event", "every", "evolve",
-    "exact", "example", "excess", "exchange", "excite", "exclude", "excuse", "execute", "exercise",
-    "exist", "expand", "expect", "expert", "explain", "extra", "fabric", "face", "fact", "fade",
-    "faint", "faith", "false", "family", "famous", "fancy", "farm", "fashion", "fast", "fatal",
-    "father", "fault", "feature", "federal", "feel", "fiber", "field", "figure", "filter", "final",
-    "finance", "finger", "finish", "fire", "firm", "first", "fiscal", "flag", "flame", "flash",
-    "flat", "flight", "float", "floor", "flower", "focus", "follow", "force", "forest", "forget",
-    "formal", "fortune", "forum", "forward", "fossil", "found", "frame", "fresh", "friend",
-    "front", "frozen", "fruit", "fuel", "future",
-];
