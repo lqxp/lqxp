@@ -44,3 +44,4 @@ package-lock.json
 .codex
 target
 serve.public
+files/qxp.sqlite
