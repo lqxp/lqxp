@@ -17,7 +17,7 @@ const activeSection = ref("profile");
 const isOpen = computed(() => props.messenger.state.settingsOpen);
 
 const nameChanged = computed(() => draftName.value.trim() !== String(props.messenger.state.username || "").trim());
-const nameValid = computed(() => draftName.value.trim().length > 0 && draftName.value.trim().length <= 16);
+const nameValid = computed(() => !props.messenger.validateUsername(draftName.value));
 const meAccent = computed(() => props.messenger.accentFor(props.messenger.state.username || "you"));
 const meInitials = computed(() => initialsOf(props.messenger.state.username));
 const profile = computed(() => props.messenger.myProfile.value);
@@ -28,14 +28,17 @@ const profileTextChanged = computed(() =>
   || draftPronouns.value.trim() !== String(profile.value.pronouns || "").trim()
 );
 
-const sections = [
+const allSections = [
   { id: "profile", label: "Profile" },
+  { id: "security", label: "Security" },
   { id: "privacy", label: "Privacy" },
   { id: "notifications", label: "Notifications" },
   { id: "calls", label: "Calls" },
+  { id: "admin", label: "Admin" },
   { id: "backups", label: "Backups" },
   { id: "about", label: "About" }
 ];
+const sections = computed(() => allSections.filter((section) => section.id !== "admin" || props.messenger.state.admin));
 
 watch(isOpen, async (v) => {
   if (v) {
@@ -54,7 +57,8 @@ watch(isOpen, async (v) => {
 watch(activeSection, async (section) => {
   if (!isOpen.value) return;
   if (section === "calls") props.messenger.refreshAudioDevices();
-  else props.messenger.stopMicTest();
+  if (section === "admin") props.messenger.loadAdminOverview();
+  if (section !== "calls") props.messenger.stopMicTest();
   if (section === "profile") {
     await nextTick();
     firstInputRef.value?.focus();
@@ -66,9 +70,10 @@ function close() {
   props.messenger.state.settingsOpen = false;
 }
 
-function saveName() {
+async function saveName() {
   if (!nameValid.value || !nameChanged.value) return;
-  props.messenger.changeUsername(draftName.value.trim());
+  await props.messenger.changeUsername(draftName.value.trim());
+  draftName.value = props.messenger.state.username || "";
 }
 
 function saveProfileText() {
@@ -101,6 +106,11 @@ function onFilePicked(event) {
 function onClear() {
   if (!confirm("Clear all local data? This removes every conversation, message, and reaction from this browser. The remote server is not touched.")) return;
   props.messenger.clearAllData();
+  close();
+}
+
+function onLogout() {
+  props.messenger.logoutAccount();
   close();
 }
 
@@ -229,7 +239,7 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
               ref="firstInputRef"
               v-model="draftName"
               type="text"
-              maxlength="16"
+              maxlength="32"
               autocomplete="off"
               spellcheck="false"
               placeholder="e.g. echo"
@@ -318,6 +328,27 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
         <p class="settings-note">
           Profile image max 2 MB. Banner max 5 MB, PNG/APNG/GIF/JPEG.
         </p>
+      </section>
+
+      <section v-else-if="activeSection === 'security'" class="settings-page">
+        <div class="settings-group">
+          <h4>Account</h4>
+          <dl class="settings-kv">
+            <div><dt>User ID</dt><dd>{{ messenger.state.userId || "—" }}</dd></div>
+            <div><dt>Username</dt><dd>{{ messenger.state.username || "—" }}</dd></div>
+          </dl>
+          <div class="settings-actions">
+            <button type="button" class="btn settings-btn" @click="messenger.downloadRecoveryWords">
+              Download recovery words
+            </button>
+            <button type="button" class="btn settings-btn settings-btn--danger" @click="onLogout">
+              Log out
+            </button>
+          </div>
+          <p class="settings-note">
+            Recovery words are shown only after account creation or recovery on this browser.
+          </p>
+        </div>
       </section>
 
       <section v-else-if="activeSection === 'privacy'" class="settings-page">
@@ -441,6 +472,73 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
           >
             {{ messenger.state.micTestLoading ? "Starting..." : messenger.state.micTestActive ? "Stop listening" : "Listen and test mic" }}
           </button>
+        </div>
+      </section>
+
+      <section v-else-if="activeSection === 'admin'" class="settings-page">
+        <div class="settings-group">
+          <h4>Admin</h4>
+          <button type="button" class="btn settings-btn" :disabled="messenger.state.adminLoading" @click="messenger.loadAdminOverview">
+            {{ messenger.state.adminLoading ? "Loading..." : "Refresh" }}
+          </button>
+          <dl class="settings-kv" v-if="messenger.state.adminOverview">
+            <div><dt>Online</dt><dd>{{ messenger.state.adminOverview.onlineCount }}</dd></div>
+            <div><dt>Users</dt><dd>{{ messenger.state.adminOverview.users?.length || 0 }}</dd></div>
+            <div><dt>Rooms</dt><dd>{{ messenger.state.adminOverview.rooms?.length || 0 }}</dd></div>
+          </dl>
+        </div>
+
+        <div class="settings-group" v-if="messenger.state.adminOverview?.features">
+          <h4>Features</h4>
+          <label class="settings-check">
+            <input
+              type="checkbox"
+              :checked="messenger.state.adminOverview.features.registerEnabled"
+              @change="messenger.setAdminFeature('registerEnabled', targetChecked($event))"
+            />
+            <span>Registrations</span>
+          </label>
+          <label class="settings-check">
+            <input
+              type="checkbox"
+              :checked="messenger.state.adminOverview.features.callsEnabled"
+              @change="messenger.setAdminFeature('callsEnabled', targetChecked($event))"
+            />
+            <span>Calls</span>
+          </label>
+        </div>
+
+        <div class="settings-group" v-if="messenger.state.adminOverview?.users?.length">
+          <h4>Users</h4>
+          <div class="admin-list">
+            <div v-for="user in messenger.state.adminOverview.users" :key="user.id" class="admin-row">
+              <div>
+                <strong>{{ user.username }}</strong>
+                <small>{{ user.id }}</small>
+              </div>
+              <button
+                type="button"
+                class="btn settings-btn"
+                :class="{ 'settings-btn--danger': !user.disabled }"
+                @click="messenger.setAdminUserDisabled(user.id, !user.disabled)"
+              >
+                {{ user.disabled ? "Enable" : "Disable" }}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-group" v-if="messenger.state.adminOverview?.rooms?.length">
+          <h4>Rooms</h4>
+          <div class="admin-list">
+            <div v-for="room in messenger.state.adminOverview.rooms" :key="room.roomId" class="admin-row">
+              <div>
+                <strong>{{ messenger.displayRoomName(room.roomId) }}</strong>
+                <small>{{ room.messageCount }} messages</small>
+              </div>
+            </div>
+          </div>
+          <p class="settings-note">Room previews expose metadata only, never message bodies.</p>
         </div>
       </section>
 

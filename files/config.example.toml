@@ -22,3 +22,15 @@ turnUrls = [
 ]
 turnUsername = "qxp-turn"
 turnCredential = "change-me"
+
+[database]
+
+# kind can be "sqlite" or "postgresql".
+kind = "sqlite"
+url = "sqlite://files/qxp.sqlite"
+
+[security]
+
+# Snowflake-like account IDs with administrator access.
+adminIds = []
+registerEnabled = true

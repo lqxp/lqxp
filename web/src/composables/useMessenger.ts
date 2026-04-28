@@ -37,7 +37,15 @@ function inferWebSocketUrl() {
 }
 
 function sanitizeUsername(value) {
-  return String(value || "").trim().slice(0, 16);
+  return String(value || "").trim().toLowerCase().slice(0, 32);
+}
+
+function validateUsername(value) {
+  const username = sanitizeUsername(value);
+  if (username.length < 2 || username.length > 32) return "Username must be 2 to 32 characters.";
+  if (!/^[a-z0-9_.]+$/.test(username)) return "Username can only use a-z, 0-9, underscore and period.";
+  if (username.includes("..")) return "Username cannot contain two consecutive periods.";
+  return "";
 }
 
 function sanitizePresenceStatus(value) {
@@ -259,6 +267,10 @@ function loadPersisted() {
     }
 
     return {
+      authToken: String(raw.authToken || ""),
+      userId: String(raw.userId || ""),
+      admin: Boolean(raw.admin),
+      recoveryWords: Array.isArray(raw.recoveryWords) ? raw.recoveryWords.map((word) => String(word || "")).filter(Boolean).slice(0, 16) : [],
       username: sanitizeUsername(raw.username),
       status: sanitizePresenceStatus(raw.status),
       activeRoom: isValidRoomId(raw.activeRoom) ? sanitizeRoomId(raw.activeRoom) : "",
@@ -277,6 +289,10 @@ function loadPersisted() {
     };
   } catch {
     return {
+      authToken: "",
+      userId: "",
+      admin: false,
+      recoveryWords: [],
       username: "",
       status: "online",
       activeRoom: "",
@@ -333,6 +349,10 @@ function savePersisted(state) {
       STORAGE_KEY,
       JSON.stringify({
         version: 4,
+        authToken: String(state.authToken || ""),
+        userId: String(state.userId || ""),
+        admin: Boolean(state.admin),
+        recoveryWords: Array.isArray(state.recoveryWords) ? state.recoveryWords.slice(0, 16) : [],
         username: sanitizeUsername(state.username),
         status: sanitizePresenceStatus(state.status),
         activeRoom: sanitizeRoomId(state.activeRoom),
@@ -517,7 +537,8 @@ function normalizeMessage(message, fallbackRoomId) {
     kind,
     voiceDuration,
     jumboEmoji,
-    locked: Boolean(message.locked)
+    locked: Boolean(message.locked),
+    mentioned: Boolean(message.mentioned)
   };
 }
 
@@ -626,6 +647,13 @@ export function useMessenger() {
     heartbeatTimer: null,
     manualClose: false,
 
+    authToken: persisted.authToken,
+    userId: persisted.userId,
+    admin: persisted.admin,
+    authLoading: false,
+    authMode: "login",
+    recoveryWords: persisted.recoveryWords,
+
     username: persisted.username,
     status: persisted.status,
     profile: persisted.profile,
@@ -687,7 +715,10 @@ export function useMessenger() {
     voiceMembersByRoom: {}, // { roomId: [username, ...] } — who is currently in voice
     speakingByRoom: {},     // { roomId: { username: lastChunkTimestamp } } — recent speakers
     callAnalyser: null,
-    callAnalyserData: null
+    callAnalyserData: null,
+
+    adminLoading: false,
+    adminOverview: null
   });
 
   // Non-reactive registry of Blob-URLs keyed by messageId so repeated renders
@@ -785,6 +816,195 @@ export function useMessenger() {
 
   function persist() {
     savePersisted(state);
+  }
+
+  async function apiRequest(path, options: any = {}) {
+    const headers = {
+      ...(options.body ? { "content-type": "application/json" } : {}),
+      ...(state.authToken ? { authorization: `Bearer ${state.authToken}` } : {}),
+      ...(options.headers || {})
+    };
+    const response = await fetch(path, { ...options, headers });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data?.ok === false) {
+      throw new Error(data?.error || `Request failed (${response.status})`);
+    }
+    return data;
+  }
+
+  function applyAuthenticatedPayload(data) {
+    if (!data?.user) throw new Error("Malformed account response.");
+    state.authToken = String(data.token || state.authToken || "");
+    state.userId = String(data.user.id || "");
+    state.username = sanitizeUsername(data.user.username);
+    state.admin = Boolean(data.user.admin);
+    state.profile = normalizeProfile(data.user.profile);
+    state.status = sanitizePresenceStatus(data.user.status);
+    if (Array.isArray(data.recoveryWords)) {
+      state.recoveryWords = data.recoveryWords.map((word) => String(word || "")).filter(Boolean).slice(0, 16);
+    }
+    persist();
+  }
+
+  function recoveryText() {
+    return [
+      "QxProtocol account recovery words",
+      `Username: ${state.username}`,
+      "",
+      ...(state.recoveryWords || [])
+    ].join("\n");
+  }
+
+  function downloadRecoveryWords() {
+    if (!state.recoveryWords?.length) {
+      state.lastError = "Recovery words are only available on this browser after account creation or recovery.";
+      showToast(state.lastError);
+      return false;
+    }
+    const blob = new Blob([recoveryText()], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `qxp-recovery-${state.username || "account"}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    return true;
+  }
+
+  async function registerAccount(username, password) {
+    const validation = validateUsername(username);
+    if (validation) {
+      state.lastError = validation;
+      return false;
+    }
+    state.authLoading = true;
+    try {
+      const data = await apiRequest("/api/auth/register", {
+        method: "POST",
+        body: JSON.stringify({ username: sanitizeUsername(username), password })
+      });
+      applyAuthenticatedPayload(data);
+      downloadRecoveryWords();
+      connect();
+      return true;
+    } catch (error) {
+      state.lastError = error?.message || "Registration failed.";
+      return false;
+    } finally {
+      state.authLoading = false;
+    }
+  }
+
+  async function loginAccount(username, password) {
+    const validation = validateUsername(username);
+    if (validation) {
+      state.lastError = validation;
+      return false;
+    }
+    state.authLoading = true;
+    try {
+      const data = await apiRequest("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ username: sanitizeUsername(username), password })
+      });
+      applyAuthenticatedPayload(data);
+      connect();
+      return true;
+    } catch (error) {
+      state.lastError = error?.message || "Login failed.";
+      return false;
+    } finally {
+      state.authLoading = false;
+    }
+  }
+
+  async function recoverAccount(username, recoveryWords, newPassword) {
+    const validation = validateUsername(username);
+    if (validation) {
+      state.lastError = validation;
+      return false;
+    }
+    state.authLoading = true;
+    try {
+      const data = await apiRequest("/api/auth/recover", {
+        method: "POST",
+        body: JSON.stringify({
+          username: sanitizeUsername(username),
+          recoveryWords: String(recoveryWords || ""),
+          newPassword
+        })
+      });
+      applyAuthenticatedPayload(data);
+      connect();
+      return true;
+    } catch (error) {
+      state.lastError = error?.message || "Recovery failed.";
+      return false;
+    } finally {
+      state.authLoading = false;
+    }
+  }
+
+  async function refreshSession() {
+    if (!state.authToken) return false;
+    try {
+      const data = await apiRequest("/api/auth/me");
+      applyAuthenticatedPayload(data);
+      return true;
+    } catch {
+      logoutLocal();
+      return false;
+    }
+  }
+
+  async function loadAdminOverview() {
+    if (!state.admin) return null;
+    state.adminLoading = true;
+    try {
+      const data = await apiRequest("/api/admin/overview");
+      state.adminOverview = data;
+      return data;
+    } catch (error) {
+      state.lastError = error?.message || "Admin overview failed.";
+      showToast(state.lastError);
+      return null;
+    } finally {
+      state.adminLoading = false;
+    }
+  }
+
+  async function setAdminFeature(key, enabled) {
+    if (!state.admin) return false;
+    try {
+      const data = await apiRequest("/api/admin/features", {
+        method: "POST",
+        body: JSON.stringify({ key, enabled: Boolean(enabled) })
+      });
+      if (state.adminOverview) state.adminOverview.features = data.features;
+      return true;
+    } catch (error) {
+      state.lastError = error?.message || "Feature update failed.";
+      showToast(state.lastError);
+      return false;
+    }
+  }
+
+  async function setAdminUserDisabled(userId, disabled) {
+    if (!state.admin) return false;
+    try {
+      await apiRequest(`/api/admin/users/${encodeURIComponent(userId)}/disabled`, {
+        method: "POST",
+        body: JSON.stringify({ disabled: Boolean(disabled) })
+      });
+      await loadAdminOverview();
+      return true;
+    } catch (error) {
+      state.lastError = error?.message || "User update failed.";
+      showToast(state.lastError);
+      return false;
+    }
   }
 
   function profileFor(username) {
@@ -1519,8 +1739,8 @@ export function useMessenger() {
     persist();
     if (state.connected || state.ws) return;
     const username = sanitizeUsername(state.username);
-    if (!username) {
-      state.lastError = "Nickname required.";
+    if (!state.authToken || !username) {
+      state.lastError = "Account login required.";
       return;
     }
     state.lastError = "";
@@ -1539,6 +1759,7 @@ export function useMessenger() {
         op: 2,
         d: {
           username,
+          token: state.authToken,
           isVoiceChat: state.voiceEnabled,
           deleteMessagesOnLeave: state.deleteMessagesOnLeave,
           status: sanitizePresenceStatus(state.status),
@@ -1866,7 +2087,9 @@ export function useMessenger() {
       callManager.addLocalStream(stream);
       for (const track of stream.getVideoTracks()) {
         track.onended = () => {
+          callManager?.removeLocalTracks((item) => item.id === track.id);
           state.callCameraEnabled = false;
+          stopStreamTracks(stream);
           state.cameraStream = null;
           publishCallState(true);
         };
@@ -1898,7 +2121,9 @@ export function useMessenger() {
       callManager.addLocalStream(stream);
       for (const track of stream.getVideoTracks()) {
         track.onended = () => {
+          callManager?.removeLocalTracks((item) => item.id === track.id);
           state.callScreenEnabled = false;
+          stopStreamTracks(stream);
           state.screenStream = null;
           publishCallState(true);
         };
@@ -2027,18 +2252,33 @@ export function useMessenger() {
     }
   }
 
-  function changeUsername(newName) {
+  async function changeUsername(newName) {
     const clean = sanitizeUsername(newName);
-    if (!clean) { state.lastError = "Name cannot be empty."; return false; }
+    const validation = validateUsername(clean);
+    if (validation) { state.lastError = validation; return false; }
     if (clean === sanitizeUsername(state.username)) return true;
-    const wasConnected = state.connected;
-    state.username = clean;
-    persist();
-    if (wasConnected) {
-      disconnect();
-      setTimeout(connect, 100);
+    try {
+      const data = await apiRequest("/api/auth/username", {
+        method: "POST",
+        body: JSON.stringify({ username: clean })
+      });
+      if (data?.user) {
+        state.username = sanitizeUsername(data.user.username);
+        state.userId = String(data.user.id || state.userId || "");
+        state.admin = Boolean(data.user.admin);
+      }
+      const wasConnected = state.connected;
+      persist();
+      if (wasConnected) {
+        disconnect();
+        setTimeout(connect, 100);
+      }
+      return true;
+    } catch (error) {
+      state.lastError = error?.message || "Username change failed.";
+      showToast(state.lastError);
+      return false;
     }
-    return true;
   }
 
   function clearAllData() {
@@ -2078,6 +2318,32 @@ export function useMessenger() {
     const gameId = message.roomId || state.activeRoom;
     if (!gameId) return;
     send({ op: 21, d: { messageId: message.messageId, gameId } });
+  }
+
+  function logoutLocal() {
+    if (state.inCall) endCall();
+    if (state.recording) stopRecordingVoiceMemo(true);
+    disconnect();
+    state.authToken = "";
+    state.userId = "";
+    state.admin = false;
+    state.username = "";
+    state.uuid = null;
+    state.recoveryWords = [];
+    state.profile = normalizeProfile(null);
+    state.status = "online";
+    persist();
+  }
+
+  async function logoutAccount() {
+    try {
+      if (state.authToken) {
+        await apiRequest("/api/auth/logout", { method: "POST" });
+      }
+    } catch {
+      /* local logout still wins */
+    }
+    logoutLocal();
   }
 
   function findMessageById(roomId, messageId) {
@@ -2171,6 +2437,11 @@ export function useMessenger() {
   async function upsertMessage(message) {
     const roomId = sanitizeRoomId(message.roomId || state.activeRoom);
     const normalized = await hydrateIncomingMessage(message, roomId);
+    const me = sanitizeUsername(state.username);
+    if (me && !isOwnMessage(normalized)) {
+      normalized.mentioned = new RegExp(`(^|[^a-z0-9_.])@${me.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=$|[^a-z0-9_.])`, "i")
+        .test(String(normalized.text || ""));
+    }
     const added = pushMessageToRoom(roomId, normalized);
     touchRoom(roomId, normalized);
 
@@ -2210,7 +2481,15 @@ export function useMessenger() {
         /* heartbeat ack — ignored */
         break;
       case 2:
+        if (d?.error) {
+          state.lastError = d.error;
+          logoutLocal();
+          break;
+        }
         state.uuid = d.uuid;
+        state.userId = String(d.uuid || state.userId || "");
+        if (d?.username) state.username = sanitizeUsername(d.username);
+        state.admin = Boolean(d?.admin || state.admin);
         state.identified = true;
         if (d?.profile) state.profile = normalizeProfile(d.profile);
         if (d?.status) state.status = sanitizePresenceStatus(d.status);
@@ -2550,6 +2829,7 @@ export function useMessenger() {
     buildWaveform,
     attachmentUrlFor,
     displayRoomName,
+    validateUsername,
     validateRoomId,
     isValidRoomId,
     hasRoomKey,
@@ -2561,6 +2841,15 @@ export function useMessenger() {
     showToast,
 
     persist,
+    registerAccount,
+    loginAccount,
+    recoverAccount,
+    refreshSession,
+    logoutAccount,
+    downloadRecoveryWords,
+    loadAdminOverview,
+    setAdminFeature,
+    setAdminUserDisabled,
     refreshAudioDevices,
     unlockAudioDevices,
     startMicTest,

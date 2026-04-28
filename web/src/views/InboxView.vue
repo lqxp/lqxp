@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useMessenger } from "@/composables/useMessenger";
 import MessengerSidebar from "@/components/MessengerSidebar.vue";
 import MemberSidebar from "@/components/MemberSidebar.vue";
@@ -13,7 +13,7 @@ import OnboardingScreen from "@/components/OnboardingScreen.vue";
 const messenger = useMessenger();
 const mobileThreadOpen = ref(false);
 
-const needsOnboarding = computed(() => !String(messenger.state.username || "").trim());
+const needsOnboarding = computed(() => !String(messenger.state.authToken || "").trim() || !String(messenger.state.username || "").trim());
 const hasActive = computed(() => !!messenger.roomLabel.value);
 const inCall = computed(() => messenger.state.inCall);
 const callRoom = computed(() => messenger.state.callRoom);
@@ -30,6 +30,10 @@ watch(needsOnboarding, (required) => {
 watch(() => messenger.state.activeRoom, (room) => {
   mobileThreadOpen.value = !!room;
 }, { immediate: true });
+
+onMounted(() => {
+  if (messenger.state.authToken) messenger.refreshSession();
+});
 
 function showConversationList() {
   mobileThreadOpen.value = false;

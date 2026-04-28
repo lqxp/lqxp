@@ -138,6 +138,8 @@ async fn register_connection(
         session_id.to_owned(),
         PlayerSession {
             id: session_id.to_owned(),
+            user_id: String::new(),
+            is_admin: false,
             ip: ip.to_owned(),
             username: String::new(),
             tx,

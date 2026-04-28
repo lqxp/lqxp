@@ -351,10 +351,43 @@ textarea {
   margin-top: 22px;
 }
 
+.onboarding__tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-top: 18px;
+  padding: 4px;
+  border-radius: 12px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+}
+
+.onboarding__tabs button {
+  height: 34px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.onboarding__tabs button:hover,
+.onboarding__tabs button.is-active {
+  background: #25272c;
+  color: var(--text);
+}
+
 .onboarding__field {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.onboarding__field + .onboarding__field {
+  margin-top: 14px;
 }
 
 .onboarding__field span {
@@ -363,7 +396,8 @@ textarea {
   font-weight: 600;
 }
 
-.onboarding__field input {
+.onboarding__field input,
+.onboarding__field textarea {
   height: 52px;
   padding: 0 16px;
   border-radius: 12px;
@@ -374,12 +408,22 @@ textarea {
   transition: border-color 120ms ease, background 120ms ease;
 }
 
-.onboarding__field input:focus {
+.onboarding__field textarea {
+  height: auto;
+  min-height: 112px;
+  padding: 14px 16px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.onboarding__field input:focus,
+.onboarding__field textarea:focus {
   border-color: var(--blue);
   background: #121316;
 }
 
-.onboarding__field input::placeholder {
+.onboarding__field input::placeholder,
+.onboarding__field textarea::placeholder {
   color: var(--dim);
 }
 
@@ -740,6 +784,20 @@ textarea {
   display: grid;
   place-items: center;
   font-variant-numeric: tabular-nums;
+}
+
+.msg.is-mentioned .bubble {
+  border-color: rgba(247, 194, 101, 0.45);
+  box-shadow: inset 3px 0 0 rgba(247, 194, 101, 0.8);
+}
+
+.mention {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 6px;
+  background: rgba(141, 182, 220, 0.18);
+  color: #cfe5ff;
+  font-weight: 700;
 }
 
 .conv__remove {
@@ -3080,6 +3138,40 @@ textarea {
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 18px;
+}
+
+.admin-list {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.admin-row > div {
+  min-width: 0;
+}
+
+.admin-row strong,
+.admin-row small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.admin-row small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .settings-kv {

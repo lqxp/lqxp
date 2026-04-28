@@ -12,6 +12,10 @@ pub struct Config {
     pub network: NetworkConfig,
     #[serde(default)]
     pub rtc: RtcConfig,
+    #[serde(default)]
+    pub database: DatabaseConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 impl Default for Config {
@@ -20,6 +24,8 @@ impl Default for Config {
             api: ApiConfig::default(),
             network: NetworkConfig::default(),
             rtc: RtcConfig::default(),
+            database: DatabaseConfig::default(),
+            security: SecurityConfig::default(),
         }
     }
 }
@@ -96,6 +102,40 @@ impl Default for RtcConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct DatabaseConfig {
+    #[serde(default = "default_database_kind")]
+    pub kind: String,
+    #[serde(default = "default_database_url")]
+    pub url: String,
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            kind: default_database_kind(),
+            url: default_database_url(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SecurityConfig {
+    #[serde(default, rename = "adminIds")]
+    pub admin_ids: Vec<String>,
+    #[serde(default = "default_register_enabled", rename = "registerEnabled")]
+    pub register_enabled: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            admin_ids: Vec::new(),
+            register_enabled: default_register_enabled(),
+        }
+    }
+}
+
 fn default_port() -> u16 {
     4560
 }
@@ -117,6 +157,18 @@ fn default_webchat_index() -> String {
 }
 
 fn default_relay_only() -> bool {
+    true
+}
+
+fn default_database_kind() -> String {
+    "sqlite".to_owned()
+}
+
+fn default_database_url() -> String {
+    "sqlite://files/qxp.sqlite".to_owned()
+}
+
+fn default_register_enabled() -> bool {
     true
 }
 

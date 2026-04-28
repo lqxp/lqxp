@@ -19,3 +19,13 @@ relayOnly = true
 turnUrls = []
 turnUsername = ""
 turnCredential = ""
+
+[database]
+
+kind = "sqlite"
+url = "sqlite://files/qxp.sqlite"
+
+[security]
+
+adminIds = []
+registerEnabled = true

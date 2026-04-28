@@ -1,3 +1,4 @@
+mod accounts;
 mod config;
 mod db;
 mod linkpreview;
@@ -12,7 +13,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::{net::TcpListener, sync::RwLock};
 use tracing::info;
 
-use crate::{config::{init_tracing, load_blocklist_terms, load_config}, db::JsonDatabase, server::build_router, state::AppState};
+use crate::{accounts::AccountDatabase, config::{init_tracing, load_blocklist_terms, load_config}, db::JsonDatabase, server::build_router, state::AppState};
 
 #[tokio::main]
 async fn main() {
@@ -21,6 +22,15 @@ async fn main() {
     let config = load_config().await;
     let blocklist_terms = load_blocklist_terms().await;
     let database = Arc::new(JsonDatabase::load(PathBuf::from("files/database.json")).await);
+    let accounts = Arc::new(
+        AccountDatabase::connect(
+            &config.database,
+            config.security.admin_ids.clone(),
+            config.security.register_enabled,
+        )
+        .await
+        .expect("failed to initialize account database"),
+    );
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -29,6 +39,7 @@ async fn main() {
         ip_connections: Arc::new(RwLock::new(HashMap::new())),
         room_messages: Arc::new(RwLock::new(HashMap::new())),
         database,
+        accounts,
     });
 
     let app = build_router(state.clone());

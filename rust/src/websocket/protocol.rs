@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use axum::extract::ws::Message;
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
@@ -141,97 +139,44 @@ pub async fn process_message(
 }
 
 async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str, d: Value) -> bool {
-    let mut username = d
-        .get("username")
+    let Some(token) = d
+        .get("token")
+        .or_else(|| d.get("authToken"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| "Player".to_owned());
+    else {
+        return respond_error(state, session_id, 2, "Account session required", request_id(&d)).await;
+    };
 
-    username = username.chars().take(16).collect::<String>();
-
-    let lowered = username.to_lowercase();
-    if state
-        .blocklist_terms
-        .iter()
-        .any(|term| lowered.contains(&term.to_lowercase()))
-    {
-        let entry = BlacklistEntry {
-            ip: client_ip.to_owned(),
-            reason: "Blocked username".to_owned(),
-            timestamp: now_ms(),
-            ign: username.clone(),
-        };
-
-        let mut blacklisted = state.database.blacklisted_ips().await;
-        if !blacklisted.iter().any(|item| item.ip == entry.ip) {
-            blacklisted.push(entry.clone());
-            if let Err(err) = state.database.set_blacklisted_ips(&blacklisted).await {
-                error!("Failed to update blacklist: {}", err);
-            }
+    let account = match state.accounts.authenticate_token(token).await {
+        Ok(Some(account)) => account,
+        Ok(None) => return respond_error(state, session_id, 2, "Invalid account session", request_id(&d)).await,
+        Err(err) => {
+            error!("Failed to authenticate websocket token: {}", err);
+            return respond_error(state, session_id, 2, "Authentication failed", request_id(&d)).await;
         }
-
-        respond_to_sender(
-            state,
-            session_id,
-            json!({
-                "op": 24,
-                "d": {
-                    "error": "You are blacklisted.",
-                    "reason": entry.reason,
-                    "timestamp": entry.timestamp,
-                    "ign": entry.ign
-                }
-            }),
-        )
-        .await;
-
-        return true;
+    };
+    let requested_status = d
+        .get("status")
+        .or_else(|| d.get("presenceStatus"))
+        .map(|value| parse_user_status(Some(value)))
+        .unwrap_or(account.status);
+    if requested_status != account.status {
+        if let Err(err) = state.accounts.update_status(&account.id, requested_status).await {
+            error!("Failed to persist user status: {}", err);
+        }
     }
 
-    if username == "kxs.rip"
-        && ![
-            "82.67.125.203",
-            "2a01:e0a:e8a:c6c0:83b:6634:e492:7cef",
-            "179.61.190.52",
-        ]
-        .contains(&client_ip)
-    {
-        username = "Player".to_owned();
-    }
-
-    let existing_names = {
-        let players = state.players.read().await;
-        players
-            .iter()
-            .filter(|(id, _)| id.as_str() != session_id)
-            .map(|(_, player)| player.username.to_lowercase())
-            .collect::<HashSet<_>>()
-    };
-
-    let profile = match parse_user_profile(d.get("profile")) {
-        Ok(profile) => profile,
-        Err(message) => return respond_error(state, session_id, 2, message, request_id(&d)).await,
-    };
-    let status = parse_user_status(d.get("status").or_else(|| d.get("presenceStatus")));
-
-    let (final_username, exchange_key, voice_chat, version, is_mobile, is_secure, profile, status) = {
+    let (final_username, account_id, is_admin, exchange_key, voice_chat, version, is_mobile, is_secure, profile, status) = {
         let mut players = state.players.write().await;
         let Some(player) = players.get_mut(session_id) else {
             return false;
         };
 
-        let base_username = username.clone();
-        let mut candidate = username;
-        let mut counter = 1;
-        while existing_names.contains(&candidate.to_lowercase()) {
-            candidate = format!("{}-{}", base_username, counter);
-            candidate = candidate.chars().take(16).collect();
-            counter += 1;
-        }
-
-        player.username = candidate.clone();
+        player.user_id = account.id.clone();
+        player.is_admin = account.admin;
+        player.username = account.username.clone();
         player.is_voice_chat = d
             .get("isVoiceChat")
             .and_then(Value::as_bool)
@@ -252,11 +197,13 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
             .filter(|value| !value.trim().is_empty());
         player.is_mobile = d.get("isMobile").and_then(Value::as_bool);
         player.is_secure = d.get("isSecure").and_then(Value::as_bool);
-        player.profile = profile;
-        player.status = status;
+        player.profile = account.profile.clone();
+        player.status = requested_status;
 
         (
-            candidate,
+            player.username.clone(),
+            player.user_id.clone(),
+            player.is_admin,
             player.exchange_key.clone(),
             player.is_voice_chat,
             player.version.clone(),
@@ -290,7 +237,9 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
             json!({
                 "op": 2,
                 "d": {
-                    "uuid": session_id,
+                    "uuid": account_id,
+                    "username": final_username.clone(),
+                    "admin": is_admin,
                     "profile": profile.clone(),
                     "status": status
                 }
@@ -525,6 +474,7 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
                 }
             }
             Ok((
+                player.user_id.clone(),
                 player.username.clone(),
                 player.profile.clone(),
                 player.status,
@@ -537,7 +487,7 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
         }
     };
 
-    let (username, profile, status, previous_status, previous_voice_chat, rooms) =
+    let (user_id, username, profile, status, previous_status, previous_voice_chat, rooms) =
         match update_context {
             Ok(context) => context,
             Err(_) => {
@@ -551,6 +501,17 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
                 .await
             }
         };
+
+    if profile_update.is_some() {
+        if let Err(err) = state.accounts.update_profile(&user_id, &profile).await {
+            error!("Failed to persist user profile: {}", err);
+        }
+    }
+    if status_update.is_some() {
+        if let Err(err) = state.accounts.update_status(&user_id, status).await {
+            error!("Failed to persist user status: {}", err);
+        }
+    }
 
     respond_to_sender(
         state,
@@ -1257,6 +1218,16 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
         .get("isVoiceChat")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    if is_voice_chat
+        && !state
+            .accounts
+            .feature_flags()
+            .await
+            .map(|flags| flags.calls_enabled)
+            .unwrap_or(true)
+    {
+        return respond_error(state, session_id, 98, "Calls are disabled by the server", request_id(&d)).await;
+    }
     let media = normalize_call_media(d.get("media"), is_voice_chat);
     let voice_result = {
         let mut players = state.players.write().await;
@@ -1421,6 +1392,16 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
         .get("isVoiceChat")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    if is_voice_chat
+        && !state
+            .accounts
+            .feature_flags()
+            .await
+            .map(|flags| flags.calls_enabled)
+            .unwrap_or(true)
+    {
+        return respond_error(state, session_id, 110, "Calls are disabled by the server", request_id(&d)).await;
+    }
     let (audio, camera, screen) = normalize_call_media(d.get("media"), is_voice_chat);
 
     let update_result = {
@@ -1490,6 +1471,15 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
 }
 
 async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> bool {
+    if !state
+        .accounts
+        .feature_flags()
+        .await
+        .map(|flags| flags.calls_enabled)
+        .unwrap_or(true)
+    {
+        return respond_error(state, session_id, 111, "Calls are disabled by the server", request_id(&d)).await;
+    }
     let Some(game_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
         return respond_error(state, session_id, 111, "Missing gameId", request_id(&d)).await;
     };
@@ -1618,7 +1608,7 @@ async fn admin_status(state: &SharedState, session_id: &str, d: Value) -> bool {
                 PlayerStatus {
                     username: player.username.clone(),
                     ip: player.ip.clone(),
-                    id: player.id.clone(),
+                    id: player.user_id.clone(),
                     is_voice_chat: player.is_voice_chat,
                     rooms,
                     version: player.version.clone(),

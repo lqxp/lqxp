@@ -8,6 +8,7 @@ name = "qxprotocol"
 path = "rust/src/main.rs"
 
 [dependencies]
+argon2 = "0.5"
 axum = { version = "0.7", features = ["ws"] }
 base64 = "0.22"
 futures-util = "0.3"
@@ -18,6 +19,8 @@ regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "gzip"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "macros"] }
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
 tracing = "0.1"

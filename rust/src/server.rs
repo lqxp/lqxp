@@ -6,21 +6,268 @@ use std::{
 use axum::{
     extract::{ws::WebSocketUpgrade, ConnectInfo, Path as AxumPath, State},
     http::{HeaderMap, StatusCode},
+    Json,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Router,
 };
+use serde::Deserialize;
 use serde_json::json;
 use tokio::fs;
 
-use crate::{state::SharedState, utils::extract_client_ip, websocket::handle_socket};
+use crate::{
+    accounts::{user_response, username_hits_blocklist},
+    state::SharedState,
+    utils::extract_client_ip,
+    websocket::handle_socket,
+};
 
 pub fn build_router(state: SharedState) -> Router {
     Router::new()
         .route("/", get(webchat_page))
+        .route("/api/auth/me", get(auth_me))
+        .route("/api/auth/register", post(auth_register))
+        .route("/api/auth/login", post(auth_login))
+        .route("/api/auth/recover", post(auth_recover))
+        .route("/api/auth/logout", post(auth_logout))
+        .route("/api/auth/username", post(auth_username))
+        .route("/api/admin/overview", get(admin_overview))
+        .route("/api/admin/features", post(admin_features))
+        .route("/api/admin/users/:user_id/disabled", post(admin_user_disabled))
         .route("/ws", get(ws_upgrade))
         .route("/*path", get(public_asset))
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthRegisterRequest {
+    username: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthLoginRequest {
+    username: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthRecoverRequest {
+    username: String,
+    recovery_words: String,
+    new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsernameRequest {
+    username: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeatureRequest {
+    key: String,
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct DisabledRequest {
+    disabled: bool,
+}
+
+async fn auth_register(
+    State(state): State<SharedState>,
+    Json(body): Json<AuthRegisterRequest>,
+) -> impl IntoResponse {
+    match state.accounts.feature_flags().await {
+        Ok(flags) if flags.register_enabled => {}
+        Ok(_) => return api_error(StatusCode::FORBIDDEN, "Registrations are disabled."),
+        Err(err) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    }
+    if username_hits_blocklist(&body.username, &state.blocklist_terms) {
+        return api_error(StatusCode::BAD_REQUEST, "Username is not allowed.");
+    }
+    match state.accounts.register(&body.username, &body.password).await {
+        Ok((user, token, recovery_words)) => Json(json!({
+            "ok": true,
+            "token": token,
+            "user": user,
+            "recoveryWords": recovery_words
+        }))
+        .into_response(),
+        Err(err) => api_error(StatusCode::BAD_REQUEST, &err),
+    }
+}
+
+async fn auth_login(
+    State(state): State<SharedState>,
+    Json(body): Json<AuthLoginRequest>,
+) -> impl IntoResponse {
+    match state.accounts.login(&body.username, &body.password).await {
+        Ok((user, token)) => Json(user_response(user, token)).into_response(),
+        Err(err) => api_error(StatusCode::UNAUTHORIZED, &err),
+    }
+}
+
+async fn auth_recover(
+    State(state): State<SharedState>,
+    Json(body): Json<AuthRecoverRequest>,
+) -> impl IntoResponse {
+    match state
+        .accounts
+        .recover(&body.username, &body.recovery_words, &body.new_password)
+        .await
+    {
+        Ok((user, token)) => Json(user_response(user, token)).into_response(),
+        Err(err) => api_error(StatusCode::BAD_REQUEST, &err),
+    }
+}
+
+async fn auth_me(State(state): State<SharedState>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(token) = bearer_token(&headers) else {
+        return api_error(StatusCode::UNAUTHORIZED, "Missing session.");
+    };
+    match state.accounts.me(&token).await {
+        Ok(Some(user)) => Json(json!({ "ok": true, "user": user })).into_response(),
+        Ok(None) => api_error(StatusCode::UNAUTHORIZED, "Invalid session."),
+        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    }
+}
+
+async fn auth_logout(State(state): State<SharedState>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(token) = bearer_token(&headers) else {
+        return api_error(StatusCode::UNAUTHORIZED, "Missing session.");
+    };
+    match state.accounts.logout(&token).await {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    }
+}
+
+async fn auth_username(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<UsernameRequest>,
+) -> impl IntoResponse {
+    if username_hits_blocklist(&body.username, &state.blocklist_terms) {
+        return api_error(StatusCode::BAD_REQUEST, "Username is not allowed.");
+    }
+    let Some(user) = authenticated_user(&state, &headers).await else {
+        return api_error(StatusCode::UNAUTHORIZED, "Invalid session.");
+    };
+    match state.accounts.change_username(&user.id, &body.username).await {
+        Ok(user) => Json(json!({ "ok": true, "user": user })).into_response(),
+        Err(err) => api_error(StatusCode::BAD_REQUEST, &err),
+    }
+}
+
+async fn admin_overview(State(state): State<SharedState>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(user) = authenticated_user(&state, &headers).await else {
+        return api_error(StatusCode::UNAUTHORIZED, "Invalid session.");
+    };
+    if !user.admin {
+        return api_error(StatusCode::FORBIDDEN, "Admin only.");
+    }
+
+    let users = match state.accounts.list_users().await {
+        Ok(users) => users,
+        Err(err) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    };
+    let features = match state.accounts.feature_flags().await {
+        Ok(features) => features,
+        Err(err) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    };
+    let players = state.players.read().await;
+    let online_count = players.len();
+    drop(players);
+    let rooms = {
+        let rooms = state.room_messages.read().await;
+        rooms
+            .iter()
+            .map(|(room_id, messages)| {
+                let last = messages.last();
+                json!({
+                    "roomId": room_id,
+                    "messageCount": messages.len(),
+                    "lastMessageAt": last.map(|message| message.timestamp).unwrap_or(0)
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    Json(json!({
+        "ok": true,
+        "users": users,
+        "features": features,
+        "rooms": rooms,
+        "onlineCount": online_count
+    }))
+    .into_response()
+}
+
+async fn admin_features(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<FeatureRequest>,
+) -> impl IntoResponse {
+    let Some(user) = authenticated_user(&state, &headers).await else {
+        return api_error(StatusCode::UNAUTHORIZED, "Invalid session.");
+    };
+    if !user.admin {
+        return api_error(StatusCode::FORBIDDEN, "Admin only.");
+    }
+    let key = match body.key.as_str() {
+        "registerEnabled" | "register_enabled" => "register_enabled",
+        "callsEnabled" | "calls_enabled" => "calls_enabled",
+        _ => return api_error(StatusCode::BAD_REQUEST, "Unknown feature."),
+    };
+    match state.accounts.set_feature(key, body.enabled).await {
+        Ok(()) => match state.accounts.feature_flags().await {
+            Ok(features) => Json(json!({ "ok": true, "features": features })).into_response(),
+            Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+        },
+        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    }
+}
+
+async fn admin_user_disabled(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    AxumPath(user_id): AxumPath<String>,
+    Json(body): Json<DisabledRequest>,
+) -> impl IntoResponse {
+    let Some(user) = authenticated_user(&state, &headers).await else {
+        return api_error(StatusCode::UNAUTHORIZED, "Invalid session.");
+    };
+    if !user.admin {
+        return api_error(StatusCode::FORBIDDEN, "Admin only.");
+    }
+    match state.accounts.set_user_disabled(&user_id, body.disabled).await {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    }
+}
+
+async fn authenticated_user(
+    state: &SharedState,
+    headers: &HeaderMap,
+) -> Option<crate::accounts::AuthenticatedUser> {
+    let token = bearer_token(headers)?;
+    state.accounts.authenticate_token(&token).await.ok().flatten()
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn api_error(status: StatusCode, message: &str) -> Response {
+    (status, Json(json!({ "ok": false, "error": message }))).into_response()
 }
 
 async fn webchat_page(State(state): State<SharedState>, headers: HeaderMap) -> impl IntoResponse {

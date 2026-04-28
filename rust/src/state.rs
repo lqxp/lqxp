@@ -7,6 +7,7 @@ use axum::extract::ws::Message;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::{
+    accounts::SharedAccounts,
     config::Config,
     db::JsonDatabase,
     models::{ChatMessageRecord, UserPresenceStatus, UserProfile},
@@ -20,6 +21,7 @@ pub struct AppState {
     pub ip_connections: Arc<RwLock<HashMap<String, usize>>>,
     pub room_messages: Arc<RwLock<HashMap<String, Vec<ChatMessageRecord>>>>,
     pub database: Arc<JsonDatabase>,
+    pub accounts: SharedAccounts,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -27,6 +29,8 @@ pub type SharedState = Arc<AppState>;
 #[derive(Debug, Clone)]
 pub struct PlayerSession {
     pub id: String,
+    pub user_id: String,
+    pub is_admin: bool,
     pub ip: String,
     pub username: String,
     pub tx: mpsc::UnboundedSender<Message>,

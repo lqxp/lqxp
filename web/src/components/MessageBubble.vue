@@ -167,6 +167,7 @@ function markdown(value) {
     return hold(`<a href="${safe}" target="_blank" rel="noopener noreferrer">${label}</a>`);
   });
   html = html
+    .replace(/(^|[^a-zA-Z0-9_.])@([a-z0-9_.]{2,32})(?=$|[^a-zA-Z0-9_.])/gi, '$1<span class="mention">@$2</span>')
     .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
     .replace(/__([^_\n]+)__/g, "<strong>$1</strong>")
     .replace(/~~([^~\n]+)~~/g, "<del>$1</del>")
@@ -247,6 +248,7 @@ function onDelete() {
     class="msg"
     :class="[
       { 'is-own': isOwn, 'is-jumbo': jumbo, 'is-deleted': deleted },
+      { 'is-mentioned': message.mentioned },
       { 'has-reactions': message.reactions.length && !deleted },
       runClass
     ]"
