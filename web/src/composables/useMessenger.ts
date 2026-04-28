@@ -1764,7 +1764,7 @@ export function useMessenger() {
           deleteMessagesOnLeave: state.deleteMessagesOnLeave,
           status: sanitizePresenceStatus(state.status),
           profile: normalizeProfile(state.profile),
-          v: "qxprotocol-web-vite-vue",
+          v: "QxpClient",
           isMobile: /Android|iPhone|iPad|iPod/i.test(navigator.userAgent),
           isSecure: window.isSecureContext
         }
