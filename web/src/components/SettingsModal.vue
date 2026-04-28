@@ -514,7 +514,12 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
             <div v-for="user in messenger.state.adminOverview.users" :key="user.id" class="admin-row">
               <div>
                 <strong>{{ user.username }}</strong>
-                <small>{{ user.id }}</small>
+                <small>
+                  {{ user.id }}
+                  <template v-if="user.admin"> · admin</template>
+                  <template v-if="user.disabled"> · disabled</template>
+                  <template v-else> · {{ messenger.presenceStatusLabel(user.status) }}</template>
+                </small>
               </div>
               <button
                 type="button"
@@ -534,7 +539,10 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
             <div v-for="room in messenger.state.adminOverview.rooms" :key="room.roomId" class="admin-row">
               <div>
                 <strong>{{ messenger.displayRoomName(room.roomId) }}</strong>
-                <small>{{ room.messageCount }} messages</small>
+                <small>
+                  {{ room.messageCount }} messages · {{ room.onlineCount || 0 }} online · {{ room.voiceCount || 0 }} voice
+                  <template v-if="room.active"> · active</template>
+                </small>
               </div>
             </div>
           </div>

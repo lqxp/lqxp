@@ -27,5 +27,5 @@ url = "sqlite://files/qxp.sqlite"
 
 [security]
 
-adminIds = []
+adminIds = ["1498591026677488963"]
 registerEnabled = true

@@ -2073,7 +2073,8 @@ export function useMessenger() {
   async function toggleCamera() {
     if (!state.inCall || !callManager) return;
     if (state.callCameraEnabled) {
-      callManager.removeLocalTracks((track) => track.kind === "video" && state.cameraStream?.getTracks().includes(track));
+      callManager.removeLocalTrack("camera");
+      stopStreamTracks(state.cameraStream);
       state.cameraStream = null;
       state.callCameraEnabled = false;
       publishCallState(true);
@@ -2082,17 +2083,21 @@ export function useMessenger() {
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      stopStreamTracks(state.cameraStream);
       state.cameraStream = stream;
       state.callCameraEnabled = true;
-      callManager.addLocalStream(stream);
-      for (const track of stream.getVideoTracks()) {
-        track.onended = () => {
-          callManager?.removeLocalTracks((item) => item.id === track.id);
-          state.callCameraEnabled = false;
-          stopStreamTracks(stream);
-          state.cameraStream = null;
-          publishCallState(true);
-        };
+      const [track] = stream.getVideoTracks();
+      if (!track) throw new Error("Camera has no video track.");
+      callManager.setLocalTrack("camera", track, stream);
+      track.onended = () => {
+        callManager?.removeLocalTrack("camera");
+        state.callCameraEnabled = false;
+        stopStreamTracks(stream);
+        if (state.cameraStream === stream) state.cameraStream = null;
+        publishCallState(true);
+      };
+      for (const extraTrack of stream.getVideoTracks().slice(1)) {
+        extraTrack.stop();
       }
       publishCallState(true);
     } catch {
@@ -2103,7 +2108,8 @@ export function useMessenger() {
   async function toggleScreenShare() {
     if (!state.inCall || !callManager) return;
     if (state.callScreenEnabled) {
-      callManager.removeLocalTracks((track) => track.kind === "video" && state.screenStream?.getTracks().includes(track));
+      callManager.removeLocalTrack("screen");
+      stopStreamTracks(state.screenStream);
       state.screenStream = null;
       state.callScreenEnabled = false;
       publishCallState(true);
@@ -2116,18 +2122,19 @@ export function useMessenger() {
         return;
       }
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      stopStreamTracks(state.screenStream);
       state.screenStream = stream;
       state.callScreenEnabled = true;
-      callManager.addLocalStream(stream);
-      for (const track of stream.getVideoTracks()) {
-        track.onended = () => {
-          callManager?.removeLocalTracks((item) => item.id === track.id);
-          state.callScreenEnabled = false;
-          stopStreamTracks(stream);
-          state.screenStream = null;
-          publishCallState(true);
-        };
-      }
+      const [track] = stream.getVideoTracks();
+      if (!track) throw new Error("Screen share has no video track.");
+      callManager.setLocalTrack("screen", track, stream);
+      track.onended = () => {
+        callManager?.removeLocalTrack("screen");
+        state.callScreenEnabled = false;
+        stopStreamTracks(stream);
+        if (state.screenStream === stream) state.screenStream = null;
+        publishCallState(true);
+      };
       publishCallState(true);
     } catch {
       state.lastError = "Screen sharing was cancelled.";

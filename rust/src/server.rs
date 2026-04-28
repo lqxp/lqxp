@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -187,23 +188,48 @@ async fn admin_overview(State(state): State<SharedState>, headers: HeaderMap) ->
         Ok(features) => features,
         Err(err) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
     };
-    let players = state.players.read().await;
-    let online_count = players.len();
-    drop(players);
-    let rooms = {
+    let mut room_previews: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let online_count = {
+        let players = state.players.read().await;
+        for player in players.values() {
+            for room_id in &player.rooms {
+                let entry = room_previews.entry(room_id.clone()).or_insert_with(|| {
+                    json!({
+                        "roomId": room_id,
+                        "messageCount": 0usize,
+                        "lastMessageAt": 0u64,
+                        "onlineCount": 0usize,
+                        "voiceCount": 0usize,
+                        "active": true
+                    })
+                });
+                entry["onlineCount"] = json!(entry["onlineCount"].as_u64().unwrap_or(0) + 1);
+                if player.is_voice_chat {
+                    entry["voiceCount"] = json!(entry["voiceCount"].as_u64().unwrap_or(0) + 1);
+                }
+            }
+        }
+        players.len()
+    };
+    {
         let rooms = state.room_messages.read().await;
-        rooms
-            .iter()
-            .map(|(room_id, messages)| {
-                let last = messages.last();
+        for (room_id, messages) in rooms.iter() {
+            let last = messages.last();
+            let entry = room_previews.entry(room_id.clone()).or_insert_with(|| {
                 json!({
                     "roomId": room_id,
-                    "messageCount": messages.len(),
-                    "lastMessageAt": last.map(|message| message.timestamp).unwrap_or(0)
+                    "messageCount": 0usize,
+                    "lastMessageAt": 0u64,
+                    "onlineCount": 0usize,
+                    "voiceCount": 0usize,
+                    "active": false
                 })
-            })
-            .collect::<Vec<_>>()
-    };
+            });
+            entry["messageCount"] = json!(messages.len());
+            entry["lastMessageAt"] = json!(last.map(|message| message.timestamp).unwrap_or(0));
+        }
+    }
+    let rooms = room_previews.into_values().collect::<Vec<_>>();
 
     Json(json!({
         "ok": true,

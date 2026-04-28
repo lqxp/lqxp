@@ -4,11 +4,19 @@ import { rtcRuntimeConfig } from "@/config/runtime";
 interface PeerState {
   pc: RTCPeerConnection;
   stream: MediaStream;
+  senders: Partial<Record<LocalTrackRole, RTCRtpSender>>;
   makingOffer: boolean;
   ignoreOffer: boolean;
   settingRemoteAnswer: boolean;
   pendingCandidates: RTCIceCandidateInit[];
   signalChain: Promise<void>;
+}
+
+type LocalTrackRole = "audio" | "camera" | "screen";
+
+interface LocalTrackSlot {
+  track: MediaStreamTrack;
+  stream: MediaStream;
 }
 
 interface WebRtcCallManagerOptions {
@@ -55,6 +63,7 @@ export class WebRtcCallManager {
   private readonly onRemoteMedia: WebRtcCallManagerOptions["onRemoteMedia"];
   private readonly onRemoteLeft: WebRtcCallManagerOptions["onRemoteLeft"];
   private localStream: MediaStream;
+  private readonly localTracks = new Map<LocalTrackRole, LocalTrackSlot>();
   private localMedia: CallMediaState = { audio: true, camera: false, screen: false };
 
   constructor(options: WebRtcCallManagerOptions) {
@@ -64,6 +73,8 @@ export class WebRtcCallManager {
     this.sendSignal = options.sendSignal;
     this.onRemoteMedia = options.onRemoteMedia;
     this.onRemoteLeft = options.onRemoteLeft;
+    const audioTrack = this.localStream.getAudioTracks()[0];
+    if (audioTrack) this.localTracks.set("audio", { track: audioTrack, stream: this.localStream });
   }
 
   connectPeer(peerName: string) {
@@ -86,22 +97,57 @@ export class WebRtcCallManager {
 
   addLocalStream(stream: MediaStream) {
     for (const track of stream.getTracks()) {
-      this.localStream.addTrack(track);
-      for (const peer of this.peers.values()) {
-        peer.pc.addTrack(track, this.localStream);
-      }
+      const role: LocalTrackRole = track.kind === "audio"
+        ? "audio"
+        : this.localTracks.has("camera")
+          ? "screen"
+          : "camera";
+      this.setLocalTrack(role, track, stream);
     }
   }
 
   removeLocalTracks(predicate: (track: MediaStreamTrack) => boolean) {
-    const tracks = this.localStream.getTracks().filter(predicate);
-    for (const track of tracks) {
-      for (const peer of this.peers.values()) {
-        const sender = peer.pc.getSenders().find((item) => item.track === track);
-        if (sender) peer.pc.removeTrack(sender);
+    for (const [role, slot] of [...this.localTracks.entries()]) {
+      if (predicate(slot.track)) this.removeLocalTrack(role);
+    }
+  }
+
+  setLocalTrack(role: LocalTrackRole, track: MediaStreamTrack, stream = new MediaStream([track])) {
+    const previous = this.localTracks.get(role);
+    if (previous?.track === track) return;
+    if (previous) this.localStream.removeTrack(previous.track);
+
+    this.localTracks.set(role, { track, stream });
+    if (stream !== this.localStream && !this.localStream.getTracks().some((item) => item.id === track.id)) {
+      this.localStream.addTrack(track);
+    }
+
+    for (const peer of this.peers.values()) {
+      const sender = peer.senders[role];
+      if (sender) {
+        sender.replaceTrack(track).catch(() => this.rebuildSender(peer, role, track, stream));
+      } else {
+        peer.senders[role] = peer.pc.addTrack(track, stream);
       }
-      this.localStream.removeTrack(track);
-      track.stop();
+    }
+  }
+
+  removeLocalTrack(role: LocalTrackRole) {
+    const slot = this.localTracks.get(role);
+    if (!slot) return;
+    this.localTracks.delete(role);
+    this.localStream.removeTrack(slot.track);
+    for (const peer of this.peers.values()) {
+      const sender = peer.senders[role];
+      if (!sender) continue;
+      sender.replaceTrack(null).catch(() => {
+        try {
+          peer.pc.removeTrack(sender);
+        } catch {
+          /* sender already detached */
+        }
+        delete peer.senders[role];
+      });
     }
   }
 
@@ -168,6 +214,7 @@ export class WebRtcCallManager {
     const peer: PeerState = {
       pc,
       stream,
+      senders: {},
       makingOffer: false,
       ignoreOffer: false,
       settingRemoteAnswer: false,
@@ -222,11 +269,23 @@ export class WebRtcCallManager {
       }
     };
 
-    for (const track of this.localStream.getTracks()) {
-      pc.addTrack(track, this.localStream);
+    for (const [role, slot] of this.localTracks.entries()) {
+      peer.senders[role] = pc.addTrack(slot.track, slot.stream);
     }
 
     return peer;
+  }
+
+  private rebuildSender(peer: PeerState, role: LocalTrackRole, track: MediaStreamTrack, stream: MediaStream) {
+    const sender = peer.senders[role];
+    if (sender) {
+      try {
+        peer.pc.removeTrack(sender);
+      } catch {
+        /* sender already detached */
+      }
+    }
+    peer.senders[role] = peer.pc.addTrack(track, stream);
   }
 
   private async addIceCandidate(peer: PeerState, candidate: RTCIceCandidateInit) {
