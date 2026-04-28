@@ -11,3 +11,6 @@ bun vite build
 cd ..
 
 pm2 restart qxp-app
+
+# git submodule sync
+# git submodule update --remote web

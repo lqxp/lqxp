@@ -128,7 +128,7 @@ adminPassword = "$ADMIN_PASSWORD"
 heartbeatInterval = 3000
 maxConnectionsPerIp = 3
 latestVersion = ""
-publicDir = "serve.public"
+publicDir = "web/dist"
 webchatIndex = "index.html"
 
 [rtc]

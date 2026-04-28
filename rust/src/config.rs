@@ -149,7 +149,7 @@ fn default_max_connections() -> usize {
 }
 
 fn default_public_dir() -> String {
-    "serve.public".to_owned()
+    "web/dist".to_owned()
 }
 
 fn default_webchat_index() -> String {
