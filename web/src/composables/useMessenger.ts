@@ -1979,7 +1979,10 @@ export function useMessenger() {
     const key = sanitizeUsername(username);
     if (!key) return;
     state.remoteCallStreamsByUser[key] = remote.stream;
-    updateRemoteMedia(key, remote.media);
+    state.remoteCallMediaByUser[key] = normalizeCallMedia({
+      ...(state.remoteCallMediaByUser[key] || EMPTY_CALL_MEDIA),
+      audio: Boolean(remote.media?.audio)
+    });
   }
 
   function removeRemoteCallMedia(username) {
@@ -2001,7 +2004,7 @@ export function useMessenger() {
 
   function remoteVideoStream(username) {
     const stream = remoteCallStream(username);
-    if (!stream?.getVideoTracks().length) return null;
+    if (!stream?.getVideoTracks().some((track) => track.readyState === "live")) return null;
     return stream;
   }
 

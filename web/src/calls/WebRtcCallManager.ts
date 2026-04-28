@@ -242,7 +242,10 @@ export class WebRtcCallManager {
       } else if (!stream.getTracks().some((existing) => existing.id === track.id)) {
         stream.addTrack(track);
       }
-      track.onended = () => this.onRemoteMedia(peerName, { stream, media: this.inferRemoteMedia(stream) });
+      track.onended = () => {
+        stream.removeTrack(track);
+        this.onRemoteMedia(peerName, { stream, media: this.inferRemoteMedia(stream) });
+      };
       this.onRemoteMedia(peerName, { stream, media: this.inferRemoteMedia(stream) });
     };
 
@@ -310,7 +313,7 @@ export class WebRtcCallManager {
   private inferRemoteMedia(stream: MediaStream): CallMediaState {
     return {
       audio: stream.getAudioTracks().some((track) => track.readyState === "live"),
-      camera: stream.getVideoTracks().some((track) => track.readyState === "live"),
+      camera: false,
       screen: false
     };
   }
