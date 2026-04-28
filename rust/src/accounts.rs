@@ -108,7 +108,11 @@ pub struct AccountDatabase {
 }
 
 impl AccountDatabase {
-    pub async fn connect(config: &DatabaseConfig, admin_ids: Vec<String>, register_enabled: bool) -> AccountResult<Self> {
+    pub async fn connect(
+        config: &DatabaseConfig,
+        admin_ids: Vec<String>,
+        register_enabled: bool,
+    ) -> AccountResult<Self> {
         let kind = config.kind.trim().to_ascii_lowercase();
         let backend = if kind == "postgres" || kind == "postgresql" {
             SqlBackend::Postgres(
@@ -188,7 +192,8 @@ impl AccountDatabase {
     }
 
     async fn ensure_feature_defaults(&self, register_enabled: bool) -> AccountResult<()> {
-        self.set_feature_default("register_enabled", register_enabled).await?;
+        self.set_feature_default("register_enabled", register_enabled)
+            .await?;
         self.set_feature_default("calls_enabled", true).await?;
         Ok(())
     }
@@ -203,7 +208,10 @@ impl AccountDatabase {
 
     pub async fn feature_flags(&self) -> AccountResult<FeatureFlags> {
         Ok(FeatureFlags {
-            register_enabled: self.feature_value("register_enabled").await?.unwrap_or(true),
+            register_enabled: self
+                .feature_value("register_enabled")
+                .await?
+                .unwrap_or(true),
             calls_enabled: self.feature_value("calls_enabled").await?.unwrap_or(true),
         })
     }
@@ -232,33 +240,33 @@ impl AccountDatabase {
     pub async fn set_feature(&self, key: &str, enabled: bool) -> AccountResult<()> {
         let value = if enabled { 1i64 } else { 0i64 };
         match &self.backend {
-            SqlBackend::Sqlite(pool) => {
-                sqlx::query(
-                    "INSERT INTO feature_flags (key, enabled) VALUES (?, ?) \
+            SqlBackend::Sqlite(pool) => sqlx::query(
+                "INSERT INTO feature_flags (key, enabled) VALUES (?, ?) \
                      ON CONFLICT(key) DO UPDATE SET enabled = excluded.enabled",
-                )
-                .bind(key)
-                .bind(value)
-                .execute(pool)
-                .await
-                .map(|_| ())
-            }
-            SqlBackend::Postgres(pool) => {
-                sqlx::query(
-                    "INSERT INTO feature_flags (key, enabled) VALUES ($1, $2) \
+            )
+            .bind(key)
+            .bind(value)
+            .execute(pool)
+            .await
+            .map(|_| ()),
+            SqlBackend::Postgres(pool) => sqlx::query(
+                "INSERT INTO feature_flags (key, enabled) VALUES ($1, $2) \
                      ON CONFLICT(key) DO UPDATE SET enabled = excluded.enabled",
-                )
-                .bind(key)
-                .bind(value)
-                .execute(pool)
-                .await
-                .map(|_| ())
-            }
+            )
+            .bind(key)
+            .bind(value)
+            .execute(pool)
+            .await
+            .map(|_| ()),
         }
         .map_err(|err| format!("Database query failed: {err}"))
     }
 
-    pub async fn register(&self, username: &str, password: &str) -> AccountResult<(PublicUser, String, Vec<String>)> {
+    pub async fn register(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> AccountResult<(PublicUser, String, Vec<String>)> {
         let username = validate_username(username)?;
         validate_password(password)?;
         if self.user_by_username(&username).await?.is_some() {
@@ -314,12 +322,19 @@ impl AccountDatabase {
             return Err("Username is already taken.".to_owned());
         }
 
-        let user = self.user_by_id(&id).await?.ok_or("Account was not created.")?;
+        let user = self
+            .user_by_id(&id)
+            .await?
+            .ok_or("Account was not created.")?;
         let token = self.create_session(&id).await?;
         Ok((self.public_user(user), token, recovery_words))
     }
 
-    pub async fn login(&self, username: &str, password: &str) -> AccountResult<(PublicUser, String)> {
+    pub async fn login(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> AccountResult<(PublicUser, String)> {
         let username = normalize_username(username);
         let user = self
             .user_by_username(&username)
@@ -334,43 +349,62 @@ impl AccountDatabase {
         Ok((self.public_user(user), token))
     }
 
-    pub async fn recover(&self, username: &str, recovery_words: &str, new_password: &str) -> AccountResult<(PublicUser, String)> {
+    pub async fn recover(
+        &self,
+        username: &str,
+        recovery_words: &str,
+        new_password: &str,
+    ) -> AccountResult<(PublicUser, String)> {
         validate_password(new_password)?;
         let username = normalize_username(username);
         let user = self
             .user_by_username(&username)
             .await?
             .ok_or_else(|| "Invalid recovery credentials.".to_owned())?;
-        verify_secret(&normalize_recovery_phrase(recovery_words), &user.recovery_hash)
-            .map_err(|_| "Invalid recovery credentials.".to_owned())?;
+        verify_secret(
+            &normalize_recovery_phrase(recovery_words),
+            &user.recovery_hash,
+        )
+        .map_err(|_| "Invalid recovery credentials.".to_owned())?;
         let password_hash = hash_secret(new_password)?;
         let now = now_ms();
-        self.update_password_hash(&user.id, &password_hash, now).await?;
+        self.update_password_hash(&user.id, &password_hash, now)
+            .await?;
         let token = self.create_session(&user.id).await?;
-        let updated = self.user_by_id(&user.id).await?.ok_or("Account not found.")?;
+        let updated = self
+            .user_by_id(&user.id)
+            .await?
+            .ok_or("Account not found.")?;
         Ok((self.public_user(updated), token))
     }
 
-    pub async fn authenticate_token(&self, token: &str) -> AccountResult<Option<AuthenticatedUser>> {
+    pub async fn authenticate_token(
+        &self,
+        token: &str,
+    ) -> AccountResult<Option<AuthenticatedUser>> {
         let hash = token_hash(token);
         let now = now_ms() as i64;
         let user_id = match &self.backend {
             SqlBackend::Sqlite(pool) => {
-                let row = sqlx::query("SELECT user_id FROM sessions WHERE token_hash = ? AND expires_at > ?")
-                    .bind(&hash)
-                    .bind(now)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|err| format!("Database query failed: {err}"))?;
+                let row = sqlx::query(
+                    "SELECT user_id FROM sessions WHERE token_hash = ? AND expires_at > ?",
+                )
+                .bind(&hash)
+                .bind(now)
+                .fetch_optional(pool)
+                .await
+                .map_err(|err| format!("Database query failed: {err}"))?;
                 row.map(|row| row.get::<String, _>("user_id"))
             }
             SqlBackend::Postgres(pool) => {
-                let row = sqlx::query("SELECT user_id FROM sessions WHERE token_hash = $1 AND expires_at > $2")
-                    .bind(&hash)
-                    .bind(now)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|err| format!("Database query failed: {err}"))?;
+                let row = sqlx::query(
+                    "SELECT user_id FROM sessions WHERE token_hash = $1 AND expires_at > $2",
+                )
+                .bind(&hash)
+                .bind(now)
+                .fetch_optional(pool)
+                .await
+                .map_err(|err| format!("Database query failed: {err}"))?;
                 row.map(|row| row.get::<String, _>("user_id"))
             }
         };
@@ -430,54 +464,73 @@ impl AccountDatabase {
             .map_err(|err| format!("Could not encode profile: {err}"))?;
         let now = now_ms() as i64;
         match &self.backend {
-            SqlBackend::Sqlite(pool) => sqlx::query("UPDATE users SET profile_json = ?, updated_at = ? WHERE id = ?")
-                .bind(profile_json)
-                .bind(now)
-                .bind(user_id)
-                .execute(pool)
-                .await
-                .map(|_| ()),
-            SqlBackend::Postgres(pool) => sqlx::query("UPDATE users SET profile_json = $1, updated_at = $2 WHERE id = $3")
-                .bind(profile_json)
-                .bind(now)
-                .bind(user_id)
-                .execute(pool)
-                .await
-                .map(|_| ()),
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query("UPDATE users SET profile_json = ?, updated_at = ? WHERE id = ?")
+                    .bind(profile_json)
+                    .bind(now)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query("UPDATE users SET profile_json = $1, updated_at = $2 WHERE id = $3")
+                    .bind(profile_json)
+                    .bind(now)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
         }
         .map_err(|err| format!("Database query failed: {err}"))
     }
 
-    pub async fn update_status(&self, user_id: &str, status: UserPresenceStatus) -> AccountResult<()> {
+    pub async fn update_status(
+        &self,
+        user_id: &str,
+        status: UserPresenceStatus,
+    ) -> AccountResult<()> {
         let status_text = status_to_str(status);
         let now = now_ms() as i64;
         match &self.backend {
-            SqlBackend::Sqlite(pool) => sqlx::query("UPDATE users SET status = ?, updated_at = ? WHERE id = ?")
-                .bind(status_text)
-                .bind(now)
-                .bind(user_id)
-                .execute(pool)
-                .await
-                .map(|_| ()),
-            SqlBackend::Postgres(pool) => sqlx::query("UPDATE users SET status = $1, updated_at = $2 WHERE id = $3")
-                .bind(status_text)
-                .bind(now)
-                .bind(user_id)
-                .execute(pool)
-                .await
-                .map(|_| ()),
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query("UPDATE users SET status = ?, updated_at = ? WHERE id = ?")
+                    .bind(status_text)
+                    .bind(now)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query("UPDATE users SET status = $1, updated_at = $2 WHERE id = $3")
+                    .bind(status_text)
+                    .bind(now)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
         }
         .map_err(|err| format!("Database query failed: {err}"))
     }
 
-    pub async fn change_username(&self, user_id: &str, username: &str) -> AccountResult<PublicUser> {
+    pub async fn change_username(
+        &self,
+        user_id: &str,
+        username: &str,
+    ) -> AccountResult<PublicUser> {
         let username = validate_username(username)?;
         if let Some(existing) = self.user_by_username(&username).await? {
             if existing.id != user_id {
                 return Err("Username is already taken.".to_owned());
             }
         }
-        let mut user = self.user_by_id(user_id).await?.ok_or("Account not found.")?;
+        let mut user = self
+            .user_by_id(user_id)
+            .await?
+            .ok_or("Account not found.")?;
         if user.username == username {
             return Ok(self.public_user(user));
         }
@@ -509,18 +562,25 @@ impl AccountDatabase {
                 .map(|_| ()),
         }
         .map_err(|err| format!("Database query failed: {err}"))?;
-        let updated = self.user_by_id(user_id).await?.ok_or("Account not found.")?;
+        let updated = self
+            .user_by_id(user_id)
+            .await?
+            .ok_or("Account not found.")?;
         Ok(self.public_user(updated))
     }
 
     pub async fn list_users(&self) -> AccountResult<Vec<PublicUser>> {
         let rows = match &self.backend {
-            SqlBackend::Sqlite(pool) => sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users ORDER BY created_at DESC")
-                .fetch_all(pool)
-                .await,
-            SqlBackend::Postgres(pool) => sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users ORDER BY created_at DESC")
-                .fetch_all(pool)
-                .await,
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users ORDER BY created_at DESC")
+                    .fetch_all(pool)
+                    .await
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users ORDER BY created_at DESC")
+                    .fetch_all(pool)
+                    .await
+            }
         }
         .map_err(|err| format!("Database query failed: {err}"))?;
         rows.into_iter()
@@ -532,20 +592,24 @@ impl AccountDatabase {
         let value = if disabled { 1i64 } else { 0i64 };
         let now = now_ms() as i64;
         match &self.backend {
-            SqlBackend::Sqlite(pool) => sqlx::query("UPDATE users SET disabled = ?, updated_at = ? WHERE id = ?")
-                .bind(value)
-                .bind(now)
-                .bind(user_id)
-                .execute(pool)
-                .await
-                .map(|_| ()),
-            SqlBackend::Postgres(pool) => sqlx::query("UPDATE users SET disabled = $1, updated_at = $2 WHERE id = $3")
-                .bind(value)
-                .bind(now)
-                .bind(user_id)
-                .execute(pool)
-                .await
-                .map(|_| ()),
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query("UPDATE users SET disabled = ?, updated_at = ? WHERE id = ?")
+                    .bind(value)
+                    .bind(now)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query("UPDATE users SET disabled = $1, updated_at = $2 WHERE id = $3")
+                    .bind(value)
+                    .bind(now)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
         }
         .map_err(|err| format!("Database query failed: {err}"))
     }
@@ -593,36 +657,49 @@ impl AccountDatabase {
         Ok(token)
     }
 
-    async fn update_password_hash(&self, user_id: &str, password_hash: &str, now: u64) -> AccountResult<()> {
+    async fn update_password_hash(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+        now: u64,
+    ) -> AccountResult<()> {
         match &self.backend {
-            SqlBackend::Sqlite(pool) => sqlx::query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
-                .bind(password_hash)
-                .bind(now as i64)
-                .bind(user_id)
-                .execute(pool)
-                .await
-                .map(|_| ()),
-            SqlBackend::Postgres(pool) => sqlx::query("UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3")
-                .bind(password_hash)
-                .bind(now as i64)
-                .bind(user_id)
-                .execute(pool)
-                .await
-                .map(|_| ()),
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
+                    .bind(password_hash)
+                    .bind(now as i64)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query("UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3")
+                    .bind(password_hash)
+                    .bind(now as i64)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
         }
         .map_err(|err| format!("Database query failed: {err}"))
     }
 
     async fn user_by_username(&self, username: &str) -> AccountResult<Option<StoredUser>> {
         let row = match &self.backend {
-            SqlBackend::Sqlite(pool) => sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users WHERE username = ?")
-                .bind(username)
-                .fetch_optional(pool)
-                .await,
-            SqlBackend::Postgres(pool) => sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users WHERE username = $1")
-                .bind(username)
-                .fetch_optional(pool)
-                .await,
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users WHERE username = ?")
+                    .bind(username)
+                    .fetch_optional(pool)
+                    .await
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users WHERE username = $1")
+                    .bind(username)
+                    .fetch_optional(pool)
+                    .await
+            }
         }
         .map_err(|err| format!("Database query failed: {err}"))?;
         row.map(|row| self.stored_from_raw(row)).transpose()
@@ -630,14 +707,18 @@ impl AccountDatabase {
 
     async fn user_by_id(&self, user_id: &str) -> AccountResult<Option<StoredUser>> {
         let row = match &self.backend {
-            SqlBackend::Sqlite(pool) => sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users WHERE id = ?")
-                .bind(user_id)
-                .fetch_optional(pool)
-                .await,
-            SqlBackend::Postgres(pool) => sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users WHERE id = $1")
-                .bind(user_id)
-                .fetch_optional(pool)
-                .await,
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users WHERE id = ?")
+                    .bind(user_id)
+                    .fetch_optional(pool)
+                    .await
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users WHERE id = $1")
+                    .bind(user_id)
+                    .fetch_optional(pool)
+                    .await
+            }
         }
         .map_err(|err| format!("Database query failed: {err}"))?;
         row.map(|row| self.stored_from_raw(row)).transpose()
@@ -663,7 +744,10 @@ impl AccountDatabase {
 }
 
 async fn prepare_sqlite_path(url: &str) -> AccountResult<()> {
-    let Some(path) = url.strip_prefix("sqlite://").or_else(|| url.strip_prefix("sqlite:")) else {
+    let Some(path) = url
+        .strip_prefix("sqlite://")
+        .or_else(|| url.strip_prefix("sqlite:"))
+    else {
         return Ok(());
     };
     if path == ":memory:" {
@@ -792,44 +876,37 @@ pub fn user_response(user: PublicUser, token: String) -> serde_json::Value {
 pub type SharedAccounts = Arc<AccountDatabase>;
 
 const RECOVERY_WORDS: &[&str] = &[
-    "able", "about", "above", "absorb", "access", "acid", "acorn", "across",
-    "act", "adapt", "add", "adjust", "admit", "adult", "aerobic", "affair",
-    "again", "agent", "agree", "ahead", "aim", "air", "alarm", "album",
-    "alert", "alien", "allow", "alpha", "always", "amazing", "amount", "anchor",
-    "ancient", "angle", "animal", "annual", "answer", "apart", "apple", "april",
-    "arch", "arena", "argue", "arise", "army", "around", "arrow", "artist",
-    "asset", "atom", "audit", "august", "aunt", "auto", "avoid", "awake",
-    "aware", "axis", "bacon", "badge", "balance", "bamboo", "basic", "beach",
-    "bean", "beauty", "because", "become", "before", "begin", "behind", "believe",
-    "bench", "best", "better", "beyond", "bicycle", "bird", "birth", "bitter",
-    "black", "blade", "blanket", "blend", "blind", "blue", "board", "bonus",
-    "book", "boost", "border", "borrow", "bottom", "brain", "brand", "brave",
-    "bread", "breeze", "brick", "bridge", "brief", "bright", "bring", "broad",
-    "broken", "brown", "brush", "bubble", "budget", "build", "bullet", "bundle",
-    "cable", "camera", "camp", "canal", "candy", "carbon", "career", "cargo",
-    "carpet", "castle", "casual", "cause", "center", "chair", "change", "charge",
-    "chase", "cheap", "check", "cheese", "cherry", "choice", "circle", "city",
-    "claim", "class", "clean", "client", "clock", "close", "cloud", "coach",
-    "coast", "coffee", "color", "column", "comfort", "comic", "common", "company",
-    "concert", "conduct", "confirm", "connect", "control", "cook", "corner", "correct",
-    "cost", "cotton", "craft", "crash", "credit", "crisp", "cross", "crowd",
-    "crystal", "culture", "curious", "custom", "cycle", "daily", "damage", "dance",
-    "danger", "daring", "data", "daughter", "dawn", "dealer", "debate", "decide",
-    "deck", "deep", "define", "degree", "deliver", "demand", "depend", "design",
-    "detail", "detect", "device", "diamond", "dinner", "direct", "discover", "doctor",
-    "domain", "donor", "double", "draft", "dragon", "dream", "dress", "drift",
-    "drive", "during", "early", "earth", "easily", "east", "echo", "edge",
-    "edit", "educate", "effort", "eight", "either", "electric", "element", "elite",
-    "else", "embark", "embody", "emerge", "emotion", "enable", "energy", "engine",
-    "enjoy", "enough", "enter", "equal", "error", "escape", "estate", "ethics",
-    "even", "event", "every", "evolve", "exact", "example", "excess", "exchange",
-    "excite", "exclude", "excuse", "execute", "exercise", "exist", "expand", "expect",
-    "expert", "explain", "extra", "fabric", "face", "fact", "fade", "faint",
-    "faith", "false", "family", "famous", "fancy", "farm", "fashion", "fast",
-    "fatal", "father", "fault", "feature", "federal", "feel", "fiber", "field",
-    "figure", "filter", "final", "finance", "finger", "finish", "fire", "firm",
-    "first", "fiscal", "flag", "flame", "flash", "flat", "flight", "float",
-    "floor", "flower", "focus", "follow", "force", "forest", "forget", "formal",
-    "fortune", "forum", "forward", "fossil", "found", "frame", "fresh", "friend",
-    "front", "frozen", "fruit", "fuel", "future"
+    "able", "about", "above", "absorb", "access", "acid", "acorn", "across", "act", "adapt", "add",
+    "adjust", "admit", "adult", "aerobic", "affair", "again", "agent", "agree", "ahead", "aim",
+    "air", "alarm", "album", "alert", "alien", "allow", "alpha", "always", "amazing", "amount",
+    "anchor", "ancient", "angle", "animal", "annual", "answer", "apart", "apple", "april", "arch",
+    "arena", "argue", "arise", "army", "around", "arrow", "artist", "asset", "atom", "audit",
+    "august", "aunt", "auto", "avoid", "awake", "aware", "axis", "bacon", "badge", "balance",
+    "bamboo", "basic", "beach", "bean", "beauty", "because", "become", "before", "begin", "behind",
+    "believe", "bench", "best", "better", "beyond", "bicycle", "bird", "birth", "bitter", "black",
+    "blade", "blanket", "blend", "blind", "blue", "board", "bonus", "book", "boost", "border",
+    "borrow", "bottom", "brain", "brand", "brave", "bread", "breeze", "brick", "bridge", "brief",
+    "bright", "bring", "broad", "broken", "brown", "brush", "bubble", "budget", "build", "bullet",
+    "bundle", "cable", "camera", "camp", "canal", "candy", "carbon", "career", "cargo", "carpet",
+    "castle", "casual", "cause", "center", "chair", "change", "charge", "chase", "cheap", "check",
+    "cheese", "cherry", "choice", "circle", "city", "claim", "class", "clean", "client", "clock",
+    "close", "cloud", "coach", "coast", "coffee", "color", "column", "comfort", "comic", "common",
+    "company", "concert", "conduct", "confirm", "connect", "control", "cook", "corner", "correct",
+    "cost", "cotton", "craft", "crash", "credit", "crisp", "cross", "crowd", "crystal", "culture",
+    "curious", "custom", "cycle", "daily", "damage", "dance", "danger", "daring", "data",
+    "daughter", "dawn", "dealer", "debate", "decide", "deck", "deep", "define", "degree",
+    "deliver", "demand", "depend", "design", "detail", "detect", "device", "diamond", "dinner",
+    "direct", "discover", "doctor", "domain", "donor", "double", "draft", "dragon", "dream",
+    "dress", "drift", "drive", "during", "early", "earth", "easily", "east", "echo", "edge",
+    "edit", "educate", "effort", "eight", "either", "electric", "element", "elite", "else",
+    "embark", "embody", "emerge", "emotion", "enable", "energy", "engine", "enjoy", "enough",
+    "enter", "equal", "error", "escape", "estate", "ethics", "even", "event", "every", "evolve",
+    "exact", "example", "excess", "exchange", "excite", "exclude", "excuse", "execute", "exercise",
+    "exist", "expand", "expect", "expert", "explain", "extra", "fabric", "face", "fact", "fade",
+    "faint", "faith", "false", "family", "famous", "fancy", "farm", "fashion", "fast", "fatal",
+    "father", "fault", "feature", "federal", "feel", "fiber", "field", "figure", "filter", "final",
+    "finance", "finger", "finish", "fire", "firm", "first", "fiscal", "flag", "flame", "flash",
+    "flat", "flight", "float", "floor", "flower", "focus", "follow", "force", "forest", "forget",
+    "formal", "fortune", "forum", "forward", "fossil", "found", "frame", "fresh", "friend",
+    "front", "frozen", "fruit", "fuel", "future",
 ];

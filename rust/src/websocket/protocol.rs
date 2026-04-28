@@ -146,15 +146,38 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
-        return respond_error(state, session_id, 2, "Account session required", request_id(&d)).await;
+        return respond_error(
+            state,
+            session_id,
+            2,
+            "Account session required",
+            request_id(&d),
+        )
+        .await;
     };
 
     let account = match state.accounts.authenticate_token(token).await {
         Ok(Some(account)) => account,
-        Ok(None) => return respond_error(state, session_id, 2, "Invalid account session", request_id(&d)).await,
+        Ok(None) => {
+            return respond_error(
+                state,
+                session_id,
+                2,
+                "Invalid account session",
+                request_id(&d),
+            )
+            .await
+        }
         Err(err) => {
             error!("Failed to authenticate websocket token: {}", err);
-            return respond_error(state, session_id, 2, "Authentication failed", request_id(&d)).await;
+            return respond_error(
+                state,
+                session_id,
+                2,
+                "Authentication failed",
+                request_id(&d),
+            )
+            .await;
         }
     };
     let requested_status = d
@@ -163,12 +186,27 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
         .map(|value| parse_user_status(Some(value)))
         .unwrap_or(account.status);
     if requested_status != account.status {
-        if let Err(err) = state.accounts.update_status(&account.id, requested_status).await {
+        if let Err(err) = state
+            .accounts
+            .update_status(&account.id, requested_status)
+            .await
+        {
             error!("Failed to persist user status: {}", err);
         }
     }
 
-    let (final_username, account_id, is_admin, exchange_key, voice_chat, version, is_mobile, is_secure, profile, status) = {
+    let (
+        final_username,
+        account_id,
+        is_admin,
+        exchange_key,
+        voice_chat,
+        version,
+        is_mobile,
+        is_secure,
+        profile,
+        status,
+    ) = {
         let mut players = state.players.write().await;
         let Some(player) = players.get_mut(session_id) else {
             return false;
@@ -1226,7 +1264,14 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
             .map(|flags| flags.calls_enabled)
             .unwrap_or(true)
     {
-        return respond_error(state, session_id, 98, "Calls are disabled by the server", request_id(&d)).await;
+        return respond_error(
+            state,
+            session_id,
+            98,
+            "Calls are disabled by the server",
+            request_id(&d),
+        )
+        .await;
     }
     let media = normalize_call_media(d.get("media"), is_voice_chat);
     let voice_result = {
@@ -1400,7 +1445,14 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
             .map(|flags| flags.calls_enabled)
             .unwrap_or(true)
     {
-        return respond_error(state, session_id, 110, "Calls are disabled by the server", request_id(&d)).await;
+        return respond_error(
+            state,
+            session_id,
+            110,
+            "Calls are disabled by the server",
+            request_id(&d),
+        )
+        .await;
     }
     let (audio, camera, screen) = normalize_call_media(d.get("media"), is_voice_chat);
 
@@ -1478,7 +1530,14 @@ async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> b
         .map(|flags| flags.calls_enabled)
         .unwrap_or(true)
     {
-        return respond_error(state, session_id, 111, "Calls are disabled by the server", request_id(&d)).await;
+        return respond_error(
+            state,
+            session_id,
+            111,
+            "Calls are disabled by the server",
+            request_id(&d),
+        )
+        .await;
     }
     let Some(game_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
         return respond_error(state, session_id, 111, "Missing gameId", request_id(&d)).await;

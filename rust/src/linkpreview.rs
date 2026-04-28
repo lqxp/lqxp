@@ -60,13 +60,23 @@ fn is_public_ipv4(ip: &Ipv4Addr) -> bool {
     }
     let o = ip.octets();
     // private ranges
-    if o[0] == 10 { return false; }
-    if o[0] == 172 && (16..=31).contains(&o[1]) { return false; }
-    if o[0] == 192 && o[1] == 168 { return false; }
+    if o[0] == 10 {
+        return false;
+    }
+    if o[0] == 172 && (16..=31).contains(&o[1]) {
+        return false;
+    }
+    if o[0] == 192 && o[1] == 168 {
+        return false;
+    }
     // shared address space 100.64.0.0/10
-    if o[0] == 100 && (64..=127).contains(&o[1]) { return false; }
+    if o[0] == 100 && (64..=127).contains(&o[1]) {
+        return false;
+    }
     // benchmarking 198.18.0.0/15
-    if o[0] == 198 && (o[1] == 18 || o[1] == 19) { return false; }
+    if o[0] == 198 && (o[1] == 18 || o[1] == 19) {
+        return false;
+    }
     // 169.254.x (link-local handled above) but also 0.x is unspecified
     true
 }
@@ -77,9 +87,13 @@ fn is_public_ipv6(ip: &Ipv6Addr) -> bool {
     }
     let seg = ip.segments();
     // ULA fc00::/7
-    if (seg[0] & 0xfe00) == 0xfc00 { return false; }
+    if (seg[0] & 0xfe00) == 0xfc00 {
+        return false;
+    }
     // Link-local fe80::/10
-    if (seg[0] & 0xffc0) == 0xfe80 { return false; }
+    if (seg[0] & 0xffc0) == 0xfe80 {
+        return false;
+    }
     // IPv4-mapped ::ffff:0:0/96 → check the embedded v4
     if seg[0] == 0 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0 && seg[4] == 0 && seg[5] == 0xffff {
         let v4 = Ipv4Addr::new(
@@ -100,9 +114,15 @@ fn validate_url(raw: &str) -> Option<Url> {
         _ => return None,
     }
     let host = parsed.host_str()?;
-    if host.is_empty() { return None; }
-    if host.eq_ignore_ascii_case("localhost") { return None; }
-    if host.len() > 253 { return None; }
+    if host.is_empty() {
+        return None;
+    }
+    if host.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    if host.len() > 253 {
+        return None;
+    }
 
     // Resolve all addresses and require every one to be public. If DNS
     // resolves to a mix of public/private, reject conservatively.
@@ -116,7 +136,9 @@ fn validate_url(raw: &str) -> Option<Url> {
             return None;
         }
     }
-    if !any { return None; }
+    if !any {
+        return None;
+    }
     Some(parsed)
 }
 
@@ -125,7 +147,11 @@ struct Cache {
 }
 
 impl Cache {
-    fn new() -> Self { Self { entries: Vec::new() } }
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
 
     fn get(&mut self, url: &str) -> Option<Option<LinkPreview>> {
         self.entries.retain(|(_, ts, _)| ts.elapsed() < CACHE_TTL);
@@ -137,7 +163,9 @@ impl Cache {
 
     fn put(&mut self, url: String, preview: Option<LinkPreview>) {
         self.entries.retain(|(_, ts, _)| ts.elapsed() < CACHE_TTL);
-        if self.entries.len() >= 256 { self.entries.remove(0); }
+        if self.entries.len() >= 256 {
+            self.entries.remove(0);
+        }
         self.entries.push((url, Instant::now(), preview));
     }
 }
@@ -194,9 +222,13 @@ fn extract_attr(tag: &str, attr: &str) -> Option<String> {
     let mut start = lower.find(&needle)?;
     start += needle.len();
     let bytes = tag.as_bytes();
-    if start >= bytes.len() { return None; }
+    if start >= bytes.len() {
+        return None;
+    }
     let q = bytes[start];
-    if q != b'"' && q != b'\'' { return None; }
+    if q != b'"' && q != b'\'' {
+        return None;
+    }
     start += 1;
     let slice = &tag[start..];
     let end = slice.find(q as char)?;
@@ -216,13 +248,17 @@ fn parse_og(html: &str, base: &Url) -> Option<LinkPreview> {
             .map(|p| p.to_ascii_lowercase())
             .unwrap_or_default();
         let content = extract_attr(tag, "content").unwrap_or_default();
-        if content.is_empty() { continue; }
+        if content.is_empty() {
+            continue;
+        }
 
         match prop.as_str() {
             "og:title" | "twitter:title" if preview.title.is_empty() => {
                 preview.title = truncate(&content, 300);
             }
-            "og:description" | "twitter:description" | "description" if preview.description.is_empty() => {
+            "og:description" | "twitter:description" | "description"
+                if preview.description.is_empty() =>
+            {
                 preview.description = truncate(&content, 500);
             }
             "og:image" | "twitter:image" | "twitter:image:src" if preview.image.is_empty() => {

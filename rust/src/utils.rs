@@ -1,4 +1,7 @@
-use std::{net::SocketAddr, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    net::SocketAddr,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use axum::{extract::ws::Message, http::HeaderMap};
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
@@ -13,7 +16,8 @@ pub fn send_json(tx: &mpsc::UnboundedSender<Message>, payload: Value) {
 }
 
 pub fn request_id(value: &Value) -> Option<String> {
-    value.get("requestId")
+    value
+        .get("requestId")
         .and_then(Value::as_str)
         .map(str::to_owned)
 }
@@ -40,7 +44,10 @@ pub fn admin_allowed(state: &AppState, d: &Value) -> bool {
 }
 
 pub fn extract_client_ip(headers: &HeaderMap, fallback: SocketAddr) -> String {
-    if let Some(value) = headers.get("x-forwarded-for").and_then(|value| value.to_str().ok()) {
+    if let Some(value) = headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+    {
         if let Some(ip) = value.split(',').next() {
             return ip.trim().to_owned();
         }

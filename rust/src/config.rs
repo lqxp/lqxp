@@ -172,7 +172,6 @@ fn default_register_enabled() -> bool {
     true
 }
 
-
 pub fn init_tracing() {
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
     tracing_subscriber::fmt()

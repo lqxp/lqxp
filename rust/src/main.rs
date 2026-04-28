@@ -13,7 +13,13 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::{net::TcpListener, sync::RwLock};
 use tracing::info;
 
-use crate::{accounts::AccountDatabase, config::{init_tracing, load_blocklist_terms, load_config}, db::JsonDatabase, server::build_router, state::AppState};
+use crate::{
+    accounts::AccountDatabase,
+    config::{init_tracing, load_blocklist_terms, load_config},
+    db::JsonDatabase,
+    server::build_router,
+    state::AppState,
+};
 
 #[tokio::main]
 async fn main() {

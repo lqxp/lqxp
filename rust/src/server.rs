@@ -6,10 +6,9 @@ use std::{
 use axum::{
     extract::{ws::WebSocketUpgrade, ConnectInfo, Path as AxumPath, State},
     http::{HeaderMap, StatusCode},
-    Json,
     response::{IntoResponse, Response},
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -33,7 +32,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/auth/username", post(auth_username))
         .route("/api/admin/overview", get(admin_overview))
         .route("/api/admin/features", post(admin_features))
-        .route("/api/admin/users/:user_id/disabled", post(admin_user_disabled))
+        .route(
+            "/api/admin/users/:user_id/disabled",
+            post(admin_user_disabled),
+        )
         .route("/ws", get(ws_upgrade))
         .route("/*path", get(public_asset))
         .with_state(state)
@@ -87,7 +89,11 @@ async fn auth_register(
     if username_hits_blocklist(&body.username, &state.blocklist_terms) {
         return api_error(StatusCode::BAD_REQUEST, "Username is not allowed.");
     }
-    match state.accounts.register(&body.username, &body.password).await {
+    match state
+        .accounts
+        .register(&body.username, &body.password)
+        .await
+    {
         Ok((user, token, recovery_words)) => Json(json!({
             "ok": true,
             "token": token,
@@ -155,7 +161,11 @@ async fn auth_username(
     let Some(user) = authenticated_user(&state, &headers).await else {
         return api_error(StatusCode::UNAUTHORIZED, "Invalid session.");
     };
-    match state.accounts.change_username(&user.id, &body.username).await {
+    match state
+        .accounts
+        .change_username(&user.id, &body.username)
+        .await
+    {
         Ok(user) => Json(json!({ "ok": true, "user": user })).into_response(),
         Err(err) => api_error(StatusCode::BAD_REQUEST, &err),
     }
@@ -242,7 +252,11 @@ async fn admin_user_disabled(
     if !user.admin {
         return api_error(StatusCode::FORBIDDEN, "Admin only.");
     }
-    match state.accounts.set_user_disabled(&user_id, body.disabled).await {
+    match state
+        .accounts
+        .set_user_disabled(&user_id, body.disabled)
+        .await
+    {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
         Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
     }
@@ -253,7 +267,12 @@ async fn authenticated_user(
     headers: &HeaderMap,
 ) -> Option<crate::accounts::AuthenticatedUser> {
     let token = bearer_token(headers)?;
-    state.accounts.authenticate_token(&token).await.ok().flatten()
+    state
+        .accounts
+        .authenticate_token(&token)
+        .await
+        .ok()
+        .flatten()
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -351,10 +370,7 @@ fn inject_runtime_config(html: &str, state: &SharedState) -> String {
             "callsUnavailableReason": calls_unavailable_reason
         }
     });
-    let script = format!(
-        r#"<script>window.__QXP_RUNTIME__ = {};</script>"#,
-        payload
-    );
+    let script = format!(r#"<script>window.__QXP_RUNTIME__ = {};</script>"#, payload);
     html.replace("</head>", &format!("{script}\n  </head>"))
 }
 
