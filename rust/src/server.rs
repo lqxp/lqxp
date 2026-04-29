@@ -6,7 +6,7 @@ use std::{
 
 use axum::{
     extract::{ws::WebSocketUpgrade, ConnectInfo, Path as AxumPath, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -14,6 +14,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use tokio::fs;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     accounts::{user_response, username_hits_blocklist},
@@ -39,7 +40,15 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/ws", get(ws_upgrade))
         .route("/*path", get(public_asset))
+        .layer(cors_layer())
         .with_state(state)
+}
+
+fn cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
 }
 
 #[derive(Debug, Deserialize)]
@@ -356,7 +365,7 @@ async fn serve_webchat_index(path: &Path, origin: Option<&str>, state: &SharedSt
                 Some(origin) => absolutize_social_meta(&html, origin),
                 None => html,
             };
-            let html = inject_runtime_config(&html, state);
+            let html = inject_runtime_config(&html, state, origin);
 
             Response::builder()
                 .status(StatusCode::OK)
@@ -372,8 +381,12 @@ async fn serve_webchat_index(path: &Path, origin: Option<&str>, state: &SharedSt
     }
 }
 
-fn inject_runtime_config(html: &str, state: &SharedState) -> String {
+fn inject_runtime_config(html: &str, state: &SharedState, origin: Option<&str>) -> String {
     let rtc = &state.config.rtc;
+    let server_origin = origin
+        .map(str::to_owned)
+        .or_else(|| configured_public_origin(&state.config.api.public_domain));
+    let ws_url = server_origin.as_deref().and_then(websocket_url_for_origin);
     let relay_ready = !rtc.turn_urls.is_empty()
         && !rtc.turn_username.trim().is_empty()
         && !rtc.turn_credential.trim().is_empty();
@@ -386,7 +399,7 @@ fn inject_runtime_config(html: &str, state: &SharedState) -> String {
         String::new()
     };
 
-    let payload = json!({
+    let mut payload = json!({
         "rtc": {
             "relayOnly": rtc.relay_only,
             "turnUrls": rtc.turn_urls,
@@ -396,8 +409,60 @@ fn inject_runtime_config(html: &str, state: &SharedState) -> String {
             "callsUnavailableReason": calls_unavailable_reason
         }
     });
+    if let Some(server_origin) = server_origin {
+        payload["serverOrigin"] = json!(server_origin);
+        payload["apiBaseUrl"] = json!(server_origin);
+    }
+    if let Some(ws_url) = ws_url {
+        payload["wsUrl"] = json!(ws_url);
+    }
     let script = format!(r#"<script>window.__QXP_RUNTIME__ = {};</script>"#, payload);
     html.replace("</head>", &format!("{script}\n  </head>"))
+}
+
+fn configured_public_origin(public_domain: &str) -> Option<String> {
+    let value = public_domain.trim().trim_end_matches('/');
+    if value.is_empty() {
+        return None;
+    }
+    if value.starts_with("http://") || value.starts_with("https://") {
+        let parsed = url::Url::parse(value).ok()?;
+        if matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some() {
+            return Some(value.to_owned());
+        }
+        return None;
+    }
+
+    let host = sanitized_host(value)?;
+    let proto = if host.starts_with("localhost")
+        || host.starts_with("127.")
+        || host.starts_with("[::1]")
+    {
+        "http"
+    } else {
+        "https"
+    };
+    Some(format!("{proto}://{host}"))
+}
+
+fn websocket_url_for_origin(origin: &str) -> Option<String> {
+    let parsed = url::Url::parse(origin).ok()?;
+    let scheme = match parsed.scheme() {
+        "https" => "wss",
+        "http" => "ws",
+        _ => return None,
+    };
+    let host = parsed.host_str()?;
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    let authority = match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    };
+    Some(format!("{scheme}://{authority}/ws"))
 }
 
 fn absolutize_social_meta(html: &str, origin: &str) -> String {

@@ -1290,6 +1290,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "toml",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "url",
