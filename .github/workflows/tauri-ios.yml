@@ -1,0 +1,175 @@
+name: Tauri iOS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      signed:
+        description: Build a signed IPA using Apple signing secrets
+        required: true
+        default: false
+        type: boolean
+      export-method:
+        description: Xcode export method for signed IPA builds
+        required: true
+        default: development
+        type: choice
+        options:
+          - development
+          - ad-hoc
+          - app-store-connect
+          - enterprise
+      build-number:
+        description: Optional iOS CFBundleVersion override
+        required: false
+        type: string
+
+jobs:
+  ios-simulator:
+    name: iOS simulator build
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+
+      - name: Install CocoaPods
+        run: |
+          if ! command -v pod >/dev/null 2>&1; then
+            brew install cocoapods
+          fi
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix web
+
+      - name: Typecheck frontend
+        run: npm --prefix web run typecheck
+
+      - name: Check Tauri crate
+        run: cargo check --manifest-path web/src-tauri/Cargo.toml
+
+      - name: Generate iOS project
+        run: npm --prefix web run ios:init
+
+      - name: Build iOS simulator app
+        run: npm --prefix web run tauri -- ios build --target aarch64-apple-ios-sim
+        env:
+          QXP_RUNTIME_CONFIG_URL: ${{ vars.QXP_RUNTIME_CONFIG_URL || 'https://qxp.kisakay.com/' }}
+          QXP_SERVER_ORIGIN: ${{ vars.QXP_SERVER_ORIGIN || 'https://qxp.kisakay.com' }}
+
+      - name: Upload simulator artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qxprotocol-ios-simulator
+          path: web/src-tauri/gen/apple/build/**/*.app
+          if-no-files-found: error
+
+  ios-signed-ipa:
+    name: Signed iOS IPA
+    runs-on: macos-15
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.signed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Install CocoaPods
+        run: |
+          if ! command -v pod >/dev/null 2>&1; then
+            brew install cocoapods
+          fi
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix web
+
+      - name: Import Apple signing assets
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD || github.run_id }}
+        run: |
+          set -euo pipefail
+
+          test -n "$APPLE_CERTIFICATE_P12_BASE64"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          test -n "$APPLE_PROVISIONING_PROFILE_BASE64"
+
+          decode_base64() {
+            base64 --decode 2>/dev/null || base64 -D
+          }
+
+          CERTIFICATE_PATH="$RUNNER_TEMP/apple_certificate.p12"
+          PROFILE_PATH="$RUNNER_TEMP/qxprotocol.mobileprovision"
+          PROFILE_PLIST="$RUNNER_TEMP/profile.plist"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | decode_base64 > "$CERTIFICATE_PATH"
+          printf '%s' "$APPLE_PROVISIONING_PROFILE_BASE64" | decode_base64 > "$PROFILE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' "$PROFILE_PLIST")
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+
+      - name: Generate iOS project
+        run: npm --prefix web run ios:init
+
+      - name: Build signed IPA
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+          QXP_RUNTIME_CONFIG_URL: ${{ vars.QXP_RUNTIME_CONFIG_URL || 'https://qxp.kisakay.com/' }}
+          QXP_SERVER_ORIGIN: ${{ vars.QXP_SERVER_ORIGIN || 'https://qxp.kisakay.com' }}
+          EXPORT_METHOD: ${{ inputs.export-method }}
+          BUILD_NUMBER: ${{ inputs.build-number }}
+        run: |
+          set -euo pipefail
+
+          args=(ios build --export-method "$EXPORT_METHOD")
+          if [[ -n "${BUILD_NUMBER:-}" ]]; then
+            args+=(--build-number "$BUILD_NUMBER")
+          fi
+
+          npm --prefix web run tauri -- "${args[@]}"
+
+      - name: Upload signed IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: qxprotocol-ios-ipa
+          path: web/src-tauri/gen/apple/build/arm64/*.ipa
+          if-no-files-found: error
