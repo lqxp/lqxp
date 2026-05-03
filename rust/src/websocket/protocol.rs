@@ -16,7 +16,7 @@ use crate::{
 };
 
 const MAX_ROOM_MESSAGES: usize = 150;
-const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_B64_LEN: usize = ((MAX_ATTACHMENT_BYTES + 2) / 3) * 4 + 4;
 const MAX_FILENAME_LEN: usize = 128;
 const MAX_MIMETYPE_LEN: usize = 96;
@@ -2670,14 +2670,14 @@ fn parse_attachment(raw: Option<&Value>) -> Result<Option<Attachment>, &'static 
         return Err("Attachment dataB64 is empty");
     }
     if data_b64.len() > MAX_ATTACHMENT_B64_LEN {
-        return Err("Attachment too large (10MB max)");
+        return Err("Attachment too large (25MB max)");
     }
 
     let decoded = B64
         .decode(data_b64.as_bytes())
         .map_err(|_| "Attachment dataB64 is not valid base64")?;
     if decoded.len() > MAX_ATTACHMENT_BYTES {
-        return Err("Attachment too large (10MB max)");
+        return Err("Attachment too large (25MB max)");
     }
 
     let filename = obj
