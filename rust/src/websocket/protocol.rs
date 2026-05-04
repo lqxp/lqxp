@@ -204,6 +204,8 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
         is_admin,
         exchange_key,
         voice_chat,
+        client_id,
+        platform,
         version,
         is_mobile,
         is_secure,
@@ -236,6 +238,8 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
             .and_then(Value::as_str)
             .map(str::to_owned)
             .filter(|value| !value.trim().is_empty());
+        player.client_id = sanitize_client_id(d.get("clientId").and_then(Value::as_str));
+        player.platform = sanitize_platform(d.get("platform").and_then(Value::as_str));
         player.is_mobile = d.get("isMobile").and_then(Value::as_bool);
         player.is_secure = d.get("isSecure").and_then(Value::as_bool);
         player.profile = account.profile.clone();
@@ -247,6 +251,8 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
             player.is_admin,
             player.exchange_key.clone(),
             player.is_voice_chat,
+            player.client_id.clone(),
+            player.platform.clone(),
             player.version.clone(),
             player.is_mobile,
             player.is_secure,
@@ -304,6 +310,8 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
                         "isSecure": is_secure,
                         "isMobile": is_mobile,
                         "isVoiceChat": voice_chat,
+                        "clientId": client_id,
+                        "platform": platform,
                         "profile": profile,
                         "status": status
                     }
@@ -502,6 +510,12 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
         if let Some(player) = players.get_mut(session_id) {
             let previous_status = player.status;
             let previous_voice_chat = player.is_voice_chat;
+            if let Some(client_id) = d.get("clientId").and_then(Value::as_str) {
+                player.client_id = sanitize_client_id(Some(client_id));
+            }
+            if let Some(platform) = d.get("platform").and_then(Value::as_str) {
+                player.platform = sanitize_platform(Some(platform));
+            }
             player.delete_messages_on_leave = delete_messages_on_leave;
             if let Some(profile) = profile_update.clone() {
                 player.profile = profile;
@@ -521,6 +535,8 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
                 player.status,
                 previous_status,
                 previous_voice_chat,
+                player.client_id.clone(),
+                player.platform.clone(),
                 player.rooms.iter().cloned().collect::<Vec<_>>(),
             ))
         } else {
@@ -528,8 +544,17 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
         }
     };
 
-    let (user_id, username, profile, status, previous_status, previous_voice_chat, rooms) =
-        match update_context {
+    let (
+        user_id,
+        username,
+        profile,
+        status,
+        previous_status,
+        previous_voice_chat,
+        client_id,
+        platform,
+        rooms,
+    ) = match update_context {
             Ok(context) => context,
             Err(_) => {
                 return respond_error(
@@ -601,6 +626,8 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
                         "user": username.clone(),
                         "status": status,
                         "visible": status != UserPresenceStatus::Invisible,
+                        "clientId": client_id.clone(),
+                        "platform": platform.clone(),
                         "profile": profile.clone()
                     }
                 }),
@@ -617,6 +644,8 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
                             "user": username.clone(),
                             "status": status,
                             "isVoiceChat": false,
+                            "clientId": client_id.clone(),
+                            "platform": platform.clone(),
                             "media": call_media_json(false, false, false)
                         }
                     }),
@@ -1654,6 +1683,8 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
                 Ok((
                     player.username.clone(),
                     player.status,
+                    player.client_id.clone(),
+                    player.platform.clone(),
                     player.rooms.iter().cloned().collect::<Vec<_>>(),
                     call_media_json(player.is_voice_chat, player.call_camera, player.call_screen),
                 ))
@@ -1663,7 +1694,7 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
         }
     };
 
-    let (username, status, rooms, media_json) = match voice_result {
+    let (username, status, client_id, platform, rooms, media_json) = match voice_result {
         Ok(values) => values,
         Err(message) => return respond_error(state, session_id, 98, message, request_id(&d)).await,
     };
@@ -1679,6 +1710,8 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
                     "user": username.clone(),
                     "status": status,
                     "isVoiceChat": is_voice_chat,
+                    "clientId": client_id.clone(),
+                    "platform": platform.clone(),
                     "media": media_json.clone()
                 }
             }),
@@ -1838,6 +1871,8 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
                 Ok((
                     player.username.clone(),
                     player.status,
+                    player.client_id.clone(),
+                    player.platform.clone(),
                     player.rooms.iter().cloned().collect::<Vec<_>>(),
                     call_media_json(
                         audio && is_voice_chat,
@@ -1851,7 +1886,7 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
         }
     };
 
-    let (username, status, rooms, media_json) = match update_result {
+    let (username, status, client_id, platform, rooms, media_json) = match update_result {
         Ok(values) => values,
         Err(message) => {
             return respond_error(state, session_id, 110, message, request_id(&d)).await
@@ -1869,6 +1904,8 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
                     "user": username.clone(),
                     "status": status,
                     "isVoiceChat": is_voice_chat,
+                    "clientId": client_id.clone(),
+                    "platform": platform.clone(),
                     "media": media_json.clone()
                 }
             }),
@@ -1913,6 +1950,7 @@ async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> b
     let Some(to_user) = d.get("to").and_then(Value::as_str).map(str::trim) else {
         return respond_error(state, session_id, 111, "Missing target", request_id(&d)).await;
     };
+    let to_client_id = sanitize_client_id(d.get("toClientId").and_then(Value::as_str));
     let signal_type = d
         .get("type")
         .and_then(Value::as_str)
@@ -1929,7 +1967,7 @@ async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> b
         .await;
     }
 
-    let (from_user, target_tx) = {
+    let (from_user, from_client_id, from_platform, target_tx) = {
         let players = state.players.read().await;
         let Some(sender) = players.get(session_id) else {
             return respond_error(
@@ -1946,7 +1984,10 @@ async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> b
         }
 
         let target = players.values().find(|player| {
-            player.username == to_user && player.rooms.contains(game_id) && player.is_voice_chat
+            player.username == to_user
+                && player.rooms.contains(game_id)
+                && player.is_voice_chat
+                && (to_client_id.is_empty() || player.client_id == to_client_id)
         });
         let Some(target) = target else {
             return respond_error(
@@ -1958,13 +1999,21 @@ async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> b
             )
             .await;
         };
-        (sender.username.clone(), target.tx.clone())
+        (
+            sender.username.clone(),
+            sender.client_id.clone(),
+            sender.platform.clone(),
+            target.tx.clone(),
+        )
     };
 
     let mut clean = json!({
         "gameId": game_id,
         "from": from_user,
+        "fromClientId": from_client_id,
+        "fromPlatform": from_platform,
         "to": to_user,
+        "toClientId": to_client_id,
         "type": signal_type
     });
     if let Some(sdp) = d.get("sdp").and_then(Value::as_str) {
@@ -2604,6 +2653,8 @@ async fn room_call_players(
             json!({
                 "user": player.username,
                 "isVoiceChat": player.is_voice_chat,
+                "clientId": player.client_id,
+                "platform": player.platform,
                 "media": call_media_json(player.is_voice_chat, player.call_camera, player.call_screen),
                 "status": player.status
             })
@@ -2817,6 +2868,27 @@ fn sanitize_profile_text(value: &str, limit: usize) -> String {
         .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
         .take(limit)
         .collect()
+}
+
+fn sanitize_client_id(value: Option<&str>) -> String {
+    value
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        .take(48)
+        .collect()
+}
+
+fn sanitize_platform(value: Option<&str>) -> String {
+    match value.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "android" => "android".to_owned(),
+        "ios" => "ios".to_owned(),
+        "mobile" => "mobile".to_owned(),
+        "desktop" => "desktop".to_owned(),
+        "web" => "web".to_owned(),
+        _ => "web".to_owned(),
+    }
 }
 
 fn parse_profile_image(

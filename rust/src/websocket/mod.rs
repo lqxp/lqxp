@@ -147,6 +147,8 @@ async fn register_connection(
             is_voice_chat: false,
             call_camera: false,
             call_screen: false,
+            client_id: String::new(),
+            platform: "web".to_owned(),
             version: "unknown".to_owned(),
             last_message_timestamp: None,
             last_voice_chunk_timestamp: None,
@@ -216,7 +218,9 @@ pub async fn disconnect_player(state: &SharedState, session_id: &str) {
                         "gameId": game_id,
                         "user": username.clone(),
                         "status": player.status,
-                        "isVoiceChat": false
+                        "isVoiceChat": false,
+                        "clientId": player.client_id.clone(),
+                        "platform": player.platform.clone()
                     }
                 }),
             )

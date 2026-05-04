@@ -38,6 +38,8 @@ pub struct PlayerSession {
     pub is_voice_chat: bool,
     pub call_camera: bool,
     pub call_screen: bool,
+    pub client_id: String,
+    pub platform: String,
     pub version: String,
     pub last_message_timestamp: Option<u64>,
     pub last_voice_chunk_timestamp: Option<u64>,
