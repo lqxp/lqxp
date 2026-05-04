@@ -356,12 +356,14 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
     let broadcast_roster = room_usernames(state, game_id, None).await;
     let broadcast_profiles = room_profiles(state, game_id, None).await;
     let broadcast_statuses = room_statuses(state, game_id, None).await;
+    let broadcast_platforms = room_platforms(state, game_id, None).await;
     let broadcast_voice_roster = room_voice_usernames(state, game_id, None).await;
     let broadcast_call_players = room_call_players(state, game_id, None).await;
 
     let roster = room_usernames(state, game_id, Some(session_id)).await;
     let profiles = room_profiles(state, game_id, Some(session_id)).await;
     let statuses = room_statuses(state, game_id, Some(session_id)).await;
+    let platforms = room_platforms(state, game_id, Some(session_id)).await;
     let voice_roster = room_voice_usernames(state, game_id, Some(session_id)).await;
     let call_players = room_call_players(state, game_id, Some(session_id)).await;
 
@@ -378,6 +380,7 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "players": broadcast_roster,
                     "profiles": broadcast_profiles,
                     "statuses": broadcast_statuses,
+                    "platforms": broadcast_platforms,
                     "voicePlayers": broadcast_voice_roster,
                     "callPlayers": broadcast_call_players
                 }
@@ -398,6 +401,7 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "players": roster,
                     "profiles": profiles,
                     "statuses": statuses,
+                    "platforms": platforms,
                     "voicePlayers": voice_roster,
                     "callPlayers": call_players,
                     "alreadyJoined": already_in
@@ -2617,6 +2621,28 @@ async fn room_statuses(
         statuses.insert(player.username.clone(), json!(player.status));
     }
     Value::Object(statuses)
+}
+
+async fn room_platforms(
+    state: &SharedState,
+    game_id: &str,
+    viewer_session_id: Option<&str>,
+) -> Value {
+    let players = state.players.read().await;
+    let mut platforms = Map::new();
+    for player in players
+        .values()
+        .filter(|player| player.rooms.contains(game_id) && is_visible_to(player, viewer_session_id))
+    {
+        let entry = platforms.entry(player.username.clone()).or_insert_with(|| json!([]));
+        if let Some(arr) = entry.as_array_mut() {
+            let platform = sanitize_platform(Some(&player.platform));
+            if !arr.iter().any(|value| value.as_str() == Some(platform.as_str())) {
+                arr.push(json!(platform));
+            }
+        }
+    }
+    Value::Object(platforms)
 }
 
 async fn room_voice_usernames(
