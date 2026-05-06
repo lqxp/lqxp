@@ -8,8 +8,7 @@ cargo build -r
 
 cd web
 bun install
-bun vite build
-node ./scripts/sync-runtime-config.mjs --out dist/runtime-config.js
+bun run build
 cd ..
 
 pm2 restart qxp-app
