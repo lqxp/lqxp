@@ -449,6 +449,49 @@ impl AccountDatabase {
         .map_err(|err| format!("Database query failed: {err}"))
     }
 
+    pub async fn delete_account(&self, token: &str, password: &str) -> AccountResult<()> {
+        let Some(user) = self.authenticate_token(token).await? else {
+            return Err("Not authenticated.".to_owned());
+        };
+        let stored = self
+            .user_by_id(&user.id)
+            .await?
+            .ok_or("Account not found.")?;
+        verify_secret(password, &stored.password_hash)
+            .map_err(|_| "Invalid password.".to_owned())?;
+        let user_id = user.id.clone();
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+                    .bind(&user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| format!("Database query failed: {err}"))?;
+                sqlx::query("DELETE FROM users WHERE id = ?")
+                    .bind(&user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| format!("Database query failed: {err}"))
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+                    .bind(&user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| format!("Database query failed: {err}"))?;
+                sqlx::query("DELETE FROM users WHERE id = $1")
+                    .bind(&user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| format!("Database query failed: {err}"))
+            }
+        }
+    }
+
     pub async fn me(&self, token: &str) -> AccountResult<Option<PublicUser>> {
         let Some(user) = self.authenticate_token(token).await? else {
             return Ok(None);

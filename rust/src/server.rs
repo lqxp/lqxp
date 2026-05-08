@@ -31,6 +31,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/auth/login", post(auth_login))
         .route("/api/auth/recover", post(auth_recover))
         .route("/api/auth/logout", post(auth_logout))
+        .route("/api/auth/delete", post(auth_delete))
         .route("/api/auth/username", post(auth_username))
         .route("/api/admin/overview", get(admin_overview))
         .route("/api/admin/features", post(admin_features))
@@ -69,6 +70,11 @@ struct AuthRecoverRequest {
     username: String,
     recovery_words: String,
     new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthDeleteRequest {
+    password: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +163,20 @@ async fn auth_logout(State(state): State<SharedState>, headers: HeaderMap) -> im
     match state.accounts.logout(&token).await {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
         Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    }
+}
+
+async fn auth_delete(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<AuthDeleteRequest>,
+) -> impl IntoResponse {
+    let Some(token) = bearer_token(&headers) else {
+        return api_error(StatusCode::UNAUTHORIZED, "Missing session.");
+    };
+    match state.accounts.delete_account(&token, &body.password).await {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(err) => api_error(StatusCode::BAD_REQUEST, &err),
     }
 }
 
