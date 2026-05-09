@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -196,7 +196,106 @@ async fn auth_username(
         .change_username(&user.id, &body.username)
         .await
     {
-        Ok(user) => Json(json!({ "ok": true, "user": user })).into_response(),
+        Ok(updated_user) => {
+            let mut touched_rooms = HashSet::new();
+            {
+                let mut players = state.players.write().await;
+                for player in players.values_mut() {
+                    if player.user_id == updated_user.id {
+                        player.username = updated_user.username.clone();
+                        touched_rooms.extend(player.rooms.iter().cloned());
+                    }
+                }
+            }
+
+            for room_id in touched_rooms {
+                let payload = {
+                    let players = state.players.read().await;
+                    let room_players = players
+                        .values()
+                        .filter(|player| {
+                            player.rooms.contains(&room_id)
+                                && player.status != crate::models::UserPresenceStatus::Invisible
+                                && !player.username.trim().is_empty()
+                        })
+                        .collect::<Vec<_>>();
+
+                    let users = room_players
+                        .iter()
+                        .map(|player| player.username.clone())
+                        .collect::<Vec<_>>();
+
+                    let profiles = room_players.iter().fold(BTreeMap::new(), |mut acc, player| {
+                        acc.insert(player.username.clone(), player.profile.clone());
+                        acc
+                    });
+
+                    let statuses = room_players.iter().fold(BTreeMap::new(), |mut acc, player| {
+                        acc.insert(player.username.clone(), player.status);
+                        acc
+                    });
+
+                    let platforms = room_players.iter().fold(BTreeMap::new(), |mut acc, player| {
+                        acc.insert(player.username.clone(), player.platform.clone());
+                        acc
+                    });
+
+                    let voice_players = room_players
+                        .iter()
+                        .filter(|player| player.is_voice_chat)
+                        .map(|player| player.username.clone())
+                        .collect::<Vec<_>>();
+
+                    let call_players = room_players
+                        .iter()
+                        .filter(|player| player.is_voice_chat)
+                        .map(|player| {
+                            json!({
+                                "username": player.username,
+                                "clientId": player.client_id,
+                                "platform": player.platform,
+                                "isVoiceChat": player.is_voice_chat,
+                                "media": {
+                                    "audio": player.is_voice_chat,
+                                    "camera": player.call_camera,
+                                    "screen": player.call_screen
+                                }
+                            })
+                        })
+                        .collect::<Vec<_>>();
+
+                    json!({
+                        "op": 3,
+                        "d": {
+                            "ok": true,
+                            "system": true,
+                            "gameId": room_id,
+                            "players": users,
+                            "profiles": profiles,
+                            "statuses": statuses,
+                            "platforms": platforms,
+                            "voicePlayers": voice_players,
+                            "callPlayers": call_players
+                        }
+                    })
+                };
+
+                let room_txs = {
+                    let players = state.players.read().await;
+                    players
+                        .values()
+                        .filter(|player| player.rooms.contains(&room_id))
+                        .map(|player| player.tx.clone())
+                        .collect::<Vec<_>>()
+                };
+
+                for tx in room_txs {
+                    crate::utils::send_json(&tx, payload.clone());
+                }
+            }
+
+            Json(json!({ "ok": true, "user": updated_user })).into_response()
+        }
         Err(err) => api_error(StatusCode::BAD_REQUEST, &err),
     }
 }
