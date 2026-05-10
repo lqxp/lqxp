@@ -116,6 +116,7 @@ pub async fn process_message(
         21 => delete_message(&state, &session_id, payload.d).await,
         29 => edit_message(&state, &session_id, payload.d).await,
         28 => request_link_preview(&state, &session_id, payload.d).await,
+        31 => update_typing_state(&state, &session_id, payload.d).await,
         98 => update_voice_chat(&state, &session_id, payload.d).await,
         99 => relay_voice_data(&state, &session_id, payload.d, payload.u).await,
         100 => update_mute_state(&state, &session_id, payload.d).await,
@@ -2293,6 +2294,43 @@ async fn admin_broadcast(state: &SharedState, session_id: &str, d: Value) -> boo
         ),
     )
     .await;
+    false
+}
+
+async fn update_typing_state(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    let room_id = match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str)).await {
+        Ok(room_id) => room_id,
+        Err(message) => return respond_error(state, session_id, 31, &message, req_id).await,
+    };
+
+    let typing = d.get("typing").and_then(Value::as_bool).unwrap_or(false);
+
+    let username = {
+        let players = state.players.read().await;
+        let Some(player) = players.get(session_id) else {
+            return respond_error(state, session_id, 31, "You need to be identified before", req_id).await;
+        };
+        if !player.rooms.contains(&room_id) {
+            return respond_error(state, session_id, 31, "You are not in this room", req_id).await;
+        }
+        player.username.clone()
+    };
+
+    broadcast_to_room(
+        state,
+        &room_id,
+        json!({
+            "op": 31,
+            "d": {
+                "gameId": room_id,
+                "username": username,
+                "typing": typing
+            }
+        }),
+    )
+    .await;
+
     false
 }
 
