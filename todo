@@ -1,0 +1,56 @@
+Todo:
+
+Fix the search room doesnt work when custom group name
+Change the mutual room viewer approach:
+    Prefer do a select menue like on discord with category
+
+Discord View:
+    Jumbo message with reactions is buggy. the message reaction is on the right of the message.
+    Need to be on the footer like the Bubble jumbo style.
+
+
+Average style:
+    Change the onboarding screen
+        the registration/login/recovery menue is ugly.
+        Mix-up the discord style with Element Classic Desktop for better experience
+    the right online menue:
+        Avoiding to separate the "you" to the others.
+
+
+change the protocol:
+    saving in the state the actual rooms Id depend of the DeviceID (without the E2EE key) to stay say that the
+    members is there in the room in the right menue
+
+in the mobile web view, the cross into the room list doesnt appear to really leave the channel (fix that)
+
+
+admin center:
+    make account banishable (stay alive, but permantly ban)
+    pardon system (to make it unbanable)
+
+audit of the code:
+    fix all the potential XSS vulnerabilities about the emoji, message content , reactions parsing
+    review completly the server-side User-Input traitement to check if a possible vulnerabilities exist
+
+user profile update:
+    - Renaming actual "Display Name" to real "username"
+        make it more fluent , and with @ for understandability
+
+make a docker image of the lqxp server
+    - do Dockerfile, dockercompose, docker image, a tutorial to installing it into machine
+        - And a Pelican.dev panel egg
+            - search on the internet the Yolks/Egg format to known how to use it into
+
+Enforcing the WebRTC connection
+    - avoiding IP leaks to the other users into the channel.
+        - be sure that the client doesnt known the others ips
+            - be sure that the calls and the camera/stream sink is well encrypted throught the E2EE key of the room
+
+Voice:
+    - Create a right click dialog menu for others into the call:
+        - About to mute someone localy
+        - Move the volume control of everyone by personal volume mixer into the right click by people
+        - The green rounder line for the client:
+            Make it work when specific dB reached on the mic, for real "signal" sending indicator
+        OR
+            Remove completly cause actually the green is hard-coded when the microphone sink is opened
