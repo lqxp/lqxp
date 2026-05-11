@@ -30,7 +30,7 @@ admin center:
 
 audit of the code:
     fix all the potential XSS vulnerabilities about the emoji, message content , reactions parsing
-    review completly the server-side User-Input traitement to check if a possible vulnerabilities exist
+    review completly the server-side User-Input treatement to check if a possible vulnerabilities exist
 
 user profile update:
     - Renaming actual "Display Name" to real "username"
