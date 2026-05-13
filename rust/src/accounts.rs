@@ -43,6 +43,7 @@ pub struct PublicUser {
     pub profile: UserProfile,
     pub status: UserPresenceStatus,
     pub disabled: bool,
+    pub banned: bool,
     pub admin: bool,
     pub created_at: u64,
 }
@@ -54,6 +55,7 @@ pub struct AuthenticatedUser {
     pub profile: UserProfile,
     pub status: UserPresenceStatus,
     pub disabled: bool,
+    pub banned: bool,
     pub admin: bool,
 }
 
@@ -83,6 +85,7 @@ struct StoredUser {
     profile: UserProfile,
     status: UserPresenceStatus,
     disabled: bool,
+    banned: bool,
     created_at: u64,
     username_changes: Vec<u64>,
 }
@@ -96,6 +99,7 @@ struct RawStoredUser {
     profile_json: String,
     status: String,
     disabled: i64,
+    banned: i64,
     created_at: i64,
     username_changes_json: String,
 }
@@ -158,6 +162,7 @@ impl AccountDatabase {
                 profile_json TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'online',
                 disabled BIGINT NOT NULL DEFAULT 0,
+                banned BIGINT NOT NULL DEFAULT 0,
                 created_at BIGINT NOT NULL,
                 updated_at BIGINT NOT NULL,
                 username_changes_json TEXT NOT NULL DEFAULT '[]'
@@ -165,6 +170,9 @@ impl AccountDatabase {
             "#,
         )
         .await?;
+        self.execute("ALTER TABLE users ADD COLUMN banned BIGINT NOT NULL DEFAULT 0")
+            .await
+            .ok();
         self.execute(
             r#"
             CREATE TABLE IF NOT EXISTS sessions (
@@ -291,8 +299,8 @@ impl AccountDatabase {
             SqlBackend::Sqlite(pool) => {
                 sqlx::query(
                     "INSERT INTO users \
-                     (id, username, password_hash, recovery_hash, profile_json, status, disabled, created_at, updated_at, username_changes_json) \
-                     VALUES (?, ?, ?, ?, ?, 'online', 0, ?, ?, '[]')",
+                     (id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, updated_at, username_changes_json) \
+                     VALUES (?, ?, ?, ?, ?, 'online', 0, 0, ?, ?, '[]')",
                 )
                 .bind(&id)
                 .bind(&username)
@@ -308,8 +316,8 @@ impl AccountDatabase {
             SqlBackend::Postgres(pool) => {
                 sqlx::query(
                     "INSERT INTO users \
-                     (id, username, password_hash, recovery_hash, profile_json, status, disabled, created_at, updated_at, username_changes_json) \
-                     VALUES ($1, $2, $3, $4, $5, 'online', 0, $6, $7, '[]')",
+                     (id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, updated_at, username_changes_json) \
+                     VALUES ($1, $2, $3, $4, $5, 'online', 0, 0, $6, $7, '[]')",
                 )
                 .bind(&id)
                 .bind(&username)
@@ -345,6 +353,9 @@ impl AccountDatabase {
             .user_by_username(&username)
             .await?
             .ok_or_else(|| "Invalid username or password.".to_owned())?;
+        if user.banned {
+            return Err("Account is banned.".to_owned());
+        }
         if user.disabled {
             return Err("Account is disabled.".to_owned());
         }
@@ -366,6 +377,9 @@ impl AccountDatabase {
             .user_by_username(&username)
             .await?
             .ok_or_else(|| "Invalid recovery credentials.".to_owned())?;
+        if user.banned {
+            return Err("Account is banned.".to_owned());
+        }
         verify_secret(
             &normalize_recovery_phrase(recovery_words),
             &user.recovery_hash,
@@ -419,7 +433,7 @@ impl AccountDatabase {
         let Some(user) = self.user_by_id(&user_id).await? else {
             return Ok(None);
         };
-        if user.disabled {
+        if user.disabled || user.banned {
             return Ok(None);
         }
         Ok(Some(AuthenticatedUser {
@@ -428,6 +442,7 @@ impl AccountDatabase {
             profile: user.profile.clone(),
             status: user.status,
             disabled: user.disabled,
+            banned: user.banned,
             admin: self.is_admin(&user.id),
         }))
     }
@@ -502,6 +517,7 @@ impl AccountDatabase {
             profile: user.profile.clone(),
             status: user.status,
             disabled: user.disabled,
+            banned: user.banned,
             admin: user.admin,
             created_at: 0,
         }))
@@ -662,6 +678,50 @@ impl AccountDatabase {
         .map_err(|err| format!("Database query failed: {err}"))
     }
 
+    pub async fn set_user_banned(&self, user_id: &str, banned: bool) -> AccountResult<()> {
+        let value = if banned { 1i64 } else { 0i64 };
+        let now = now_ms() as i64;
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query("UPDATE users SET banned = ?, updated_at = ? WHERE id = ?")
+                    .bind(value)
+                    .bind(now)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query("UPDATE users SET banned = $1, updated_at = $2 WHERE id = $3")
+                    .bind(value)
+                    .bind(now)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+        }
+        .map_err(|err| format!("Database query failed: {err}"))?;
+
+        if banned {
+            match &self.backend {
+                SqlBackend::Sqlite(pool) => sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ()),
+                SqlBackend::Postgres(pool) => sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ()),
+            }
+            .map_err(|err| format!("Database query failed: {err}"))?;
+        }
+
+        Ok(())
+    }
+
     fn is_admin(&self, user_id: &str) -> bool {
         self.admin_ids.iter().any(|id| id == user_id)
     }
@@ -673,6 +733,7 @@ impl AccountDatabase {
             profile: user.profile,
             status: user.status,
             disabled: user.disabled,
+            banned: user.banned,
             admin: self.is_admin(&user.id),
             created_at: user.created_at,
         }
@@ -785,6 +846,7 @@ impl AccountDatabase {
             profile,
             status,
             disabled: row.disabled != 0,
+            banned: row.banned != 0,
             created_at: row.created_at.max(0) as u64,
             username_changes,
         })
@@ -812,17 +874,16 @@ async fn prepare_sqlite_path(url: &str) -> AccountResult<()> {
 pub fn validate_username(raw: &str) -> AccountResult<String> {
     let username = normalize_username(raw);
     let len = username.chars().count();
-    if !(USERNAME_MIN..=USERNAME_MAX).contains(&len) {
-        return Err("Username must be between 2 and 32 characters.".to_owned());
-    }
-    if username.contains("..") {
-        return Err("Username cannot contain two consecutive periods.".to_owned());
+    if len < USERNAME_MIN || len > USERNAME_MAX {
+        return Err(format!(
+            "Username must be between {USERNAME_MIN} and {USERNAME_MAX} characters."
+        ));
     }
     if !username
-        .bytes()
-        .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.'))
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
     {
-        return Err("Username can only contain a-z, 0-9, underscore and period.".to_owned());
+        return Err("Username may only contain letters, numbers, '-', '_' or '.'.".to_owned());
     }
     Ok(username)
 }
@@ -831,20 +892,41 @@ pub fn normalize_username(raw: &str) -> String {
     raw.trim().to_ascii_lowercase()
 }
 
-pub fn validate_password(password: &str) -> AccountResult<()> {
+pub fn username_hits_blocklist(username: &str, terms: &[String]) -> bool {
+    let candidate = normalize_username(username);
+    terms
+        .iter()
+        .map(|item| normalize_username(item))
+        .any(|blocked| !blocked.is_empty() && candidate.contains(&blocked))
+}
+
+pub fn normalize_recovery_phrase(raw: &str) -> String {
+    raw.split_whitespace()
+        .map(|part| part.trim().to_ascii_lowercase())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn validate_password(password: &str) -> AccountResult<()> {
     let len = password.chars().count();
-    if !(PASSWORD_MIN..=PASSWORD_MAX).contains(&len) {
-        return Err("Password must be between 8 and 128 characters.".to_owned());
+    if len < PASSWORD_MIN || len > PASSWORD_MAX {
+        return Err(format!(
+            "Password must be between {PASSWORD_MIN} and {PASSWORD_MAX} characters."
+        ));
     }
     Ok(())
 }
 
-pub fn username_hits_blocklist(username: &str, blocklist_terms: &[String]) -> bool {
-    let lowered = username.to_ascii_lowercase();
-    blocklist_terms
-        .iter()
-        .map(|term| term.trim().to_ascii_lowercase())
-        .any(|term| !term.is_empty() && lowered.contains(&term))
+fn generate_recovery_words() -> Vec<String> {
+    let words = Language::English.word_list();
+    let mut rng = thread_rng();
+    (0..RECOVERY_WORD_COUNT)
+        .map(|_| {
+            let idx = rng.gen_range(0..words.len());
+            words[idx].to_owned()
+        })
+        .collect()
 }
 
 fn hash_secret(secret: &str) -> AccountResult<String> {
@@ -852,19 +934,28 @@ fn hash_secret(secret: &str) -> AccountResult<String> {
     Argon2::default()
         .hash_password(secret.as_bytes(), &salt)
         .map(|hash| hash.to_string())
-        .map_err(|err| format!("Could not hash secret: {err}"))
+        .map_err(|err| format!("Hashing failed: {err}"))
 }
 
-fn verify_secret(secret: &str, hash: &str) -> Result<(), argon2::password_hash::Error> {
-    let parsed = PasswordHash::new(hash)?;
-    Argon2::default().verify_password(secret.as_bytes(), &parsed)
+fn verify_secret(secret: &str, hash: &str) -> AccountResult<()> {
+    let parsed = PasswordHash::new(hash).map_err(|err| format!("Hash parse failed: {err}"))?;
+    Argon2::default()
+        .verify_password(secret.as_bytes(), &parsed)
+        .map_err(|err| format!("Verification failed: {err}"))
+}
+
+fn generate_snowflake_id() -> String {
+    let now = now_ms();
+    let mut rng = OsRng;
+    let random: u16 = rng.next_u32() as u16;
+    let value = (now << 12) | u64::from(random & 0x0fff);
+    value.to_string()
 }
 
 fn random_token() -> String {
-    let mut rng = OsRng;
-    let mut bytes = [0u8; 48];
-    rng.fill(bytes.as_mut_slice());
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    let mut buf = [0u8; 32];
+    OsRng.fill_bytes(&mut buf);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
 }
 
 fn token_hash(token: &str) -> String {
@@ -873,37 +964,8 @@ fn token_hash(token: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn generate_snowflake_id() -> String {
-    const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
-    let timestamp = now_ms().saturating_sub(DISCORD_EPOCH_MS) & ((1u64 << 42) - 1);
-    let random = thread_rng().gen_range(0..(1u64 << 22));
-    ((timestamp << 22) | random).to_string()
-}
-
-fn generate_recovery_words() -> Vec<String> {
-    let mut rng = OsRng;
-    // BIP-39 English word list: 2048 audited words used by mnemonic recovery systems.
-    // QXP keeps its 16-word account recovery format, backed by this standard list.
-    let words = Language::English.word_list();
-    (0..RECOVERY_WORD_COUNT)
-        .map(|_| {
-            let index = (rng.next_u32() as usize) & (words.len() - 1);
-            words[index].to_owned()
-        })
-        .collect()
-}
-
-fn normalize_recovery_phrase(value: &str) -> String {
-    value
-        .split_whitespace()
-        .map(|word| word.trim().to_ascii_lowercase())
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn parse_status(value: &str) -> UserPresenceStatus {
-    match value {
+fn parse_status(raw: &str) -> UserPresenceStatus {
+    match raw.trim().to_ascii_lowercase().as_str() {
         "invisible" => UserPresenceStatus::Invisible,
         "dnd" => UserPresenceStatus::Dnd,
         _ => UserPresenceStatus::Online,

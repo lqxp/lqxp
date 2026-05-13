@@ -39,6 +39,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/api/admin/users/:user_id/disabled",
             post(admin_user_disabled),
         )
+        .route(
+            "/api/admin/users/:user_id/banned",
+            post(admin_user_banned),
+        )
         .route("/ws", get(ws_upgrade))
         .route("/*path", get(public_asset))
         .layer(cors_layer())
@@ -91,6 +95,11 @@ struct FeatureRequest {
 #[derive(Debug, Deserialize)]
 struct DisabledRequest {
     disabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct BannedRequest {
+    banned: bool,
 }
 
 async fn auth_register(
@@ -406,11 +415,35 @@ async fn admin_user_disabled(
     if !user.admin {
         return api_error(StatusCode::FORBIDDEN, "Admin only.");
     }
+    if user.id == user_id {
+        return api_error(StatusCode::BAD_REQUEST, "You cannot disable your own account.");
+    }
     match state
         .accounts
         .set_user_disabled(&user_id, body.disabled)
         .await
     {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    }
+}
+
+async fn admin_user_banned(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    AxumPath(user_id): AxumPath<String>,
+    Json(body): Json<BannedRequest>,
+) -> impl IntoResponse {
+    let Some(user) = authenticated_user(&state, &headers).await else {
+        return api_error(StatusCode::UNAUTHORIZED, "Invalid session.");
+    };
+    if !user.admin {
+        return api_error(StatusCode::FORBIDDEN, "Admin only.");
+    }
+    if user.id == user_id {
+        return api_error(StatusCode::BAD_REQUEST, "You cannot ban your own account.");
+    }
+    match state.accounts.set_user_banned(&user_id, body.banned).await {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
         Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
     }
@@ -469,54 +502,59 @@ async fn serve_file(path: &Path) -> Response {
                 .body(axum::body::Body::from(bytes))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            format!("Resource not found: {}", path.display()),
-        )
-            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
 async fn serve_webchat_index(path: &Path, origin: Option<&str>, state: &SharedState) -> Response {
     match fs::read_to_string(path).await {
-        Ok(html) => {
-            let html = match origin {
-                Some(origin) => absolutize_social_meta(&html, origin),
-                None => html,
-            };
-            let html = inject_runtime_config(&html, state, origin);
-
+        Ok(mut html) => {
+            let runtime = runtime_config_payload(origin, state);
+            let bootstrap = format!(
+                "<script>window.__QXP_RUNTIME__ = {};</script>",
+                runtime
+            );
+            if html.contains("</head>") {
+                html = html.replacen("</head>", &format!("{bootstrap}</head>"), 1);
+            } else {
+                html = format!("{bootstrap}{html}");
+            }
             Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "text/html; charset=utf-8")
                 .body(axum::body::Body::from(html))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            format!("Resource not found: {}", path.display()),
-        )
-            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
-fn inject_runtime_config(html: &str, state: &SharedState, origin: Option<&str>) -> String {
-    let rtc = &state.config.rtc;
-    let server_origin = origin
+fn runtime_config_payload(origin: Option<&str>, state: &SharedState) -> serde_json::Value {
+    let public_domain = state.config.api.public_domain.trim();
+    let ws_origin = origin
         .map(str::to_owned)
-        .or_else(|| configured_public_origin(&state.config.api.public_domain));
-    let ws_url = server_origin.as_deref().and_then(websocket_url_for_origin);
-    let relay_ready = !rtc.turn_urls.is_empty()
-        && !rtc.turn_username.trim().is_empty()
-        && !rtc.turn_credential.trim().is_empty();
-    let calls_enabled = if rtc.relay_only { relay_ready } else { true };
-    let calls_unavailable_reason = if calls_enabled {
+        .or_else(|| {
+            if public_domain.is_empty() {
+                None
+            } else {
+                Some(format!("https://{public_domain}"))
+            }
+        })
+        .unwrap_or_default();
+
+    let ws_url = if ws_origin.is_empty() {
         String::new()
-    } else if rtc.relay_only {
-        "Calls are disabled until a TURN relay is configured by the server admin.".to_owned()
+    } else if ws_origin.starts_with("https://") {
+        format!("wss://{}/ws", ws_origin.trim_start_matches("https://"))
+    } else if ws_origin.starts_with("http://") {
+        format!("ws://{}/ws", ws_origin.trim_start_matches("http://"))
     } else {
-        String::new()
+        format!("wss://{ws_origin}/ws")
     };
+
+    let rtc = &state.config.rtc;
+    let calls_enabled = true;
+    let calls_unavailable_reason = String::new();
 
     let mut payload = json!({
         "rtc": {
@@ -526,126 +564,54 @@ fn inject_runtime_config(html: &str, state: &SharedState, origin: Option<&str>) 
             "turnCredential": rtc.turn_credential,
             "callsEnabled": calls_enabled,
             "callsUnavailableReason": calls_unavailable_reason
+        },
+        "api": {
+            "origin": origin.unwrap_or_default(),
+            "publicDomain": public_domain,
+            "wsUrl": ws_url
         }
     });
-    if let Some(server_origin) = server_origin {
-        payload["serverOrigin"] = json!(server_origin);
-        payload["apiBaseUrl"] = json!(server_origin);
-    }
-    if let Some(ws_url) = ws_url {
-        payload["wsUrl"] = json!(ws_url);
-    }
-    let script = format!(r#"<script>window.__QXP_RUNTIME__ = {};</script>"#, payload);
-    html.replace("</head>", &format!("{script}\n  </head>"))
-}
 
-fn configured_public_origin(public_domain: &str) -> Option<String> {
-    let value = public_domain.trim().trim_end_matches('/');
-    if value.is_empty() {
-        return None;
-    }
-    if value.starts_with("http://") || value.starts_with("https://") {
-        let parsed = url::Url::parse(value).ok()?;
-        if matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some() {
-            return Some(value.to_owned());
-        }
-        return None;
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "latestVersion".to_owned(),
+            json!(state.config.network.latest_version.as_deref().unwrap_or("").trim()),
+        );
     }
 
-    let host = sanitized_host(value)?;
-    let proto = if host.starts_with("localhost")
-        || host.starts_with("127.")
-        || host.starts_with("[::1]")
-    {
-        "http"
-    } else {
-        "https"
-    };
-    Some(format!("{proto}://{host}"))
+    payload
 }
 
-fn websocket_url_for_origin(origin: &str) -> Option<String> {
-    let parsed = url::Url::parse(origin).ok()?;
-    let scheme = match parsed.scheme() {
-        "https" => "wss",
-        "http" => "ws",
-        _ => return None,
-    };
-    let host = parsed.host_str()?;
-    let host = if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]")
-    } else {
-        host.to_owned()
-    };
-    let authority = match parsed.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host,
-    };
-    Some(format!("{scheme}://{authority}/ws"))
-}
-
-fn absolutize_social_meta(html: &str, origin: &str) -> String {
-    html.replace(r#"href="/""#, &format!(r#"href="{origin}/""#))
-        .replace(r#"content="/""#, &format!(r#"content="{origin}/""#))
-        .replace(
-            r#"content="/social-card.png""#,
-            &format!(r#"content="{origin}/social-card.png""#),
-        )
-}
-
-fn public_origin(headers: &HeaderMap, fallback_domain: &str) -> Option<String> {
-    let host = header_first(headers, "x-forwarded-host")
-        .or_else(|| header_first(headers, "host"))
-        .or_else(|| sanitized_host(fallback_domain))?;
-    let proto = header_first(headers, "x-forwarded-proto")
-        .and_then(|value| match value.to_ascii_lowercase().as_str() {
-            "http" | "https" => Some(value),
-            _ => None,
-        })
-        .unwrap_or_else(|| {
-            if host.starts_with("localhost")
-                || host.starts_with("127.")
-                || host.starts_with("[::1]")
-            {
-                "http".to_owned()
-            } else {
-                "https".to_owned()
-            }
-        });
-
-    Some(format!("{proto}://{host}"))
-}
-
-fn header_first(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
+fn public_origin(headers: &HeaderMap, configured_domain: &str) -> Option<String> {
+    let host = headers
+        .get(header::HOST)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .and_then(sanitized_host)
-}
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
 
-fn sanitized_host(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > 253
-        || value
-            .bytes()
-            .any(|byte| !matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b':' | b'[' | b']'))
-    {
-        return None;
+    if let Some(host) = host {
+        let forwarded_proto = headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("https");
+        return Some(format!("{forwarded_proto}://{host}"));
     }
 
-    Some(value.to_owned())
+    let configured = configured_domain.trim();
+    if configured.is_empty() {
+        return None;
+    }
+    Some(format!("https://{configured}"))
 }
 
 async fn ws_upgrade(
     State(state): State<SharedState>,
-    ws: WebSocketUpgrade,
-    headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     let ip = extract_client_ip(&headers, addr);
-    ws.max_frame_size(32 * 1024 * 1024)
-        .max_message_size(32 * 1024 * 1024)
-        .on_upgrade(move |socket| handle_socket(state, socket, ip))
+    ws.on_upgrade(move |socket| handle_socket(state, socket, ip))
 }

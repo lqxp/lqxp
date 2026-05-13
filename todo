@@ -1,13 +1,5 @@
 Todo:
 
-Change the mutual room viewer approach:
-    Prefer do a select menue like on discord with category
-
-Discord View:
-    Jumbo message with reactions is buggy. the message reaction is on the right of the message.
-    Need to be on the footer like the Bubble jumbo style.
-
-
 Average style:
     Change the onboarding screen
         the registration/login/recovery menue is ugly.
