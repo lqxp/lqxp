@@ -450,6 +450,13 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
         Err(message) => return respond_error(state, session_id, 4, message, req_id).await,
     };
 
+    let roster = room_players(state, game_id, None).await;
+    let profiles = room_profiles(state, game_id, None).await;
+    let statuses = room_statuses(state, game_id, None).await;
+    let platforms = room_platforms(state, game_id, None).await;
+    let voice_roster = room_voice_usernames(state, game_id, None).await;
+    let call_players = room_call_players(state, game_id, None).await;
+
     broadcast_to_room(
         state,
         game_id,
@@ -458,7 +465,13 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
             "d": {
                 "gameId": game_id,
                 "left": username,
-                "clientId": client_id
+                "clientId": client_id,
+                "players": roster,
+                "profiles": profiles,
+                "statuses": statuses,
+                "platforms": platforms,
+                "voicePlayers": voice_roster,
+                "callPlayers": call_players
             }
         }),
     )
@@ -609,14 +622,27 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
 
     if profile_update.is_some() && status != UserPresenceStatus::Invisible {
         for room in &rooms {
+            let roster = room_players(state, room, None).await;
+            let profiles = room_profiles(state, room, None).await;
+            let statuses = room_statuses(state, room, None).await;
+            let platforms = room_platforms(state, room, None).await;
+            let voice_roster = room_voice_usernames(state, room, None).await;
+            let call_players = room_call_players(state, room, None).await;
             broadcast_to_room(
                 state,
                 room,
                 json!({
                     "op": 26,
                     "d": {
+                        "gameId": room,
                         "user": username.clone(),
-                        "profile": profile.clone()
+                        "profile": profile.clone(),
+                        "players": roster,
+                        "profiles": profiles,
+                        "statuses": statuses,
+                        "platforms": platforms,
+                        "voicePlayers": voice_roster,
+                        "callPlayers": call_players
                     }
                 }),
             )
@@ -626,6 +652,12 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
 
     if status_update.is_some() && status != previous_status {
         for room in rooms {
+            let roster = room_players(state, &room, None).await;
+            let profiles = room_profiles(state, &room, None).await;
+            let statuses = room_statuses(state, &room, None).await;
+            let platforms = room_platforms(state, &room, None).await;
+            let voice_roster = room_voice_usernames(state, &room, None).await;
+            let call_players = room_call_players(state, &room, None).await;
             broadcast_to_room(
                 state,
                 &room,
@@ -638,7 +670,13 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
                         "visible": status != UserPresenceStatus::Invisible,
                         "clientId": client_id.clone(),
                         "platform": platform.clone(),
-                        "profile": profile.clone()
+                        "profile": profile.clone(),
+                        "players": roster,
+                        "profiles": profiles,
+                        "statuses": statuses,
+                        "platforms": platforms,
+                        "voicePlayers": voice_roster,
+                        "callPlayers": call_players
                     }
                 }),
             )
