@@ -31,6 +31,7 @@ const MAX_ENCRYPTED_ALG_LEN: usize = 32;
 const MAX_ENCRYPTED_IV_LEN: usize = 128;
 const MAX_ENCRYPTED_CIPHERTEXT_LEN: usize = 18 * 1024 * 1024;
 const MAX_PREVIEW_URL_LEN: usize = 2048;
+const MAX_REACTION_EMOJI_CHARS: usize = 32;
 const MIN_ROOM_ID_LEN: usize = 8;
 const MAX_ROOM_ID_LEN: usize = 64;
 // Voice call chunks are ~800ms of Opus at 64–128kbps → 6–13KB raw.
@@ -1043,18 +1044,12 @@ async fn request_link_preview(state: &SharedState, session_id: &str, d: Value) -
         return respond_error(state, session_id, 28, "Missing messageId", request_id(&d)).await;
     }
 
-    let Some(url) = d
-        .get("url")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(raw_url) = d.get("url").and_then(Value::as_str) else {
         return respond_error(state, session_id, 28, "Missing url", request_id(&d)).await;
     };
-    if url.chars().count() > MAX_PREVIEW_URL_LEN {
-        return respond_error(state, session_id, 28, "URL too long", request_id(&d)).await;
-    }
-    let url = url.to_owned();
+    let Some(url) = sanitize_preview_url(raw_url) else {
+        return respond_error(state, session_id, 28, "Invalid url", request_id(&d)).await;
+    };
 
     {
         let players = state.players.read().await;
@@ -1189,13 +1184,12 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
     let Some(message_id) = d.get("messageId").and_then(Value::as_str).map(str::trim) else {
         return respond_error(state, session_id, 19, "Missing messageId", request_id(&d)).await;
     };
-    let Some(emoji) = d.get("reaction").and_then(Value::as_str).map(str::trim) else {
+    let Some(raw_emoji) = d.get("reaction").and_then(Value::as_str) else {
         return respond_error(state, session_id, 19, "Missing reaction", request_id(&d)).await;
     };
-
-    if emoji.is_empty() {
-        return respond_error(state, session_id, 19, "Missing reaction", request_id(&d)).await;
-    }
+    let Some(emoji) = sanitize_reaction_emoji(raw_emoji) else {
+        return respond_error(state, session_id, 19, "Invalid reaction", request_id(&d)).await;
+    };
 
     let username = {
         let players = state.players.read().await;
@@ -1225,7 +1219,7 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
 
     let room_hint = d.get("gameId").and_then(Value::as_str);
     let (room_id, reactions) =
-        match update_message_reactions(state, message_id, emoji, &username, room_hint).await {
+        match update_message_reactions(state, message_id, emoji.as_str(), &username, room_hint).await {
             Some(result) => result,
             None => {
                 return respond_error(state, session_id, 19, "Unknown messageId", request_id(&d))
@@ -2602,6 +2596,29 @@ async fn update_message_reactions(
     }
 
     None
+}
+
+fn sanitize_reaction_emoji(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > MAX_REACTION_EMOJI_CHARS {
+        return None;
+    }
+    if trimmed.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+fn sanitize_preview_url(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > MAX_PREVIEW_URL_LEN {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return None;
+    }
+    Some(trimmed.to_owned())
 }
 
 fn toggle_reaction_in_message(message: &mut ChatMessageRecord, emoji: &str, username: &str) {
