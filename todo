@@ -1,6 +1,5 @@
 Todo:
 
-Fix the search room doesnt work when custom group name
 Change the mutual room viewer approach:
     Prefer do a select menue like on discord with category
 
@@ -13,9 +12,6 @@ Average style:
     Change the onboarding screen
         the registration/login/recovery menue is ugly.
         Mix-up the discord style with Element Classic Desktop for better experience
-    the right online menue:
-        Avoiding to separate the "you" to the others.
-
 
 change the protocol:
     saving in the state the actual rooms Id depend of the DeviceID (without the E2EE key) to stay say that the

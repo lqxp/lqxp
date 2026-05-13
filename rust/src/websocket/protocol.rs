@@ -354,14 +354,14 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
     };
 
     let joining_status = session_status(state, session_id).await;
-    let broadcast_roster = room_usernames(state, game_id, None).await;
+    let broadcast_roster = room_players(state, game_id, None).await;
     let broadcast_profiles = room_profiles(state, game_id, None).await;
     let broadcast_statuses = room_statuses(state, game_id, None).await;
     let broadcast_platforms = room_platforms(state, game_id, None).await;
     let broadcast_voice_roster = room_voice_usernames(state, game_id, None).await;
     let broadcast_call_players = room_call_players(state, game_id, None).await;
 
-    let roster = room_usernames(state, game_id, Some(session_id)).await;
+    let roster = room_players(state, game_id, Some(session_id)).await;
     let profiles = room_profiles(state, game_id, Some(session_id)).await;
     let statuses = room_statuses(state, game_id, Some(session_id)).await;
     let platforms = room_platforms(state, game_id, Some(session_id)).await;
@@ -432,7 +432,11 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
         let mut players = state.players.write().await;
         if let Some(player) = players.get_mut(session_id) {
             if player.rooms.remove(game_id) {
-                Ok((player.username.clone(), player.delete_messages_on_leave))
+                Ok((
+                    player.username.clone(),
+                    player.client_id.clone(),
+                    player.delete_messages_on_leave,
+                ))
             } else {
                 Err("Not a member of this room")
             }
@@ -441,7 +445,7 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
         }
     };
 
-    let (username, should_clear_messages) = match leave_result {
+    let (username, client_id, should_clear_messages) = match leave_result {
         Ok(values) => values,
         Err(message) => return respond_error(state, session_id, 4, message, req_id).await,
     };
@@ -453,7 +457,8 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
             "op": 4,
             "d": {
                 "gameId": game_id,
-                "left": username
+                "left": username,
+                "clientId": client_id
             }
         }),
     )
@@ -2626,6 +2631,27 @@ async fn room_usernames(
         .values()
         .filter(|player| player.rooms.contains(game_id) && is_visible_to(player, viewer_session_id))
         .map(|player| player.username.clone())
+        .collect()
+}
+
+async fn room_players(
+    state: &SharedState,
+    game_id: &str,
+    viewer_session_id: Option<&str>,
+) -> Vec<Value> {
+    let players = state.players.read().await;
+    players
+        .values()
+        .filter(|player| player.rooms.contains(game_id) && is_visible_to(player, viewer_session_id))
+        .map(|player| {
+            json!({
+                "user": player.username,
+                "clientId": player.client_id,
+                "platform": player.platform,
+                "status": player.status,
+                "profile": player.profile,
+            })
+        })
         .collect()
 }
 

@@ -197,7 +197,8 @@ pub async fn disconnect_player(state: &SharedState, session_id: &str) {
                     "op": 4,
                     "d": {
                         "gameId": game_id,
-                        "left": username.clone()
+                        "left": username.clone(),
+                        "clientId": player.client_id.clone()
                     }
                 }),
             )
