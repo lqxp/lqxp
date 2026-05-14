@@ -1,0 +1,52 @@
+{
+  "_comment": "DO NOT EDIT: FILE GENERATED FOR PTERODACTYL/PELICAN IMPORT",
+  "meta": {
+    "version": "PTDL_v2",
+    "update_url": null
+  },
+  "exported_at": "2026-05-13T00:00:00+00:00",
+  "name": "lqxp",
+  "author": "support@example.com",
+  "description": "Runs the lqxp Rust server with bundled web assets.",
+  "features": null,
+  "docker_images": {
+    "ghcr.io/pelican-eggs/yolks:debian": "ghcr.io/pelican-eggs/yolks:debian"
+  },
+  "file_denylist": [],
+  "startup": "./qxprotocol",
+  "config": {
+    "files": "{}",
+    "startup": "{\"done\":\"QxProtocol Rust server listening on\"}",
+    "logs": "{}",
+    "stop": "^C"
+  },
+  "scripts": {
+    "installation": {
+      "script": "#!/bin/bash\nset -euo pipefail\napt-get update\napt-get install -y --no-install-recommends curl ca-certificates build-essential pkg-config libssl-dev git npm\nmkdir -p /mnt/server\ncd /mnt/server\nif [ ! -d .git ]; then\n  git clone ${REPO_URL} .\nelse\n  git fetch --all\n  git reset --hard origin/${REPO_BRANCH}\nfi\ncargo build --release\ncd web\nnpm install\nnpm run build\ncd ..\ncp target/release/qxprotocol ./qxprotocol\nchmod +x ./qxprotocol\n",
+      "container": "rust:1.88-bookworm",
+      "entrypoint": "bash"
+    }
+  },
+  "variables": [
+    {
+      "name": "Git Repository",
+      "description": "Repository used during installation.",
+      "env_variable": "REPO_URL",
+      "default_value": "https://github.com/lqxp/lqxp.git",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|string|max:255",
+      "field_type": "text"
+    },
+    {
+      "name": "Git Branch",
+      "description": "Branch or ref to install.",
+      "env_variable": "REPO_BRANCH",
+      "default_value": "main",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|string|max:255",
+      "field_type": "text"
+    }
+  ]
+}

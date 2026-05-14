@@ -1,0 +1,16 @@
+services:
+  lqxp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: lqxp-server:latest
+    ports:
+      - "4560:4560"
+    environment:
+      PRODUCTION: "1"
+      RUST_LOG: info
+    volumes:
+      - ./files/config.custom.toml:/app/files/config.custom.toml:ro
+      - ./files/qxp.sqlite:/app/files/qxp.sqlite
+      - ./files/database.json:/app/files/database.json
+    restart: unless-stopped
