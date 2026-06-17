@@ -65,6 +65,12 @@ pub struct NetworkConfig {
     pub public_dir: String,
     #[serde(default = "default_webchat_index", rename = "webchatIndex")]
     pub webchat_index: String,
+    #[serde(default = "default_base_path", rename = "basePath")]
+    pub base_path: String,
+}
+
+fn default_base_path() -> String {
+    "/app".to_owned()
 }
 
 impl Default for NetworkConfig {
@@ -75,6 +81,7 @@ impl Default for NetworkConfig {
             latest_version: None,
             public_dir: default_public_dir(),
             webchat_index: default_webchat_index(),
+            base_path: default_base_path(),
         }
     }
 }

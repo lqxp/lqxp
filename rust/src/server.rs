@@ -23,9 +23,37 @@ use crate::{
     websocket::handle_socket,
 };
 
+async fn app_asset(
+    State(state): State<SharedState>,
+    AxumPath(path): AxumPath<String>,
+) -> impl IntoResponse {
+    let path = path.trim_start_matches('/');
+
+    // /app/foo -> foo
+    let path = path.strip_prefix("app/").unwrap_or(path);
+
+    let full_path = PathBuf::from(&state.config.network.public_dir).join(path);
+
+    // Si quelqu'un ouvre /app/nimportequoi
+    // on renvoie le SPA
+    if !full_path.exists() {
+        let index = PathBuf::from(&state.config.network.public_dir)
+            .join(&state.config.network.webchat_index);
+
+        let origin = None;
+
+        return serve_webchat_index(&index, origin, &state).await;
+    }
+
+    serve_file(&full_path).await
+}
+
 pub fn build_router(state: SharedState) -> Router {
     Router::new()
-        .route("/", get(webchat_page))
+        // Frontend React/Vite sous /app
+        .route("/app", get(webchat_page))
+        .route("/app/*path", get(app_asset))
+        // API
         .route("/api/auth/me", get(auth_me))
         .route("/api/auth/register", post(auth_register))
         .route("/api/auth/login", post(auth_login))
@@ -39,11 +67,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/api/admin/users/:user_id/disabled",
             post(admin_user_disabled),
         )
-        .route(
-            "/api/admin/users/:user_id/banned",
-            post(admin_user_banned),
-        )
+        .route("/api/admin/users/:user_id/banned", post(admin_user_banned))
+        // Websocket
         .route("/ws", get(ws_upgrade))
+        // Ancien serveur statique si besoin
         .route("/*path", get(public_asset))
         .layer(cors_layer())
         .with_state(state)
@@ -234,20 +261,26 @@ async fn auth_username(
                         .map(|player| player.username.clone())
                         .collect::<Vec<_>>();
 
-                    let profiles = room_players.iter().fold(BTreeMap::new(), |mut acc, player| {
-                        acc.insert(player.username.clone(), player.profile.clone());
-                        acc
-                    });
+                    let profiles = room_players
+                        .iter()
+                        .fold(BTreeMap::new(), |mut acc, player| {
+                            acc.insert(player.username.clone(), player.profile.clone());
+                            acc
+                        });
 
-                    let statuses = room_players.iter().fold(BTreeMap::new(), |mut acc, player| {
-                        acc.insert(player.username.clone(), player.status);
-                        acc
-                    });
+                    let statuses = room_players
+                        .iter()
+                        .fold(BTreeMap::new(), |mut acc, player| {
+                            acc.insert(player.username.clone(), player.status);
+                            acc
+                        });
 
-                    let platforms = room_players.iter().fold(BTreeMap::new(), |mut acc, player| {
-                        acc.insert(player.username.clone(), player.platform.clone());
-                        acc
-                    });
+                    let platforms = room_players
+                        .iter()
+                        .fold(BTreeMap::new(), |mut acc, player| {
+                            acc.insert(player.username.clone(), player.platform.clone());
+                            acc
+                        });
 
                     let voice_players = room_players
                         .iter()
@@ -416,7 +449,10 @@ async fn admin_user_disabled(
         return api_error(StatusCode::FORBIDDEN, "Admin only.");
     }
     if user.id == user_id {
-        return api_error(StatusCode::BAD_REQUEST, "You cannot disable your own account.");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "You cannot disable your own account.",
+        );
     }
     match state
         .accounts
@@ -510,10 +546,7 @@ async fn serve_webchat_index(path: &Path, origin: Option<&str>, state: &SharedSt
     match fs::read_to_string(path).await {
         Ok(mut html) => {
             let runtime = runtime_config_payload(origin, state);
-            let bootstrap = format!(
-                "<script>window.__QXP_RUNTIME__ = {};</script>",
-                runtime
-            );
+            let bootstrap = format!("<script>window.__QXP_RUNTIME__ = {};</script>", runtime);
             if html.contains("</head>") {
                 html = html.replacen("</head>", &format!("{bootstrap}</head>"), 1);
             } else {
@@ -575,7 +608,13 @@ fn runtime_config_payload(origin: Option<&str>, state: &SharedState) -> serde_js
     if let Some(obj) = payload.as_object_mut() {
         obj.insert(
             "latestVersion".to_owned(),
-            json!(state.config.network.latest_version.as_deref().unwrap_or("").trim()),
+            json!(state
+                .config
+                .network
+                .latest_version
+                .as_deref()
+                .unwrap_or("")
+                .trim()),
         );
     }
 
