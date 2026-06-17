@@ -52,6 +52,7 @@ pub fn build_router(state: SharedState) -> Router {
     Router::new()
         // Frontend React/Vite sous /app
         .route("/app", get(webchat_page))
+        .route("/app/", get(webchat_page))
         .route("/app/*path", get(app_asset))
         // API
         .route("/api/auth/me", get(auth_me))
