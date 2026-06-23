@@ -21,6 +21,10 @@ use crate::{
     state::AppState,
 };
 
+fn project_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
 #[tokio::main]
 async fn main() {
     init_tracing();
@@ -29,7 +33,9 @@ async fn main() {
     let blocklist_terms = load_blocklist_terms().await;
     std::fs::create_dir_all(&config.network.upload_dir)
         .expect("failed to create upload directory");
-    let database = Arc::new(JsonDatabase::load(PathBuf::from("files/database.json")).await);
+    let database = Arc::new(
+        JsonDatabase::load(project_root().join("files/database.json")).await,
+    );
     let accounts = Arc::new(
         AccountDatabase::connect(
             &config.database,

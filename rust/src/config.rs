@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use tokio::fs;
@@ -195,6 +195,19 @@ pub fn init_tracing() {
         .init();
 }
 
+fn project_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn resolve_project_path(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root().join(path)
+    }
+}
+
 pub async fn load_config() -> Config {
     let env = if std::env::var("PRODUCTION").is_ok() {
         "prod"
@@ -202,8 +215,8 @@ pub async fn load_config() -> Config {
         "dev"
     };
 
-    let default_path = PathBuf::from(format!("files/config.{}.toml", env));
-    let custom_path = PathBuf::from("files/config.custom.toml");
+    let default_path = resolve_project_path(format!("files/config.{}.toml", env));
+    let custom_path = resolve_project_path("files/config.custom.toml");
     let config_path = if custom_path.exists() {
         custom_path
     } else {
@@ -212,7 +225,23 @@ pub async fn load_config() -> Config {
 
     match fs::read_to_string(&config_path).await {
         Ok(raw) => match toml::from_str::<Config>(&raw) {
-            Ok(config) => config,
+            Ok(mut config) => {
+                config.network.public_dir = resolve_project_path(&config.network.public_dir)
+                    .to_string_lossy()
+                    .into_owned();
+                config.network.upload_dir = resolve_project_path(&config.network.upload_dir)
+                    .to_string_lossy()
+                    .into_owned();
+                if let Some(path) = config.database.url.strip_prefix("sqlite://") {
+                    if !path.is_empty() && !Path::new(path).is_absolute() {
+                        config.database.url = format!(
+                            "sqlite://{}",
+                            resolve_project_path(path).to_string_lossy()
+                        );
+                    }
+                }
+                config
+            }
             Err(err) => {
                 error!("Failed to parse {}: {}", config_path.display(), err);
                 Config::default()
@@ -226,7 +255,8 @@ pub async fn load_config() -> Config {
 }
 
 pub async fn load_blocklist_terms() -> Vec<String> {
-    match fs::read_to_string("src/blocklist.json").await {
+    let path = resolve_project_path("rust/src/blocklist.json");
+    match fs::read_to_string(path).await {
         Ok(contents) => serde_json::from_str::<Vec<String>>(&contents).unwrap_or_default(),
         Err(_) => Vec::new(),
     }

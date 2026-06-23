@@ -46,3 +46,4 @@ target
 serve.public
 files/qxp.sqlite
 files/uploads
+rust/files/qxp.sqlite

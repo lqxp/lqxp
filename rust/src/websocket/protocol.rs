@@ -125,6 +125,7 @@ pub async fn process_message(
         28 => request_link_preview(&state, &session_id, payload.d).await,
         31 => update_typing_state(&state, &session_id, payload.d).await,
         32 => upload_room_icon(&state, &session_id, payload.d).await,
+        33 => update_room_title(&state, &session_id, payload.d).await,
         98 => update_voice_chat(&state, &session_id, payload.d).await,
         99 => relay_voice_data(&state, &session_id, payload.d, payload.u).await,
         100 => update_mute_state(&state, &session_id, payload.d).await,
