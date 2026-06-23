@@ -391,7 +391,8 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "statuses": broadcast_statuses,
                     "platforms": broadcast_platforms,
                     "voicePlayers": broadcast_voice_roster,
-                    "callPlayers": broadcast_call_players
+                    "callPlayers": broadcast_call_players,
+                    "iconUrl": room_icon_url
                 }
             }),
         )
@@ -413,7 +414,8 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "platforms": platforms,
                     "voicePlayers": voice_roster,
                     "callPlayers": call_players,
-                    "alreadyJoined": already_in
+                    "alreadyJoined": already_in,
+                    "iconUrl": room_icon_url
                 }
             }),
             request_id(&d),
@@ -2465,6 +2467,10 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
         Err(_) => return respond_error(state, session_id, 32, "Failed to store room icon", req_id).await,
     };
     let icon = RoomIcon { file: stored };
+    if let Err(err) = state.database.set_room_icon(&room_id, &icon).await {
+        error!("Failed to persist room icon for {}: {}", room_id, err);
+        return respond_error(state, session_id, 32, "Failed to persist room icon", req_id).await;
+    }
 
     respond_to_sender(
         state,

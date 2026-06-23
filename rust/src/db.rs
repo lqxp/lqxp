@@ -8,7 +8,7 @@ use serde_json::Value;
 use tokio::{fs, sync::RwLock};
 use tracing::warn;
 
-use crate::models::BlacklistEntry;
+use crate::models::{BlacklistEntry, RoomIcon};
 
 pub type AppResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -126,5 +126,22 @@ impl JsonDatabase {
             .await
             .and_then(|value| value.as_array().cloned())
             .unwrap_or_default()
+    }
+
+    pub async fn room_icons(&self) -> HashMap<String, RoomIcon> {
+        self.get_value("room_icons")
+            .await
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default()
+    }
+
+    pub async fn room_icon(&self, room_id: &str) -> Option<RoomIcon> {
+        self.room_icons().await.get(room_id).cloned()
+    }
+
+    pub async fn set_room_icon(&self, room_id: &str, icon: &RoomIcon) -> AppResult<()> {
+        let mut icons = self.room_icons().await;
+        icons.insert(room_id.to_owned(), icon.clone());
+        self.set_value("room_icons", serde_json::to_value(icons)?).await
     }
 }
