@@ -27,6 +27,8 @@ async fn main() {
 
     let config = load_config().await;
     let blocklist_terms = load_blocklist_terms().await;
+    std::fs::create_dir_all(&config.network.upload_dir)
+        .expect("failed to create upload directory");
     let database = Arc::new(JsonDatabase::load(PathBuf::from("files/database.json")).await);
     let accounts = Arc::new(
         AccountDatabase::connect(
@@ -43,6 +45,7 @@ async fn main() {
         blocklist_terms: Arc::new(blocklist_terms),
         players: Arc::new(RwLock::new(HashMap::new())),
         ip_connections: Arc::new(RwLock::new(HashMap::new())),
+        ip_room_icon_uploads: Arc::new(RwLock::new(HashMap::new())),
         room_messages: Arc::new(RwLock::new(HashMap::new())),
         database,
         accounts,

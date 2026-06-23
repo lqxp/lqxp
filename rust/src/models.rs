@@ -51,14 +51,26 @@ impl Default for UserPresenceStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ProfileImage {
+pub struct StoredFile {
+    pub id: String,
+    pub url: String,
+    pub size: u64,
     #[serde(rename = "mimeType")]
     pub mime_type: String,
-    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RoomIcon {
+    #[serde(flatten)]
+    pub file: StoredFile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProfileImage {
+    #[serde(flatten)]
+    pub file: StoredFile,
     pub width: u32,
     pub height: u32,
-    #[serde(rename = "dataB64")]
-    pub data_b64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -82,12 +94,12 @@ pub struct MessageReaction {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attachment {
+    pub id: String,
+    pub url: String,
     pub filename: String,
     #[serde(rename = "mimeType")]
     pub mime_type: String,
     pub size: u64,
-    #[serde(rename = "dataB64")]
-    pub data_b64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -8,11 +8,14 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use crate::{
     models::{
         Attachment, BlacklistEntry, ChatMessageRecord, EncryptedPayload, LoggedIpEntry,
-        MessageReaction, PlayerStatus, ProfileImage, SocketPayload, UserPresenceStatus,
-        UserProfile,
+        MessageReaction, PlayerStatus, ProfileImage, RoomIcon, SocketPayload,
+        UserPresenceStatus, UserProfile,
     },
     state::SharedState,
-    utils::{admin_allowed, now_ms, random_message_id, request_id, send_json, with_request_id},
+    utils::{
+        admin_allowed, current_day_key, now_ms, random_message_id, request_id,
+        sanitize_filename, send_json, store_uploaded_bytes, with_request_id,
+    },
 };
 
 const MAX_ROOM_MESSAGES: usize = 150;
@@ -23,6 +26,9 @@ const MAX_MIMETYPE_LEN: usize = 96;
 const MAX_MESSAGE_CHARS: usize = 2000;
 const MAX_PROFILE_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PROFILE_AVATAR_B64_LEN: usize = ((MAX_PROFILE_AVATAR_BYTES + 2) / 3) * 4 + 4;
+const MAX_ROOM_ICON_UPLOAD_BYTES: usize = 5 * 1024 * 1024;
+const MAX_ROOM_ICON_UPLOAD_B64_LEN: usize = ((MAX_ROOM_ICON_UPLOAD_BYTES + 2) / 3) * 4 + 4;
+const MAX_ROOM_ICON_UPLOADS_PER_IP: usize = 4;
 const MAX_PROFILE_BANNER_BYTES: usize = 5 * 1024 * 1024;
 const MAX_PROFILE_BANNER_B64_LEN: usize = ((MAX_PROFILE_BANNER_BYTES + 2) / 3) * 4 + 4;
 const MAX_PROFILE_DESCRIPTION_CHARS: usize = 512;
@@ -118,6 +124,7 @@ pub async fn process_message(
         29 => edit_message(&state, &session_id, payload.d).await,
         28 => request_link_preview(&state, &session_id, payload.d).await,
         31 => update_typing_state(&state, &session_id, payload.d).await,
+        32 => upload_room_icon(&state, &session_id, payload.d).await,
         98 => update_voice_chat(&state, &session_id, payload.d).await,
         99 => relay_voice_data(&state, &session_id, payload.d, payload.u).await,
         100 => update_mute_state(&state, &session_id, payload.d).await,
@@ -514,7 +521,7 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
         .unwrap_or(false);
 
     let profile_update = if d.get("profile").is_some() {
-        match parse_user_profile(d.get("profile")) {
+        match parse_user_profile(state, d.get("profile")).await {
             Ok(profile) => Some(profile),
             Err(message) => {
                 return respond_error(state, session_id, 8, message, request_id(&d)).await
@@ -831,7 +838,7 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
         return respond_error(state, session_id, 7, message, request_id(&d)).await;
     }
 
-    let attachment = match parse_attachment(d.get("attachment")) {
+    let attachment = match parse_attachment(state, d.get("attachment")).await {
         Ok(value) => value,
         Err(message) => return respond_error(state, session_id, 7, message, request_id(&d)).await,
     };
@@ -2371,6 +2378,113 @@ async fn update_typing_state(state: &SharedState, session_id: &str, d: Value) ->
     false
 }
 
+async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    let room_id = match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str)).await {
+        Ok(room_id) => room_id,
+        Err(message) => return respond_error(state, session_id, 32, &message, req_id).await,
+    };
+
+    let client_ip = {
+        let players = state.players.read().await;
+        let Some(player) = players.get(session_id) else {
+            return false;
+        };
+        player.ip.clone()
+    };
+
+    {
+        let mut uploads = state.ip_room_icon_uploads.write().await;
+        let entry = uploads.entry(client_ip.clone()).or_default();
+        let today = current_day_key();
+        if entry.day_key != today {
+            entry.day_key = today;
+            entry.count = 0;
+        }
+        if entry.count >= MAX_ROOM_ICON_UPLOADS_PER_IP {
+            return respond_error(state, session_id, 32, "Daily room icon upload limit reached for this IP", req_id).await;
+        }
+        entry.count += 1;
+    }
+
+    let Some(raw) = d.get("file") else {
+        return respond_error(state, session_id, 32, "Missing file", req_id).await;
+    };
+    let Some(obj) = raw.as_object() else {
+        return respond_error(state, session_id, 32, "Invalid file payload", req_id).await;
+    };
+
+    let data_b64 = obj
+        .get("dataB64")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(data_b64) = data_b64 else {
+        return respond_error(state, session_id, 32, "Missing file data", req_id).await;
+    };
+    if data_b64.len() > MAX_ROOM_ICON_UPLOAD_B64_LEN {
+        return respond_error(state, session_id, 32, "Room icon too large (5MB max)", req_id).await;
+    }
+
+    let decoded = match B64.decode(data_b64.as_bytes()) {
+        Ok(decoded) => decoded,
+        Err(_) => return respond_error(state, session_id, 32, "Invalid file base64", req_id).await,
+    };
+    if decoded.len() > MAX_ROOM_ICON_UPLOAD_BYTES {
+        return respond_error(state, session_id, 32, "Room icon too large (5MB max)", req_id).await;
+    }
+
+    let declared_mime = obj
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let (mime_type, _, _) = match detect_profile_image(&decoded, declared_mime) {
+        Ok(result) => result,
+        Err(message) => return respond_error(state, session_id, 32, message, req_id).await,
+    };
+
+    let filename = sanitize_filename(
+        obj.get("filename").and_then(Value::as_str).unwrap_or("room-icon"),
+        "room-icon",
+        MAX_FILENAME_LEN,
+    );
+    let extension = filename
+        .rsplit('.')
+        .next()
+        .filter(|segment| *segment != filename)
+        .unwrap_or(match mime_type {
+            "image/png" => "png",
+            "image/gif" => "gif",
+            "image/jpeg" => "jpg",
+            _ => "bin",
+        });
+
+    let stored = match store_uploaded_bytes(state.as_ref(), extension, &decoded, mime_type).await {
+        Ok(stored) => stored,
+        Err(_) => return respond_error(state, session_id, 32, "Failed to store room icon", req_id).await,
+    };
+    let icon = RoomIcon { file: stored };
+
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(
+            json!({
+                "op": 32,
+                "d": {
+                    "ok": true,
+                    "gameId": room_id,
+                    "icon": icon
+                }
+            }),
+            req_id,
+        ),
+    )
+    .await;
+    false
+}
+
 async fn stats_query(state: &SharedState, session_id: &str, d: Value) -> bool {
     let game_id = d.get("gameId").and_then(Value::as_str);
     let count = match game_id {
@@ -2539,10 +2653,11 @@ fn attachments_match(left: Option<&Attachment>, right: Option<&Attachment>) -> b
     match (left, right) {
         (None, None) => true,
         (Some(left), Some(right)) => {
-            left.filename == right.filename
+            left.id == right.id
+                && left.url == right.url
+                && left.filename == right.filename
                 && left.mime_type == right.mime_type
                 && left.size == right.size
-                && left.data_b64 == right.data_b64
         }
         _ => false,
     }
@@ -2847,7 +2962,7 @@ pub async fn broadcast_to_room(state: &SharedState, game_id: &str, payload: Valu
     }
 }
 
-fn parse_attachment(raw: Option<&Value>) -> Result<Option<Attachment>, &'static str> {
+async fn parse_attachment(state: &SharedState, raw: Option<&Value>) -> Result<Option<Attachment>, &'static str> {
     let Some(obj) = raw else {
         return Ok(None);
     };
@@ -2876,15 +2991,13 @@ fn parse_attachment(raw: Option<&Value>) -> Result<Option<Attachment>, &'static 
         return Err("Attachment too large (25MB max)");
     }
 
-    let filename = obj
-        .get("filename")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .unwrap_or("file")
-        .chars()
-        .take(MAX_FILENAME_LEN)
-        .collect::<String>();
+    let filename = sanitize_filename(
+        obj.get("filename")
+            .and_then(Value::as_str)
+            .unwrap_or("file"),
+        "file",
+        MAX_FILENAME_LEN,
+    );
 
     let mime_type = obj
         .get("mimeType")
@@ -2896,11 +3009,21 @@ fn parse_attachment(raw: Option<&Value>) -> Result<Option<Attachment>, &'static 
         .take(MAX_MIMETYPE_LEN)
         .collect::<String>();
 
+    let extension = filename
+        .rsplit('.')
+        .next()
+        .filter(|segment| *segment != filename)
+        .unwrap_or("");
+    let stored = store_uploaded_bytes(state.as_ref(), extension, &decoded, &mime_type)
+        .await
+        .map_err(|_| "Failed to store attachment")?;
+
     Ok(Some(Attachment {
+        id: stored.id,
+        url: stored.url,
         filename,
         mime_type,
         size: decoded.len() as u64,
-        data_b64: data_b64.to_owned(),
     }))
 }
 
@@ -2962,7 +3085,7 @@ fn parse_encrypted_payload(raw: Option<&Value>) -> Result<Option<EncryptedPayloa
     }))
 }
 
-fn parse_user_profile(raw: Option<&Value>) -> Result<UserProfile, &'static str> {
+async fn parse_user_profile(state: &SharedState, raw: Option<&Value>) -> Result<UserProfile, &'static str> {
     let Some(raw) = raw else {
         return Ok(UserProfile::default());
     };
@@ -2972,15 +3095,19 @@ fn parse_user_profile(raw: Option<&Value>) -> Result<UserProfile, &'static str> 
 
     let obj = raw.as_object().ok_or("Profile must be an object")?;
     let avatar = parse_profile_image(
+        state,
         obj.get("avatar"),
         MAX_PROFILE_AVATAR_BYTES,
         MAX_PROFILE_AVATAR_B64_LEN,
-    )?;
+    )
+    .await?;
     let banner = parse_profile_image(
+        state,
         obj.get("banner"),
         MAX_PROFILE_BANNER_BYTES,
         MAX_PROFILE_BANNER_B64_LEN,
-    )?;
+    )
+    .await?;
     let description = sanitize_profile_text(
         obj.get("description").and_then(Value::as_str).unwrap_or(""),
         MAX_PROFILE_DESCRIPTION_CHARS,
@@ -3036,7 +3163,8 @@ fn sanitize_platform(value: Option<&str>) -> String {
     }
 }
 
-fn parse_profile_image(
+async fn parse_profile_image(
+    state: &SharedState,
     raw: Option<&Value>,
     max_bytes: usize,
     max_b64_len: usize,
@@ -3075,12 +3203,19 @@ fn parse_profile_image(
     if width == 0 || height == 0 {
         return Err("Profile image dimensions are invalid");
     }
+    let extension = match mime_type {
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/jpeg" => "jpg",
+        _ => "bin",
+    };
+    let stored = store_uploaded_bytes(state.as_ref(), extension, &decoded, mime_type)
+        .await
+        .map_err(|_| "Failed to store profile image")?;
     Ok(Some(ProfileImage {
-        mime_type: mime_type.to_owned(),
-        size: decoded.len() as u64,
+        file: stored,
         width,
         height,
-        data_b64: data_b64.to_owned(),
     }))
 }
 

@@ -53,6 +53,7 @@ pub fn build_router(state: SharedState) -> Router {
         // Frontend React/Vite sous /app
         .route("/app", get(webchat_page))
         .route("/app/", get(webchat_page))
+        .route("/app/uploads/*path", get(upload_asset))
         .route("/app/*path", get(app_asset))
         // API
         .route("/api/auth/me", get(auth_me))
@@ -526,6 +527,20 @@ async fn public_asset(
 ) -> impl IntoResponse {
     let sanitized = path.trim_start_matches('/');
     let full_path = PathBuf::from(&state.config.network.public_dir).join(sanitized);
+    serve_file(&full_path).await
+}
+
+async fn upload_asset(
+    State(state): State<SharedState>,
+    AxumPath(path): AxumPath<String>,
+) -> impl IntoResponse {
+    let sanitized = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
+        .collect::<Vec<_>>()
+        .join("/");
+    let full_path = PathBuf::from(&state.config.network.upload_dir).join(sanitized);
     serve_file(&full_path).await
 }
 

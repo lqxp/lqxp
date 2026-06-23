@@ -12,6 +12,8 @@ maxConnectionsPerIp = 3
 latestVersion = ""
 publicDir = "web/dist"
 webchatIndex = "index.html"
+uploadDir = "files/uploads"
+uploadPublicBase = "/app/uploads"
 
 [rtc]
 

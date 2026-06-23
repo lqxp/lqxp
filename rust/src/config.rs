@@ -65,6 +65,10 @@ pub struct NetworkConfig {
     pub public_dir: String,
     #[serde(default = "default_webchat_index", rename = "webchatIndex")]
     pub webchat_index: String,
+    #[serde(default = "default_upload_dir", rename = "uploadDir")]
+    pub upload_dir: String,
+    #[serde(default = "default_upload_public_base", rename = "uploadPublicBase")]
+    pub upload_public_base: String,
 }
 
 impl Default for NetworkConfig {
@@ -75,6 +79,8 @@ impl Default for NetworkConfig {
             latest_version: None,
             public_dir: default_public_dir(),
             webchat_index: default_webchat_index(),
+            upload_dir: default_upload_dir(),
+            upload_public_base: default_upload_public_base(),
         }
     }
 }
@@ -154,6 +160,14 @@ fn default_public_dir() -> String {
 
 fn default_webchat_index() -> String {
     "index.html".to_owned()
+}
+
+fn default_upload_dir() -> String {
+    "files/uploads".to_owned()
+}
+
+fn default_upload_public_base() -> String {
+    "/app/uploads".to_owned()
 }
 
 fn default_relay_only() -> bool {

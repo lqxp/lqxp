@@ -3,6 +3,8 @@ use std::{
     sync::Arc,
 };
 
+use serde::{Deserialize, Serialize};
+
 use axum::extract::ws::Message;
 use tokio::sync::{mpsc, RwLock};
 
@@ -19,12 +21,19 @@ pub struct AppState {
     pub blocklist_terms: Arc<Vec<String>>,
     pub players: Arc<RwLock<HashMap<String, PlayerSession>>>,
     pub ip_connections: Arc<RwLock<HashMap<String, usize>>>,
+    pub ip_room_icon_uploads: Arc<RwLock<HashMap<String, UploadQuotaState>>>,
     pub room_messages: Arc<RwLock<HashMap<String, Vec<ChatMessageRecord>>>>,
     pub database: Arc<JsonDatabase>,
     pub accounts: SharedAccounts,
 }
 
 pub type SharedState = Arc<AppState>;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UploadQuotaState {
+    pub day_key: u64,
+    pub count: usize,
+}
 
 #[derive(Debug, Clone)]
 pub struct PlayerSession {

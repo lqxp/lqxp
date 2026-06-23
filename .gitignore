@@ -45,3 +45,4 @@ package-lock.json
 target
 serve.public
 files/qxp.sqlite
+files/uploads
