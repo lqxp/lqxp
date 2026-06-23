@@ -8,7 +8,7 @@ use serde_json::Value;
 use tokio::{fs, sync::RwLock};
 use tracing::warn;
 
-use crate::models::{BlacklistEntry, RoomIcon};
+use crate::models::{BlacklistEntry, RoomIcon, RoomRecord};
 
 pub type AppResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -128,20 +128,43 @@ impl JsonDatabase {
             .unwrap_or_default()
     }
 
-    pub async fn room_icons(&self) -> HashMap<String, RoomIcon> {
-        self.get_value("room_icons")
+    pub async fn room_records(&self) -> HashMap<String, RoomRecord> {
+        self.get_value("rooms")
             .await
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_default()
     }
 
+    pub async fn room_record(&self, room_id: &str) -> Option<RoomRecord> {
+        self.room_records().await.get(room_id).cloned()
+    }
+
+    pub async fn set_room_record(&self, room_id: &str, room: &RoomRecord) -> AppResult<()> {
+        let mut rooms = self.room_records().await;
+        rooms.insert(room_id.to_owned(), room.clone());
+        self.set_value("rooms", serde_json::to_value(rooms)?).await
+    }
+
+    pub async fn room_icons(&self) -> HashMap<String, RoomIcon> {
+        self.room_records()
+            .await
+            .into_iter()
+            .filter_map(|(room_id, room)| room.icon.map(|icon| (room_id, icon)))
+            .collect()
+    }
+
     pub async fn room_icon(&self, room_id: &str) -> Option<RoomIcon> {
-        self.room_icons().await.get(room_id).cloned()
+        self.room_record(room_id).await.and_then(|room| room.icon)
     }
 
     pub async fn set_room_icon(&self, room_id: &str, icon: &RoomIcon) -> AppResult<()> {
-        let mut icons = self.room_icons().await;
-        icons.insert(room_id.to_owned(), icon.clone());
-        self.set_value("room_icons", serde_json::to_value(icons)?).await
+        let mut room = self.room_record(room_id).await.unwrap_or(RoomRecord {
+            room_id: room_id.to_owned(),
+            title: room_id.to_owned(),
+            icon: None,
+            members: Vec::new(),
+        });
+        room.icon = Some(icon.clone());
+        self.set_room_record(room_id, &room).await
     }
 }

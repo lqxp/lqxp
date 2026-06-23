@@ -66,6 +66,18 @@ pub struct RoomIcon {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RoomRecord {
+    #[serde(rename = "roomId")]
+    pub room_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "icon")]
+    pub icon: Option<RoomIcon>,
+    #[serde(default)]
+    pub members: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProfileImage {
     #[serde(flatten)]
     pub file: StoredFile,

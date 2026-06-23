@@ -8,7 +8,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use crate::{
     models::{
         Attachment, BlacklistEntry, ChatMessageRecord, EncryptedPayload, LoggedIpEntry,
-        MessageReaction, PlayerStatus, ProfileImage, RoomIcon, SocketPayload,
+        MessageReaction, PlayerStatus, ProfileImage, RoomIcon, RoomRecord, SocketPayload,
         UserPresenceStatus, UserProfile,
     },
     state::SharedState,
@@ -361,7 +361,24 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
         Err(message) => return respond_error(state, session_id, 3, message, request_id(&d)).await,
     };
 
+    if !already_in {
+        if let Err(err) = sync_room_record(state, game_id).await {
+            error!("Failed to persist room {} on join: {}", game_id, err);
+        }
+    }
+
     let joining_status = session_status(state, session_id).await;
+    let room_record = state.database.room_record(game_id).await.unwrap_or(RoomRecord {
+        room_id: game_id.to_owned(),
+        title: game_id.to_owned(),
+        icon: None,
+        members: room_usernames(state, game_id, Some(session_id)).await,
+    });
+    let room_icon_url = room_record
+        .icon
+        .as_ref()
+        .map(|icon| icon.file.url.clone())
+        .unwrap_or_default();
     let broadcast_roster = room_players(state, game_id, None).await;
     let broadcast_profiles = room_profiles(state, game_id, None).await;
     let broadcast_statuses = room_statuses(state, game_id, None).await;
@@ -392,7 +409,8 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "platforms": broadcast_platforms,
                     "voicePlayers": broadcast_voice_roster,
                     "callPlayers": broadcast_call_players,
-                    "iconUrl": room_icon_url
+                    "iconUrl": room_icon_url,
+                    "room": room_record
                 }
             }),
         )
@@ -415,7 +433,8 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "voicePlayers": voice_roster,
                     "callPlayers": call_players,
                     "alreadyJoined": already_in,
-                    "iconUrl": room_icon_url
+                    "iconUrl": room_icon_url,
+                    "room": room_record
                 }
             }),
             request_id(&d),
@@ -459,6 +478,10 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
         Ok(values) => values,
         Err(message) => return respond_error(state, session_id, 4, message, req_id).await,
     };
+
+    if let Err(err) = sync_room_record(state, game_id).await {
+        error!("Failed to persist room {} on leave: {}", game_id, err);
+    }
 
     let roster = room_players(state, game_id, None).await;
     let profiles = room_profiles(state, game_id, None).await;
@@ -2471,6 +2494,18 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
         error!("Failed to persist room icon for {}: {}", room_id, err);
         return respond_error(state, session_id, 32, "Failed to persist room icon", req_id).await;
     }
+    if let Err(err) = sync_room_record(state, &room_id).await {
+        error!("Failed to sync room {} after icon upload: {}", room_id, err);
+    }
+
+    let room = state.database.room_record(&room_id).await.unwrap_or(RoomRecord {
+        room_id: room_id.clone(),
+        title: room_id.clone(),
+        icon: Some(icon.clone()),
+        members: room_usernames(state, &room_id, Some(session_id)).await,
+    });
+
+    broadcast_room_record_to_members(state, &room_id, 32, req_id.clone(), true, room.clone()).await;
 
     respond_to_sender(
         state,
@@ -2481,7 +2516,58 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
                 "d": {
                     "ok": true,
                     "gameId": room_id,
-                    "icon": icon
+                    "icon": icon,
+                    "room": room
+                }
+            }),
+            req_id,
+        ),
+    )
+    .await;
+    false
+}
+
+async fn update_room_title(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    let room_id = match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str)).await {
+        Ok(room_id) => room_id,
+        Err(message) => return respond_error(state, session_id, 33, &message, req_id).await,
+    };
+
+    let title = d
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(64).collect::<String>())
+        .unwrap_or_else(|| room_id.clone());
+
+    let mut room = match sync_room_record(state, &room_id).await {
+        Ok(room) => room,
+        Err(err) => {
+            error!("Failed to sync room {} before title update: {}", room_id, err);
+            return respond_error(state, session_id, 33, "Failed to persist room title", req_id).await;
+        }
+    };
+
+    room.title = title;
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist room title for {}: {}", room_id, err);
+        return respond_error(state, session_id, 33, "Failed to persist room title", req_id).await;
+    }
+
+    broadcast_room_record_to_members(state, &room_id, 33, req_id.clone(), true, room.clone()).await;
+
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(
+            json!({
+                "op": 33,
+                "d": {
+                    "ok": true,
+                    "gameId": room_id,
+                    "room": room
                 }
             }),
             req_id,
@@ -2942,6 +3028,53 @@ fn normalize_call_media(value: Option<&Value>, fallback_audio: bool) -> (bool, b
         .and_then(Value::as_bool)
         .unwrap_or(false);
     (audio, camera, screen)
+}
+
+pub async fn sync_room_record(
+    state: &SharedState,
+    room_id: &str,
+) -> crate::db::AppResult<RoomRecord> {
+    let usernames = room_usernames(state, room_id, None).await;
+    let previous = state.database.room_record(room_id).await;
+    let mut room = previous.unwrap_or(RoomRecord {
+        room_id: room_id.to_owned(),
+        title: room_id.to_owned(),
+        icon: None,
+        members: Vec::new(),
+    });
+    if room.title.trim().is_empty() {
+        room.title = room_id.to_owned();
+    }
+    room.members = usernames;
+    state.database.set_room_record(room_id, &room).await?;
+    Ok(room)
+}
+
+async fn broadcast_room_record_to_members(
+    state: &SharedState,
+    room_id: &str,
+    op: u16,
+    req_id: Option<String>,
+    system: bool,
+    room: RoomRecord,
+) {
+    broadcast_to_room(
+        state,
+        room_id,
+        with_request_id(
+            json!({
+                "op": op,
+                "d": {
+                    "ok": true,
+                    "system": system,
+                    "gameId": room_id,
+                    "room": room
+                }
+            }),
+            req_id,
+        ),
+    )
+    .await;
 }
 
 fn call_media_json(audio: bool, camera: bool, screen: bool) -> Value {

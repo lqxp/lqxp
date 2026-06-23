@@ -189,6 +189,9 @@ pub async fn disconnect_player(state: &SharedState, session_id: &str) {
     let username = player.username.clone();
 
     for game_id in &player.rooms {
+        if let Err(err) = protocol::sync_room_record(state, game_id).await {
+            warn!("Failed to persist room {} on disconnect: {}", game_id, err);
+        }
         if player.status != UserPresenceStatus::Invisible {
             protocol::broadcast_to_room(
                 state,
