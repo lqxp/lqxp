@@ -490,6 +490,13 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
     let voice_roster = room_voice_usernames(state, game_id, None).await;
     let call_players = room_call_players(state, game_id, None).await;
 
+    let room_record = state.database.room_record(game_id).await.unwrap_or(RoomRecord {
+        room_id: game_id.to_owned(),
+        title: game_id.to_owned(),
+        icon: None,
+        members: room_usernames(state, game_id, None).await,
+    });
+
     broadcast_to_room(
         state,
         game_id,
@@ -504,7 +511,8 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                 "statuses": statuses,
                 "platforms": platforms,
                 "voicePlayers": voice_roster,
-                "callPlayers": call_players
+                "callPlayers": call_players,
+                "room": room_record
             }
         }),
     )
@@ -2484,6 +2492,12 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
             "image/jpeg" => "jpg",
             _ => "bin",
         });
+
+    if let Some(previous_icon) = state.database.room_icon(&room_id).await {
+        let previous_path = std::path::Path::new(&state.config.network.upload_dir)
+            .join(&previous_icon.file.id);
+        let _ = tokio::fs::remove_file(previous_path).await;
+    }
 
     let stored = match store_uploaded_bytes(state.as_ref(), extension, &decoded, mime_type).await {
         Ok(stored) => stored,

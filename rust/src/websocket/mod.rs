@@ -193,6 +193,14 @@ pub async fn disconnect_player(state: &SharedState, session_id: &str) {
             warn!("Failed to persist room {} on disconnect: {}", game_id, err);
         }
         if player.status != UserPresenceStatus::Invisible {
+            let room_record = state.database.room_record(game_id).await.unwrap_or(
+                crate::models::RoomRecord {
+                    room_id: game_id.clone(),
+                    title: game_id.clone(),
+                    icon: None,
+                    members: Vec::new(),
+                },
+            );
             protocol::broadcast_to_room(
                 state,
                 game_id,
@@ -201,7 +209,8 @@ pub async fn disconnect_player(state: &SharedState, session_id: &str) {
                     "d": {
                         "gameId": game_id,
                         "left": username.clone(),
-                        "clientId": player.client_id.clone()
+                        "clientId": player.client_id.clone(),
+                        "room": room_record
                     }
                 }),
             )
