@@ -1,18 +1,9 @@
 Todo:
 
-in the mobile web view, the cross into the room list doesnt appear to really leave the channel (fix that)
-
-
 audit of the code:
     fix all the potential XSS vulnerabilities about the emoji, message content , reactions parsing
-    review completly the server-side User-Input treatement to check if a possible vulnerabilities exist
 
 make a docker image of the lqxp server
     - do Dockerfile, dockercompose, docker image, a tutorial to installing it into machine
         - And a Pelican.dev panel egg
             - search on the internet the Yolks/Egg format to known how to use it into
-
-Enforcing the WebRTC connection
-    - avoiding IP leaks to the other users into the channel.
-        - be sure that the client doesnt known the others ips
-            - be sure that the calls and the camera/stream sink is well encrypted throught the E2EE key of the room
