@@ -70,7 +70,7 @@ pub fn build_router(state: SharedState) -> Router {
             post(admin_user_disabled),
         )
         .route("/api/admin/users/:user_id/banned", post(admin_user_banned))
-        .route("/release", get(latest_release))
+        .route("/api/release", get(latest_release))
         // Websocket
         .route("/ws", get(ws_upgrade))
         // Ancien serveur statique si besoin
