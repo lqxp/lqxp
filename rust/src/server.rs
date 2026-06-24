@@ -70,6 +70,7 @@ pub fn build_router(state: SharedState) -> Router {
             post(admin_user_disabled),
         )
         .route("/api/admin/users/:user_id/banned", post(admin_user_banned))
+        .route("/release", get(latest_release))
         // Websocket
         .route("/ws", get(ws_upgrade))
         // Ancien serveur statique si besoin
@@ -512,6 +513,35 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 
 fn api_error(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({ "ok": false, "error": message }))).into_response()
+}
+
+async fn latest_release() -> Response {
+    let client = reqwest::Client::builder()
+        .user_agent("QxProtocol-ReleaseProxy/0.1 (+https://github.com/lqxp)")
+        .build()
+        .expect("failed to build reqwest client");
+
+    let response = match client
+        .get("https://api.github.com/repos/lqxp/app/releases/latest")
+        .header(header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return api_error(StatusCode::BAD_GATEWAY, "Failed to fetch release."),
+    };
+
+    let status = response.status();
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(_) => return api_error(StatusCode::BAD_GATEWAY, "Failed to read release response."),
+    };
+
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .body(axum::body::Body::from(body))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 async fn webchat_page(State(state): State<SharedState>, headers: HeaderMap) -> impl IntoResponse {
