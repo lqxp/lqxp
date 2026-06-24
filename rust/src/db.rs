@@ -145,14 +145,6 @@ impl JsonDatabase {
         self.set_value("rooms", serde_json::to_value(rooms)?).await
     }
 
-    pub async fn room_icons(&self) -> HashMap<String, RoomIcon> {
-        self.room_records()
-            .await
-            .into_iter()
-            .filter_map(|(room_id, room)| room.icon.map(|icon| (room_id, icon)))
-            .collect()
-    }
-
     pub async fn room_icon(&self, room_id: &str) -> Option<RoomIcon> {
         self.room_record(room_id).await.and_then(|room| room.icon)
     }
