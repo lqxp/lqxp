@@ -554,8 +554,16 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
+    let current_profile = {
+        let players = state.players.read().await;
+        players
+            .get(session_id)
+            .map(|player| player.profile.clone())
+            .unwrap_or_default()
+    };
+
     let profile_update = if d.get("profile").is_some() {
-        match parse_user_profile(state, d.get("profile")).await {
+        match parse_user_profile(state, &current_profile, d.get("profile")).await {
             Ok(profile) => Some(profile),
             Err(message) => {
                 return respond_error(state, session_id, 8, message, request_id(&d)).await
@@ -3239,37 +3247,57 @@ fn parse_encrypted_payload(raw: Option<&Value>) -> Result<Option<EncryptedPayloa
     }))
 }
 
-async fn parse_user_profile(state: &SharedState, raw: Option<&Value>) -> Result<UserProfile, &'static str> {
+async fn parse_user_profile(
+    state: &SharedState,
+    current: &UserProfile,
+    raw: Option<&Value>,
+) -> Result<UserProfile, &'static str> {
     let Some(raw) = raw else {
-        return Ok(UserProfile::default());
+        return Ok(current.clone());
     };
     if raw.is_null() {
         return Ok(UserProfile::default());
     }
 
     let obj = raw.as_object().ok_or("Profile must be an object")?;
-    let avatar = parse_profile_image(
-        state,
-        obj.get("avatar"),
-        MAX_PROFILE_AVATAR_BYTES,
-        MAX_PROFILE_AVATAR_B64_LEN,
-    )
-    .await?;
-    let banner = parse_profile_image(
-        state,
-        obj.get("banner"),
-        MAX_PROFILE_BANNER_BYTES,
-        MAX_PROFILE_BANNER_B64_LEN,
-    )
-    .await?;
-    let description = sanitize_profile_text(
-        obj.get("description").and_then(Value::as_str).unwrap_or(""),
-        MAX_PROFILE_DESCRIPTION_CHARS,
-    );
-    let pronouns = sanitize_profile_text(
-        obj.get("pronouns").and_then(Value::as_str).unwrap_or(""),
-        MAX_PROFILE_PRONOUNS_CHARS,
-    );
+    let avatar = if obj.contains_key("avatar") {
+        parse_profile_image(
+            state,
+            obj.get("avatar"),
+            MAX_PROFILE_AVATAR_BYTES,
+            MAX_PROFILE_AVATAR_B64_LEN,
+        )
+        .await?
+    } else {
+        current.avatar.clone()
+    };
+    let banner = if obj.contains_key("banner") {
+        parse_profile_image(
+            state,
+            obj.get("banner"),
+            MAX_PROFILE_BANNER_BYTES,
+            MAX_PROFILE_BANNER_B64_LEN,
+        )
+        .await?
+    } else {
+        current.banner.clone()
+    };
+    let description = if obj.contains_key("description") {
+        sanitize_profile_text(
+            obj.get("description").and_then(Value::as_str).unwrap_or(""),
+            MAX_PROFILE_DESCRIPTION_CHARS,
+        )
+    } else {
+        current.description.clone()
+    };
+    let pronouns = if obj.contains_key("pronouns") {
+        sanitize_profile_text(
+            obj.get("pronouns").and_then(Value::as_str).unwrap_or(""),
+            MAX_PROFILE_PRONOUNS_CHARS,
+        )
+    } else {
+        current.pronouns.clone()
+    };
 
     Ok(UserProfile {
         avatar,
