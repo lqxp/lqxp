@@ -2906,7 +2906,7 @@ fn is_visible_to(player: &crate::state::PlayerSession, viewer_session_id: Option
     player.status != UserPresenceStatus::Invisible || viewer_session_id == Some(player.id.as_str())
 }
 
-async fn room_usernames(
+pub async fn room_usernames(
     state: &SharedState,
     game_id: &str,
     viewer_session_id: Option<&str>,
@@ -2940,7 +2940,7 @@ async fn room_players(
         .collect()
 }
 
-async fn room_profiles(
+pub async fn room_profiles(
     state: &SharedState,
     game_id: &str,
     viewer_session_id: Option<&str>,
@@ -2956,7 +2956,7 @@ async fn room_profiles(
     Value::Object(profiles)
 }
 
-async fn room_statuses(
+pub async fn room_statuses(
     state: &SharedState,
     game_id: &str,
     viewer_session_id: Option<&str>,
@@ -2972,7 +2972,7 @@ async fn room_statuses(
     Value::Object(statuses)
 }
 
-async fn room_platforms(
+pub async fn room_platforms(
     state: &SharedState,
     game_id: &str,
     viewer_session_id: Option<&str>,
@@ -2994,7 +2994,7 @@ async fn room_platforms(
     Value::Object(platforms)
 }
 
-async fn room_voice_usernames(
+pub async fn room_voice_usernames(
     state: &SharedState,
     game_id: &str,
     viewer_session_id: Option<&str>,
@@ -3011,7 +3011,7 @@ async fn room_voice_usernames(
         .collect()
 }
 
-async fn room_call_players(
+pub async fn room_call_players(
     state: &SharedState,
     game_id: &str,
     viewer_session_id: Option<&str>,
@@ -3401,7 +3401,7 @@ async fn parse_profile_image(
     }))
 }
 
-fn detect_profile_image(
+pub fn detect_profile_image(
     bytes: &[u8],
     declared_mime: &str,
 ) -> Result<(&'static str, u32, u32), &'static str> {

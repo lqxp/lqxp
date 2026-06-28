@@ -5,7 +5,7 @@ use std::{
 };
 
 use axum::{
-    extract::{ws::WebSocketUpgrade, ConnectInfo, Path as AxumPath, State},
+    extract::{ws::WebSocketUpgrade, ConnectInfo, DefaultBodyLimit, Multipart, Path as AxumPath, State},
     http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -18,9 +18,10 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     accounts::{user_response, username_hits_blocklist},
+    models::{ProfileImage, RoomIcon, RoomRecord},
     state::SharedState,
-    utils::extract_client_ip,
-    websocket::handle_socket,
+    utils::{extract_client_ip, store_uploaded_bytes},
+    websocket::{handle_socket, protocol},
 };
 
 async fn app_asset(
@@ -63,6 +64,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/auth/logout", post(auth_logout))
         .route("/api/auth/delete", post(auth_delete))
         .route("/api/auth/username", post(auth_username))
+        .route("/api/profile/image", post(profile_image_upload))
+        .route("/api/rooms/:room_id/icon", post(room_icon_upload))
         .route("/api/admin/overview", get(admin_overview))
         .route("/api/admin/features", post(admin_features))
         .route(
@@ -75,6 +78,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/ws", get(ws_upgrade))
         // Ancien serveur statique si besoin
         .route("/*path", get(public_asset))
+        .layer(DefaultBodyLimit::max(6 * 1024 * 1024))
         .layer(cors_layer())
         .with_state(state)
 }
@@ -131,6 +135,11 @@ struct DisabledRequest {
 struct BannedRequest {
     banned: bool,
 }
+
+const MAX_PROFILE_AVATAR_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PROFILE_BANNER_BYTES: usize = 5 * 1024 * 1024;
+const MAX_ROOM_ICON_UPLOAD_BYTES: usize = 5 * 1024 * 1024;
+const MAX_ROOM_ICON_UPLOADS_PER_IP: usize = 4;
 
 async fn auth_register(
     State(state): State<SharedState>,
@@ -343,6 +352,257 @@ async fn auth_username(
         }
         Err(err) => api_error(StatusCode::BAD_REQUEST, &err),
     }
+}
+
+async fn profile_image_upload(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let Some(user) = authenticated_user(&state, &headers).await else {
+        return api_error(StatusCode::UNAUTHORIZED, "Invalid session.");
+    };
+
+    let mut kind = String::new();
+    let mut file_name = String::new();
+    let mut declared_mime = String::new();
+    let mut bytes = Vec::new();
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or_default().to_owned();
+        if name == "kind" {
+            kind = field.text().await.unwrap_or_default();
+            continue;
+        }
+        if name == "file" {
+            file_name = field.file_name().unwrap_or("profile-image").to_owned();
+            declared_mime = field.content_type().unwrap_or_default().to_owned();
+            bytes = field.bytes().await.map(|value| value.to_vec()).unwrap_or_default();
+        }
+    }
+
+    let kind = kind.trim();
+    let max_bytes = match kind {
+        "avatar" => MAX_PROFILE_AVATAR_BYTES,
+        "banner" => MAX_PROFILE_BANNER_BYTES,
+        _ => return api_error(StatusCode::BAD_REQUEST, "Invalid profile image kind."),
+    };
+    if bytes.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "Missing file.");
+    }
+    if bytes.len() > max_bytes {
+        return api_error(StatusCode::PAYLOAD_TOO_LARGE, "Profile image too large.");
+    }
+
+    let (mime_type, width, height) = match protocol::detect_profile_image(&bytes, &declared_mime) {
+        Ok(result) => result,
+        Err(message) => return api_error(StatusCode::BAD_REQUEST, message),
+    };
+    let extension = file_extension(&file_name, mime_type);
+    let stored = match store_uploaded_bytes(state.as_ref(), extension, &bytes, mime_type).await {
+        Ok(stored) => stored,
+        Err(err) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    };
+    let image = ProfileImage { file: stored, width, height };
+
+    let (profile, sessions) = {
+        let mut players = state.players.write().await;
+        let mut profile = None;
+        let mut sessions = Vec::new();
+        for player in players.values_mut().filter(|player| player.user_id == user.id) {
+            match kind {
+                "avatar" => player.profile.avatar = Some(image.clone()),
+                "banner" => player.profile.banner = Some(image.clone()),
+                _ => {}
+            }
+            profile = Some(player.profile.clone());
+            sessions.push((
+                player.username.clone(),
+                player.status,
+                player.client_id.clone(),
+                player.platform.clone(),
+                player.rooms.iter().cloned().collect::<Vec<_>>(),
+            ));
+        }
+        let mut profile = profile.unwrap_or(user.profile.clone());
+        match kind {
+            "avatar" => profile.avatar = Some(image.clone()),
+            "banner" => profile.banner = Some(image.clone()),
+            _ => {}
+        }
+        (profile, sessions)
+    };
+
+    if let Err(err) = state.accounts.update_profile(&user.id, &profile).await {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, &err);
+    }
+
+    broadcast_profile_update(&state, sessions, profile.clone()).await;
+
+    Json(json!({ "ok": true, "profile": profile, kind: image })).into_response()
+}
+
+async fn room_icon_upload(
+    State(state): State<SharedState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    AxumPath(room_id): AxumPath<String>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let Some(user) = authenticated_user(&state, &headers).await else {
+        return api_error(StatusCode::UNAUTHORIZED, "Invalid session.");
+    };
+    let room_id = room_id.trim().to_owned();
+    if room_id.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid room.");
+    }
+
+    let (is_member, client_ip) = {
+        let players = state.players.read().await;
+        let mut is_member = false;
+        let mut ip = extract_client_ip(&headers, addr);
+        for player in players.values().filter(|player| player.user_id == user.id) {
+            if player.rooms.contains(&room_id) {
+                is_member = true;
+                ip = player.ip.clone();
+                break;
+            }
+        }
+        (is_member, ip)
+    };
+    if !is_member {
+        return api_error(StatusCode::FORBIDDEN, "You are not in this room.");
+    }
+
+    {
+        let mut uploads = state.ip_room_icon_uploads.write().await;
+        let entry = uploads.entry(client_ip).or_default();
+        let today = crate::utils::current_day_key();
+        if entry.day_key != today {
+            entry.day_key = today;
+            entry.count = 0;
+        }
+        if entry.count >= MAX_ROOM_ICON_UPLOADS_PER_IP {
+            return api_error(StatusCode::TOO_MANY_REQUESTS, "Daily room icon upload limit reached for this IP.");
+        }
+        entry.count += 1;
+    }
+
+    let mut file_name = String::new();
+    let mut declared_mime = String::new();
+    let mut bytes = Vec::new();
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name().unwrap_or_default() == "file" {
+            file_name = field.file_name().unwrap_or("room-icon").to_owned();
+            declared_mime = field.content_type().unwrap_or_default().to_owned();
+            bytes = field.bytes().await.map(|value| value.to_vec()).unwrap_or_default();
+        }
+    }
+    if bytes.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "Missing file.");
+    }
+    if bytes.len() > MAX_ROOM_ICON_UPLOAD_BYTES {
+        return api_error(StatusCode::PAYLOAD_TOO_LARGE, "Room icon too large.");
+    }
+
+    let (mime_type, _, _) = match protocol::detect_profile_image(&bytes, &declared_mime) {
+        Ok(result) => result,
+        Err(message) => return api_error(StatusCode::BAD_REQUEST, message),
+    };
+    let extension = file_extension(&file_name, mime_type);
+
+    if let Some(previous_icon) = state.database.room_icon(&room_id).await {
+        let previous_path = Path::new(&state.config.network.upload_dir).join(&previous_icon.file.id);
+        let _ = fs::remove_file(previous_path).await;
+    }
+
+    let stored = match store_uploaded_bytes(state.as_ref(), extension, &bytes, mime_type).await {
+        Ok(stored) => stored,
+        Err(err) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    };
+    let icon = RoomIcon { file: stored };
+    if let Err(err) = state.database.set_room_icon(&room_id, &icon).await {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string());
+    }
+    if let Err(err) = protocol::sync_room_record(&state, &room_id).await {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string());
+    }
+
+    let room = state.database.room_record(&room_id).await.unwrap_or(RoomRecord {
+        room_id: room_id.clone(),
+        title: room_id.clone(),
+        icon: Some(icon.clone()),
+        members: protocol::room_usernames(&state, &room_id, None).await,
+    });
+
+    protocol::broadcast_to_room(
+        &state,
+        &room_id,
+        json!({
+            "op": 32,
+            "d": {
+                "ok": true,
+                "system": true,
+                "gameId": room_id,
+                "room": room
+            }
+        }),
+    )
+    .await;
+
+    Json(json!({ "ok": true, "icon": icon, "room": room })).into_response()
+}
+
+async fn broadcast_profile_update(
+    state: &SharedState,
+    sessions: Vec<(String, crate::models::UserPresenceStatus, String, String, Vec<String>)>,
+    profile: crate::models::UserProfile,
+) {
+    for (username, status, client_id, platform, rooms) in sessions {
+        if status == crate::models::UserPresenceStatus::Invisible {
+            continue;
+        }
+        for room in rooms {
+            let profiles = protocol::room_profiles(state, &room, None).await;
+            let statuses = protocol::room_statuses(state, &room, None).await;
+            let platforms = protocol::room_platforms(state, &room, None).await;
+            let voice_roster = protocol::room_voice_usernames(state, &room, None).await;
+            let call_players = protocol::room_call_players(state, &room, None).await;
+            protocol::broadcast_to_room(
+                state,
+                &room,
+                json!({
+                    "op": 26,
+                    "d": {
+                        "gameId": room,
+                        "user": username,
+                        "profile": profile,
+                        "profiles": profiles,
+                        "statuses": statuses,
+                        "platforms": platforms,
+                        "voicePlayers": voice_roster,
+                        "callPlayers": call_players,
+                        "clientId": client_id,
+                        "platform": platform
+                    }
+                }),
+            )
+            .await;
+        }
+    }
+}
+
+fn file_extension<'a>(file_name: &'a str, mime_type: &str) -> &'a str {
+    file_name
+        .rsplit('.')
+        .next()
+        .filter(|segment| *segment != file_name)
+        .unwrap_or(match mime_type {
+            "image/png" => "png",
+            "image/gif" => "gif",
+            "image/jpeg" => "jpg",
+            _ => "bin",
+        })
 }
 
 async fn admin_overview(State(state): State<SharedState>, headers: HeaderMap) -> impl IntoResponse {

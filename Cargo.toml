@@ -9,7 +9,7 @@ path = "rust/src/main.rs"
 
 [dependencies]
 argon2 = "0.5"
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.7", features = ["multipart", "ws"] }
 base64 = "0.22"
 bip39 = "2"
 futures-util = "0.3"
