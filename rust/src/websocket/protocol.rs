@@ -212,6 +212,7 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
         final_username,
         account_id,
         is_admin,
+        badges,
         exchange_key,
         voice_chat,
         client_id,
@@ -229,6 +230,7 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
 
         player.user_id = account.id.clone();
         player.is_admin = account.admin;
+        player.badges = account.badges.clone();
         player.username = account.username.clone();
         player.is_voice_chat = d
             .get("isVoiceChat")
@@ -259,6 +261,7 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
             player.username.clone(),
             player.user_id.clone(),
             player.is_admin,
+            player.badges.clone(),
             player.exchange_key.clone(),
             player.is_voice_chat,
             player.client_id.clone(),

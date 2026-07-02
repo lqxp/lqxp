@@ -438,6 +438,7 @@ impl AccountDatabase {
         if user.disabled || user.banned {
             return Ok(None);
         }
+        let admin = self.is_admin(&user.id);
         Ok(Some(AuthenticatedUser {
             id: user.id.clone(),
             username: user.username.clone(),
@@ -445,7 +446,8 @@ impl AccountDatabase {
             status: user.status,
             disabled: user.disabled,
             banned: user.banned,
-            admin: self.is_admin(&user.id),
+            admin,
+            badges: if admin { vec!["admin".to_owned()] } else { Vec::new() },
         }))
     }
 
@@ -521,6 +523,7 @@ impl AccountDatabase {
             disabled: user.disabled,
             banned: user.banned,
             admin: user.admin,
+            badges: user.badges,
             created_at: 0,
         }))
     }
