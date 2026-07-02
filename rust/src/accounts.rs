@@ -34,6 +34,12 @@ const USERNAME_MAX: usize = 32;
 const PASSWORD_MIN: usize = 8;
 const PASSWORD_MAX: usize = 128;
 const RECOVERY_WORD_COUNT: usize = 16;
+const EARLY_USER_LIMIT: i64 = 200;
+const USER_SELECT_BY_CREATED_DESC: &str = "SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users ORDER BY created_at DESC";
+const USER_SELECT_BY_USERNAME_SQLITE: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) WHERE username = ?";
+const USER_SELECT_BY_USERNAME_POSTGRES: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) ranked_users WHERE username = $1";
+const USER_SELECT_BY_ID_SQLITE: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) WHERE id = ?";
+const USER_SELECT_BY_ID_POSTGRES: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) ranked_users WHERE id = $1";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +95,7 @@ struct StoredUser {
     disabled: bool,
     banned: bool,
     created_at: u64,
+    user_rank: i64,
     username_changes: Vec<u64>,
 }
 
@@ -103,6 +110,7 @@ struct RawStoredUser {
     disabled: i64,
     banned: i64,
     created_at: i64,
+    user_rank: i64,
     username_changes_json: String,
 }
 
@@ -438,7 +446,7 @@ impl AccountDatabase {
         if user.disabled || user.banned {
             return Ok(None);
         }
-        let admin = self.is_admin(&user.id);
+        let badges = self.user_badges(&user);
         Ok(Some(AuthenticatedUser {
             id: user.id.clone(),
             username: user.username.clone(),
@@ -446,8 +454,8 @@ impl AccountDatabase {
             status: user.status,
             disabled: user.disabled,
             banned: user.banned,
-            admin,
-            badges: if admin { vec!["admin".to_owned()] } else { Vec::new() },
+            admin: badges.iter().any(|badge| badge == "admin"),
+            badges,
         }))
     }
 
@@ -641,12 +649,12 @@ impl AccountDatabase {
     pub async fn list_users(&self) -> AccountResult<Vec<PublicUser>> {
         let rows = match &self.backend {
             SqlBackend::Sqlite(pool) => {
-                sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users ORDER BY created_at DESC")
+                sqlx::query_as::<_, RawStoredUser>(USER_SELECT_BY_CREATED_DESC)
                     .fetch_all(pool)
                     .await
             }
             SqlBackend::Postgres(pool) => {
-                sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users ORDER BY created_at DESC")
+                sqlx::query_as::<_, RawStoredUser>(USER_SELECT_BY_CREATED_DESC)
                     .fetch_all(pool)
                     .await
             }
@@ -731,16 +739,19 @@ impl AccountDatabase {
         self.admin_ids.iter().any(|id| id == user_id)
     }
 
-    fn user_badges(&self, user_id: &str) -> Vec<String> {
-        if self.is_admin(user_id) {
-            vec!["admin".to_owned()]
-        } else {
-            Vec::new()
+    fn user_badges(&self, user: &StoredUser) -> Vec<String> {
+        let mut badges = Vec::new();
+        if self.is_admin(&user.id) {
+            badges.push("admin".to_owned());
         }
+        if user.user_rank > 0 && user.user_rank <= EARLY_USER_LIMIT {
+            badges.push("early".to_owned());
+        }
+        badges
     }
 
     fn public_user(&self, user: StoredUser) -> PublicUser {
-        let badges = self.user_badges(&user.id);
+        let badges = self.user_badges(&user);
         PublicUser {
             id: user.id.clone(),
             username: user.username,
@@ -813,13 +824,13 @@ impl AccountDatabase {
     async fn user_by_username(&self, username: &str) -> AccountResult<Option<StoredUser>> {
         let row = match &self.backend {
             SqlBackend::Sqlite(pool) => {
-                sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users WHERE username = ?")
+                sqlx::query_as::<_, RawStoredUser>(USER_SELECT_BY_USERNAME_SQLITE)
                     .bind(username)
                     .fetch_optional(pool)
                     .await
             }
             SqlBackend::Postgres(pool) => {
-                sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users WHERE username = $1")
+                sqlx::query_as::<_, RawStoredUser>(USER_SELECT_BY_USERNAME_POSTGRES)
                     .bind(username)
                     .fetch_optional(pool)
                     .await
@@ -832,13 +843,13 @@ impl AccountDatabase {
     async fn user_by_id(&self, user_id: &str) -> AccountResult<Option<StoredUser>> {
         let row = match &self.backend {
             SqlBackend::Sqlite(pool) => {
-                sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users WHERE id = ?")
+                sqlx::query_as::<_, RawStoredUser>(USER_SELECT_BY_ID_SQLITE)
                     .bind(user_id)
                     .fetch_optional(pool)
                     .await
             }
             SqlBackend::Postgres(pool) => {
-                sqlx::query_as::<_, RawStoredUser>("SELECT * FROM users WHERE id = $1")
+                sqlx::query_as::<_, RawStoredUser>(USER_SELECT_BY_ID_POSTGRES)
                     .bind(user_id)
                     .fetch_optional(pool)
                     .await
@@ -863,6 +874,7 @@ impl AccountDatabase {
             disabled: row.disabled != 0,
             banned: row.banned != 0,
             created_at: row.created_at.max(0) as u64,
+            user_rank: row.user_rank,
             username_changes,
         })
     }
