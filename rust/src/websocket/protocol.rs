@@ -69,24 +69,13 @@ pub async fn process_message(
             false
         }
         1 => {
-            let players = {
-                let players = state.players.read().await;
-                players
-                    .values()
-                    .filter(|player| !player.username.trim().is_empty())
-                    .map(|player| player.username.clone())
-                    .collect::<Vec<_>>()
-            };
-
             send_json(
                 &tx,
                 with_request_id(
                     json!({
                         "op": 1,
                         "d": {
-                            "ok": true,
-                            "count": players.len(),
-                            "players": players
+                            "ok": true
                         }
                     }),
                     request_id(&payload.d),
@@ -208,21 +197,7 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
         }
     }
 
-    let (
-        final_username,
-        account_id,
-        is_admin,
-        badges,
-        exchange_key,
-        voice_chat,
-        client_id,
-        platform,
-        version,
-        is_mobile,
-        is_secure,
-        profile,
-        status,
-    ) = {
+    let (final_username, account_id, is_admin, voice_chat, version, profile, status) = {
         let mut players = state.players.write().await;
         let Some(player) = players.get_mut(session_id) else {
             return false;
@@ -261,14 +236,8 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
             player.username.clone(),
             player.user_id.clone(),
             player.is_admin,
-            player.badges.clone(),
-            player.exchange_key.clone(),
             player.is_voice_chat,
-            player.client_id.clone(),
-            player.platform.clone(),
             player.version.clone(),
-            player.is_mobile,
-            player.is_secure,
             player.profile.clone(),
             player.status,
         )
@@ -308,32 +277,6 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
         ),
     )
     .await;
-
-    if status != UserPresenceStatus::Invisible {
-        if let Some(exchange_key) = exchange_key {
-            broadcast_to_exchange_key_excluding(
-                state,
-                &exchange_key,
-                session_id,
-                json!({
-                    "op": 13,
-                    "d": {
-                        "username": final_username,
-                        "v": version,
-                        "isSecure": is_secure,
-                        "isMobile": is_mobile,
-                        "isVoiceChat": voice_chat,
-                        "clientId": client_id,
-                        "platform": platform,
-                        "profile": profile,
-                        "status": status,
-                        "badges": badges
-                    }
-                }),
-            )
-            .await;
-        }
-    }
 
     false
 }
