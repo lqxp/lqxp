@@ -153,7 +153,6 @@ async fn register_connection(
             version: "unknown".to_owned(),
             last_message_timestamp: None,
             last_voice_chunk_timestamp: None,
-            exchange_key: None,
             is_mobile: None,
             is_secure: None,
             muted_users: HashSet::new(),
@@ -235,22 +234,6 @@ pub async fn disconnect_player(state: &SharedState, session_id: &str) {
                         "isVoiceChat": false,
                         "clientId": player.client_id.clone(),
                         "platform": player.platform.clone()
-                    }
-                }),
-            )
-            .await;
-        }
-    }
-
-    if player.status != UserPresenceStatus::Invisible {
-        if let Some(exchange_key) = &player.exchange_key {
-            protocol::broadcast_to_exchange_key(
-                state,
-                exchange_key,
-                json!({
-                    "op": 14,
-                    "d": {
-                        "username": player.username.clone()
                     }
                 }),
             )

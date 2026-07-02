@@ -104,9 +104,6 @@ pub async fn process_message(
         }
         7 => send_chat_message(&state, &session_id, payload.d).await,
         8 => update_client_settings(&state, &session_id, payload.d).await,
-        15 => broadcast_alive(&state, &session_id, payload.d).await,
-        16 => broadcast_exchange_end(&state, &session_id, payload.d).await,
-        17 => exchange_joined(&state, &session_id, payload.d).await,
         18 => send_room_history(&state, &session_id, payload.d).await,
         19 => toggle_message_reaction(&state, &session_id, payload.d).await,
         21 => delete_message(&state, &session_id, payload.d).await,
@@ -220,11 +217,6 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_owned();
-        player.exchange_key = d
-            .get("exchangeKey")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .filter(|value| !value.trim().is_empty());
         player.client_id = sanitize_client_id(d.get("clientId").and_then(Value::as_str));
         player.platform = sanitize_platform(d.get("platform").and_then(Value::as_str));
         player.is_mobile = d.get("isMobile").and_then(Value::as_bool);
@@ -1564,121 +1556,6 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
         });
     }
 
-    false
-}
-
-async fn broadcast_alive(state: &SharedState, session_id: &str, d: Value) -> bool {
-    let Some(alive) = d.get("alive").cloned() else {
-        return respond_error(state, session_id, 15, "Malformed request", request_id(&d)).await;
-    };
-
-    let exchange_key = {
-        let players = state.players.read().await;
-        if let Some(player) = players.get(session_id) {
-            if player.rooms.is_empty() {
-                Err("You need to be ingame to do that")
-            } else {
-                Ok(player.exchange_key.clone())
-            }
-        } else {
-            Err("You need to be identified before")
-        }
-    };
-
-    let exchange_key = match exchange_key {
-        Ok(exchange_key) => exchange_key,
-        Err(message) => return respond_error(state, session_id, 15, message, request_id(&d)).await,
-    };
-
-    if let Some(exchange_key) = exchange_key {
-        broadcast_to_exchange_key(
-            state,
-            &exchange_key,
-            json!({
-                "op": 15,
-                "d": {
-                    "alive": alive
-                }
-            }),
-        )
-        .await;
-    }
-
-    respond_to_sender(
-        state,
-        session_id,
-        with_request_id(json!({ "op": 15, "d": { "ok": true } }), request_id(&d)),
-    )
-    .await;
-    false
-}
-
-async fn broadcast_exchange_end(state: &SharedState, session_id: &str, d: Value) -> bool {
-    let payload = d.get("data").cloned().unwrap_or_else(|| json!({}));
-    let exchange_key = {
-        let players = state.players.read().await;
-        if let Some(player) = players.get(session_id) {
-            Ok(player.exchange_key.clone())
-        } else {
-            Err("You need to be identified before")
-        }
-    };
-
-    let exchange_key = match exchange_key {
-        Ok(exchange_key) => exchange_key,
-        Err(message) => return respond_error(state, session_id, 16, message, request_id(&d)).await,
-    };
-
-    if let Some(exchange_key) = exchange_key {
-        broadcast_to_exchange_key(
-            state,
-            &exchange_key,
-            json!({
-                "op": 16,
-                "d": {
-                    "data": payload
-                }
-            }),
-        )
-        .await;
-    }
-
-    respond_to_sender(
-        state,
-        session_id,
-        with_request_id(json!({ "op": 16, "d": { "ok": true } }), request_id(&d)),
-    )
-    .await;
-    false
-}
-
-async fn exchange_joined(state: &SharedState, session_id: &str, d: Value) -> bool {
-    let Some(game_id) = d.get("gameId").and_then(Value::as_str) else {
-        return respond_error(state, session_id, 17, "Missing gameId", request_id(&d)).await;
-    };
-    let Some(exchange_key) = d.get("exchangeKey").and_then(Value::as_str) else {
-        return respond_error(state, session_id, 17, "Missing exchangeKey", request_id(&d)).await;
-    };
-
-    broadcast_to_exchange_key(
-        state,
-        exchange_key,
-        json!({
-            "op": 12,
-            "d": {
-                "gameId": game_id,
-                "exchangeKey": exchange_key
-            }
-        }),
-    )
-    .await;
-
-    respond_to_sender(
-        state,
-        session_id,
-        with_request_id(json!({ "op": 17, "d": { "ok": true } }), request_id(&d)),
-    )
-    .await;
     false
 }
 
@@ -3434,32 +3311,4 @@ fn jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32), &'static str> {
         i += len;
     }
     Err("JPEG dimensions are invalid")
-}
-
-pub async fn broadcast_to_exchange_key(state: &SharedState, exchange_key: &str, payload: Value) {
-    broadcast_to_exchange_key_excluding(state, exchange_key, "", payload).await;
-}
-
-pub async fn broadcast_to_exchange_key_excluding(
-    state: &SharedState,
-    exchange_key: &str,
-    excluded_session_id: &str,
-    payload: Value,
-) {
-    let recipients = {
-        let players = state.players.read().await;
-        players
-            .values()
-            .filter(|player| {
-                player.exchange_key.as_deref() == Some(exchange_key)
-                    && player.id != excluded_session_id
-            })
-            .map(|player| player.tx.clone())
-            .collect::<Vec<_>>()
-    };
-
-    let encoded = payload.to_string();
-    for recipient in recipients {
-        let _ = recipient.send(Message::Text(encoded.clone().into()));
-    }
 }

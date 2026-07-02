@@ -53,7 +53,6 @@ pub struct PlayerSession {
     pub version: String,
     pub last_message_timestamp: Option<u64>,
     pub last_voice_chunk_timestamp: Option<u64>,
-    pub exchange_key: Option<String>,
     pub is_mobile: Option<bool>,
     pub is_secure: Option<bool>,
     pub muted_users: HashSet<String>,
