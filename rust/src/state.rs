@@ -40,6 +40,7 @@ pub struct PlayerSession {
     pub id: String,
     pub user_id: String,
     pub is_admin: bool,
+    pub badges: Vec<String>,
     pub ip: String,
     pub username: String,
     pub tx: mpsc::UnboundedSender<Message>,

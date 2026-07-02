@@ -140,6 +140,7 @@ async fn register_connection(
             id: session_id.to_owned(),
             user_id: String::new(),
             is_admin: false,
+            badges: Vec::new(),
             ip: ip.to_owned(),
             username: String::new(),
             tx,

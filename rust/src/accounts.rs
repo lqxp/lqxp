@@ -45,6 +45,7 @@ pub struct PublicUser {
     pub disabled: bool,
     pub banned: bool,
     pub admin: bool,
+    pub badges: Vec<String>,
     pub created_at: u64,
 }
 
@@ -57,6 +58,7 @@ pub struct AuthenticatedUser {
     pub disabled: bool,
     pub banned: bool,
     pub admin: bool,
+    pub badges: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -726,7 +728,16 @@ impl AccountDatabase {
         self.admin_ids.iter().any(|id| id == user_id)
     }
 
+    fn user_badges(&self, user_id: &str) -> Vec<String> {
+        if self.is_admin(user_id) {
+            vec!["admin".to_owned()]
+        } else {
+            Vec::new()
+        }
+    }
+
     fn public_user(&self, user: StoredUser) -> PublicUser {
+        let badges = self.user_badges(&user.id);
         PublicUser {
             id: user.id.clone(),
             username: user.username,
@@ -734,7 +745,8 @@ impl AccountDatabase {
             status: user.status,
             disabled: user.disabled,
             banned: user.banned,
-            admin: self.is_admin(&user.id),
+            admin: badges.iter().any(|badge| badge == "admin"),
+            badges,
             created_at: user.created_at,
         }
     }

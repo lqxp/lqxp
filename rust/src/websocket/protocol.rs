@@ -323,7 +323,8 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
                         "clientId": client_id,
                         "platform": platform,
                         "profile": profile,
-                        "status": status
+                        "status": status,
+                        "badges": badges
                     }
                 }),
             )
@@ -2180,6 +2181,7 @@ async fn admin_status(state: &SharedState, session_id: &str, d: Value) -> bool {
                     delete_messages_on_leave: player.delete_messages_on_leave,
                     profile: player.profile.clone(),
                     status: player.status,
+                    badges: player.badges.clone(),
                 }
             })
             .collect::<Vec<_>>()
@@ -2935,6 +2937,7 @@ async fn room_players(
                 "platform": player.platform,
                 "status": player.status,
                 "profile": player.profile,
+                "badges": player.badges,
             })
         })
         .collect()

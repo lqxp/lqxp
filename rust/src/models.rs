@@ -33,6 +33,7 @@ pub struct PlayerStatus {
     pub delete_messages_on_leave: bool,
     pub profile: UserProfile,
     pub status: UserPresenceStatus,
+    pub badges: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
