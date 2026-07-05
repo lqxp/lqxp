@@ -13,8 +13,8 @@ use crate::{
     },
     state::SharedState,
     utils::{
-        admin_allowed, current_day_key, now_ms, random_message_id, request_id,
-        sanitize_filename, send_json, store_uploaded_bytes, with_request_id,
+        admin_allowed, current_day_key, now_ms, random_message_id, request_id, sanitize_filename,
+        send_json, store_uploaded_bytes, with_request_id,
     },
 };
 
@@ -50,6 +50,7 @@ const MAX_VOICE_CHUNK_B64_LEN: usize = ((MAX_VOICE_CHUNK_BYTES + 2) / 3) * 4 + 4
 // letting a spammer saturate the room.
 const MIN_VOICE_CHUNK_INTERVAL_MS: u64 = 100;
 const DUPLICATE_MESSAGE_WINDOW_MS: u64 = 10 * 60 * 1000;
+const MIN_BETWEEN_MESSAGE_INTERVAL: u64 = 100;
 
 pub async fn process_message(
     state: SharedState,
@@ -308,12 +309,16 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
     }
 
     let joining_status = session_status(state, session_id).await;
-    let room_record = state.database.room_record(game_id).await.unwrap_or(RoomRecord {
-        room_id: game_id.to_owned(),
-        title: game_id.to_owned(),
-        icon: None,
-        members: room_usernames(state, game_id, Some(session_id)).await,
-    });
+    let room_record = state
+        .database
+        .room_record(game_id)
+        .await
+        .unwrap_or(RoomRecord {
+            room_id: game_id.to_owned(),
+            title: game_id.to_owned(),
+            icon: None,
+            members: room_usernames(state, game_id, Some(session_id)).await,
+        });
     let room_icon_url = room_record
         .icon
         .as_ref()
@@ -430,12 +435,16 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
     let voice_roster = room_voice_usernames(state, game_id, None).await;
     let call_players = room_call_players(state, game_id, None).await;
 
-    let room_record = state.database.room_record(game_id).await.unwrap_or(RoomRecord {
-        room_id: game_id.to_owned(),
-        title: game_id.to_owned(),
-        icon: None,
-        members: room_usernames(state, game_id, None).await,
-    });
+    let room_record = state
+        .database
+        .room_record(game_id)
+        .await
+        .unwrap_or(RoomRecord {
+            room_id: game_id.to_owned(),
+            title: game_id.to_owned(),
+            icon: None,
+            members: room_usernames(state, game_id, None).await,
+        });
 
     broadcast_to_room(
         state,
@@ -567,18 +576,18 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
         platform,
         rooms,
     ) = match update_context {
-            Ok(context) => context,
-            Err(_) => {
-                return respond_error(
-                    state,
-                    session_id,
-                    8,
-                    "You need to be identified before",
-                    request_id(&d),
-                )
-                .await
-            }
-        };
+        Ok(context) => context,
+        Err(_) => {
+            return respond_error(
+                state,
+                session_id,
+                8,
+                "You need to be identified before",
+                request_id(&d),
+            )
+            .await
+        }
+    };
 
     if profile_update.is_some() {
         if let Err(err) = state.accounts.update_profile(&user_id, &profile).await {
@@ -863,7 +872,7 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
             } else if !player.rooms.contains(target_game_id) {
                 Err("Not a member of this room".to_owned())
             } else if let Some(last) = player.last_message_timestamp {
-                if now.saturating_sub(last) < 1_000 {
+                if now.saturating_sub(last) < MIN_BETWEEN_MESSAGE_INTERVAL {
                     Err(format!(
                         "You need to wait {}ms until the next message",
                         now.saturating_sub(last)
@@ -1207,7 +1216,9 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
 
     let room_hint = d.get("gameId").and_then(Value::as_str);
     let (room_id, reactions) =
-        match update_message_reactions(state, message_id, emoji.as_str(), &username, room_hint).await {
+        match update_message_reactions(state, message_id, emoji.as_str(), &username, room_hint)
+            .await
+        {
             Some(result) => result,
             None => {
                 return respond_error(state, session_id, 19, "Unknown messageId", request_id(&d))
@@ -2210,17 +2221,27 @@ async fn admin_broadcast(state: &SharedState, session_id: &str, d: Value) -> boo
 
 async fn update_typing_state(state: &SharedState, session_id: &str, d: Value) -> bool {
     let req_id = request_id(&d);
-    let room_id = match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str)).await {
-        Ok(room_id) => room_id,
-        Err(message) => return respond_error(state, session_id, 31, &message, req_id).await,
-    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 31, &message, req_id).await,
+        };
 
     let typing = d.get("typing").and_then(Value::as_bool).unwrap_or(false);
 
     let username = {
         let players = state.players.read().await;
         let Some(player) = players.get(session_id) else {
-            return respond_error(state, session_id, 31, "You need to be identified before", req_id).await;
+            return respond_error(
+                state,
+                session_id,
+                31,
+                "You need to be identified before",
+                req_id,
+            )
+            .await;
         };
         if !player.rooms.contains(&room_id) {
             return respond_error(state, session_id, 31, "You are not in this room", req_id).await;
@@ -2247,10 +2268,13 @@ async fn update_typing_state(state: &SharedState, session_id: &str, d: Value) ->
 
 async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bool {
     let req_id = request_id(&d);
-    let room_id = match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str)).await {
-        Ok(room_id) => room_id,
-        Err(message) => return respond_error(state, session_id, 32, &message, req_id).await,
-    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 32, &message, req_id).await,
+        };
 
     let client_ip = {
         let players = state.players.read().await;
@@ -2269,7 +2293,14 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
             entry.count = 0;
         }
         if entry.count >= MAX_ROOM_ICON_UPLOADS_PER_IP {
-            return respond_error(state, session_id, 32, "Daily room icon upload limit reached for this IP", req_id).await;
+            return respond_error(
+                state,
+                session_id,
+                32,
+                "Daily room icon upload limit reached for this IP",
+                req_id,
+            )
+            .await;
         }
         entry.count += 1;
     }
@@ -2290,7 +2321,14 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
         return respond_error(state, session_id, 32, "Missing file data", req_id).await;
     };
     if data_b64.len() > MAX_ROOM_ICON_UPLOAD_B64_LEN {
-        return respond_error(state, session_id, 32, "Room icon too large (5MB max)", req_id).await;
+        return respond_error(
+            state,
+            session_id,
+            32,
+            "Room icon too large (5MB max)",
+            req_id,
+        )
+        .await;
     }
 
     let decoded = match B64.decode(data_b64.as_bytes()) {
@@ -2298,7 +2336,14 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
         Err(_) => return respond_error(state, session_id, 32, "Invalid file base64", req_id).await,
     };
     if decoded.len() > MAX_ROOM_ICON_UPLOAD_BYTES {
-        return respond_error(state, session_id, 32, "Room icon too large (5MB max)", req_id).await;
+        return respond_error(
+            state,
+            session_id,
+            32,
+            "Room icon too large (5MB max)",
+            req_id,
+        )
+        .await;
     }
 
     let declared_mime = obj
@@ -2312,7 +2357,9 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
     };
 
     let filename = sanitize_filename(
-        obj.get("filename").and_then(Value::as_str).unwrap_or("room-icon"),
+        obj.get("filename")
+            .and_then(Value::as_str)
+            .unwrap_or("room-icon"),
         "room-icon",
         MAX_FILENAME_LEN,
     );
@@ -2328,14 +2375,16 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
         });
 
     if let Some(previous_icon) = state.database.room_icon(&room_id).await {
-        let previous_path = std::path::Path::new(&state.config.network.upload_dir)
-            .join(&previous_icon.file.id);
+        let previous_path =
+            std::path::Path::new(&state.config.network.upload_dir).join(&previous_icon.file.id);
         let _ = tokio::fs::remove_file(previous_path).await;
     }
 
     let stored = match store_uploaded_bytes(state.as_ref(), extension, &decoded, mime_type).await {
         Ok(stored) => stored,
-        Err(_) => return respond_error(state, session_id, 32, "Failed to store room icon", req_id).await,
+        Err(_) => {
+            return respond_error(state, session_id, 32, "Failed to store room icon", req_id).await
+        }
     };
     let icon = RoomIcon { file: stored };
     if let Err(err) = state.database.set_room_icon(&room_id, &icon).await {
@@ -2346,12 +2395,16 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
         error!("Failed to sync room {} after icon upload: {}", room_id, err);
     }
 
-    let room = state.database.room_record(&room_id).await.unwrap_or(RoomRecord {
-        room_id: room_id.clone(),
-        title: room_id.clone(),
-        icon: Some(icon.clone()),
-        members: room_usernames(state, &room_id, Some(session_id)).await,
-    });
+    let room = state
+        .database
+        .room_record(&room_id)
+        .await
+        .unwrap_or(RoomRecord {
+            room_id: room_id.clone(),
+            title: room_id.clone(),
+            icon: Some(icon.clone()),
+            members: room_usernames(state, &room_id, Some(session_id)).await,
+        });
 
     broadcast_room_record_to_members(state, &room_id, 32, req_id.clone(), true, room.clone()).await;
 
@@ -2377,10 +2430,13 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
 
 async fn update_room_title(state: &SharedState, session_id: &str, d: Value) -> bool {
     let req_id = request_id(&d);
-    let room_id = match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str)).await {
-        Ok(room_id) => room_id,
-        Err(message) => return respond_error(state, session_id, 33, &message, req_id).await,
-    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 33, &message, req_id).await,
+        };
 
     let title = d
         .get("title")
@@ -2393,15 +2449,32 @@ async fn update_room_title(state: &SharedState, session_id: &str, d: Value) -> b
     let mut room = match sync_room_record(state, &room_id).await {
         Ok(room) => room,
         Err(err) => {
-            error!("Failed to sync room {} before title update: {}", room_id, err);
-            return respond_error(state, session_id, 33, "Failed to persist room title", req_id).await;
+            error!(
+                "Failed to sync room {} before title update: {}",
+                room_id, err
+            );
+            return respond_error(
+                state,
+                session_id,
+                33,
+                "Failed to persist room title",
+                req_id,
+            )
+            .await;
         }
     };
 
     room.title = title;
     if let Err(err) = state.database.set_room_record(&room_id, &room).await {
         error!("Failed to persist room title for {}: {}", room_id, err);
-        return respond_error(state, session_id, 33, "Failed to persist room title", req_id).await;
+        return respond_error(
+            state,
+            session_id,
+            33,
+            "Failed to persist room title",
+            req_id,
+        )
+        .await;
     }
 
     broadcast_room_record_to_members(state, &room_id, 33, req_id.clone(), true, room.clone()).await;
@@ -2658,7 +2731,10 @@ fn sanitize_reaction_emoji(value: &str) -> Option<String> {
     if trimmed.is_empty() || trimmed.chars().count() > MAX_REACTION_EMOJI_CHARS {
         return None;
     }
-    if trimmed.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+    if trimmed
+        .chars()
+        .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
         return None;
     }
     Some(trimmed.to_owned())
@@ -2809,10 +2885,15 @@ pub async fn room_platforms(
         .values()
         .filter(|player| player.rooms.contains(game_id) && is_visible_to(player, viewer_session_id))
     {
-        let entry = platforms.entry(player.username.clone()).or_insert_with(|| json!([]));
+        let entry = platforms
+            .entry(player.username.clone())
+            .or_insert_with(|| json!([]));
         if let Some(arr) = entry.as_array_mut() {
             let platform = sanitize_platform(Some(&player.platform));
-            if !arr.iter().any(|value| value.as_str() == Some(platform.as_str())) {
+            if !arr
+                .iter()
+                .any(|value| value.as_str() == Some(platform.as_str()))
+            {
                 arr.push(json!(platform));
             }
         }
@@ -2950,7 +3031,10 @@ pub async fn broadcast_to_room(state: &SharedState, game_id: &str, payload: Valu
     }
 }
 
-async fn parse_attachment(state: &SharedState, raw: Option<&Value>) -> Result<Option<Attachment>, &'static str> {
+async fn parse_attachment(
+    state: &SharedState,
+    raw: Option<&Value>,
+) -> Result<Option<Attachment>, &'static str> {
     let Some(obj) = raw else {
         return Ok(None);
     };
