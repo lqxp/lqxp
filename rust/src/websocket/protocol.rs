@@ -278,6 +278,7 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
     let Some(game_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
         return respond_error(state, session_id, 3, "Malformed request", request_id(&d)).await;
     };
+    let silent_join = d.get("silentJoin").and_then(Value::as_bool).unwrap_or(false);
 
     if let Err(message) = validate_room_id(game_id) {
         return respond_error(state, session_id, 3, message, request_id(&d)).await;
@@ -290,14 +291,14 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                 Err("You need to be identified before")
             } else {
                 let already_in = !player.rooms.insert(game_id.to_owned());
-                Ok(already_in)
+                Ok((already_in, player.username.clone()))
             }
         } else {
             Err("You need to be identified before")
         }
     };
 
-    let already_in = match join_result {
+    let (already_in, player_name) = match join_result {
         Ok(value) => value,
         Err(message) => return respond_error(state, session_id, 3, message, request_id(&d)).await,
     };
@@ -338,7 +339,7 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
     let voice_roster = room_voice_usernames(state, game_id, Some(session_id)).await;
     let call_players = room_call_players(state, game_id, Some(session_id)).await;
 
-    if !already_in && joining_status != Some(UserPresenceStatus::Invisible) {
+    if !already_in && !silent_join && joining_status != Some(UserPresenceStatus::Invisible) {
         broadcast_to_room(
             state,
             game_id,
@@ -348,6 +349,7 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "ok": true,
                     "system": true,
                     "gameId": game_id,
+                    "joined": player_name,
                     "players": broadcast_roster,
                     "profiles": broadcast_profiles,
                     "statuses": broadcast_statuses,
@@ -2585,6 +2587,51 @@ async fn resolve_room_for_session(
     } else {
         Err("You need to be identified before".to_owned())
     }
+}
+
+fn system_room_event_message(room_id: &str, username: &str, event_kind: &str) -> ChatMessageRecord {
+    let timestamp = now_ms();
+    let action = match event_kind {
+        "join" => "joined",
+        "leave" => "left",
+        _ => "updated",
+    };
+
+    ChatMessageRecord {
+        message_id: random_message_id(),
+        room_id: room_id.to_owned(),
+        user: "[system]".to_owned(),
+        username: "System".to_owned(),
+        text: format!("{} {} the room", username, action),
+        timestamp,
+        edited_at: None,
+        system: true,
+        reactions: Vec::new(),
+        reply_to_message_id: None,
+        attachment: None,
+        encrypted: None,
+        preview: None,
+        deleted: false,
+    }
+}
+
+async fn persist_and_broadcast_system_room_event(
+    state: &SharedState,
+    room_id: &str,
+    username: &str,
+    event_kind: &str,
+) {
+    let record = system_room_event_message(room_id, username, event_kind);
+    let stored = store_room_message(state, room_id, record).await;
+    broadcast_to_room(
+        state,
+        room_id,
+        json!({
+            "op": 7,
+            "d": stored
+        }),
+    )
+    .await;
 }
 
 async fn dispatch_room_history(
