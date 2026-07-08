@@ -2589,51 +2589,6 @@ async fn resolve_room_for_session(
     }
 }
 
-fn system_room_event_message(room_id: &str, username: &str, event_kind: &str) -> ChatMessageRecord {
-    let timestamp = now_ms();
-    let action = match event_kind {
-        "join" => "joined",
-        "leave" => "left",
-        _ => "updated",
-    };
-
-    ChatMessageRecord {
-        message_id: random_message_id(),
-        room_id: room_id.to_owned(),
-        user: "[system]".to_owned(),
-        username: "System".to_owned(),
-        text: format!("{} {} the room", username, action),
-        timestamp,
-        edited_at: None,
-        system: true,
-        reactions: Vec::new(),
-        reply_to_message_id: None,
-        attachment: None,
-        encrypted: None,
-        preview: None,
-        deleted: false,
-    }
-}
-
-async fn persist_and_broadcast_system_room_event(
-    state: &SharedState,
-    room_id: &str,
-    username: &str,
-    event_kind: &str,
-) {
-    let record = system_room_event_message(room_id, username, event_kind);
-    let stored = store_room_message(state, room_id, record).await;
-    broadcast_to_room(
-        state,
-        room_id,
-        json!({
-            "op": 7,
-            "d": stored
-        }),
-    )
-    .await;
-}
-
 async fn dispatch_room_history(
     state: &SharedState,
     session_id: &str,
