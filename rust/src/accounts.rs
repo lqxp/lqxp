@@ -31,6 +31,7 @@ pub type AccountResult<T> = Result<T, String>;
 const SESSION_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 const USERNAME_MIN: usize = 2;
 const USERNAME_MAX: usize = 32;
+const RESERVED_USERNAMES: &[&str] = &["system"];
 const PASSWORD_MIN: usize = 8;
 const PASSWORD_MAX: usize = 128;
 const RECOVERY_WORD_COUNT: usize = 16;
@@ -911,6 +912,9 @@ pub fn validate_username(raw: &str) -> AccountResult<String> {
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
     {
         return Err("Username may only contain letters, numbers, '-', '_' or '.'.".to_owned());
+    }
+    if RESERVED_USERNAMES.contains(&username.as_str()) {
+        return Err("Username is reserved.".to_owned());
     }
     Ok(username)
 }

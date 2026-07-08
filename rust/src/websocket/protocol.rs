@@ -51,6 +51,11 @@ const MAX_VOICE_CHUNK_B64_LEN: usize = ((MAX_VOICE_CHUNK_BYTES + 2) / 3) * 4 + 4
 const MIN_VOICE_CHUNK_INTERVAL_MS: u64 = 100;
 const DUPLICATE_MESSAGE_WINDOW_MS: u64 = 5 * 60 * 1000;
 const MIN_BETWEEN_MESSAGE_INTERVAL: u64 = 100;
+const SYSTEM_USERNAME: &str = "system";
+
+fn is_reserved_system_username(username: &str) -> bool {
+    username.trim().eq_ignore_ascii_case(SYSTEM_USERNAME)
+}
 
 pub async fn process_message(
     state: SharedState,
@@ -2812,7 +2817,8 @@ async fn session_status(state: &SharedState, session_id: &str) -> Option<UserPre
 }
 
 fn is_visible_to(player: &crate::state::PlayerSession, viewer_session_id: Option<&str>) -> bool {
-    player.status != UserPresenceStatus::Invisible || viewer_session_id == Some(player.id.as_str())
+    !is_reserved_system_username(&player.username)
+        && (player.status != UserPresenceStatus::Invisible || viewer_session_id == Some(player.id.as_str()))
 }
 
 pub async fn room_usernames(
