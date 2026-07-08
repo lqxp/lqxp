@@ -636,6 +636,9 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
                     "d": {
                         "gameId": room,
                         "user": username.clone(),
+                        "id": user_id.clone(),
+                        "userId": user_id.clone(),
+                        "uuid": user_id.clone(),
                         "profile": profile.clone(),
                         "players": roster,
                         "profiles": profiles,
@@ -666,6 +669,9 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
                     "d": {
                         "gameId": room,
                         "user": username.clone(),
+                        "id": user_id.clone(),
+                        "userId": user_id.clone(),
+                        "uuid": user_id.clone(),
                         "status": status,
                         "visible": status != UserPresenceStatus::Invisible,
                         "clientId": client_id.clone(),
@@ -2822,7 +2828,7 @@ pub async fn room_usernames(
         .collect()
 }
 
-async fn room_players(
+pub async fn room_players(
     state: &SharedState,
     game_id: &str,
     viewer_session_id: Option<&str>,
@@ -2834,6 +2840,9 @@ async fn room_players(
         .map(|player| {
             json!({
                 "user": player.username,
+                "id": player.user_id,
+                "userId": player.user_id,
+                "uuid": player.user_id,
                 "clientId": player.client_id,
                 "platform": player.platform,
                 "status": player.status,

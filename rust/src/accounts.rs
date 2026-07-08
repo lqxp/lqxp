@@ -612,10 +612,10 @@ impl AccountDatabase {
             return Ok(self.public_user(user));
         }
         let now = now_ms();
-        let window_start = now.saturating_sub(24 * 60 * 60 * 1000);
+        let window_start = now.saturating_sub(7 * 24 * 60 * 60 * 1000);
         user.username_changes.retain(|stamp| *stamp >= window_start);
-        if user.username_changes.len() >= 2 {
-            return Err("Username can only be changed twice every 24 hours.".to_owned());
+        if !user.username_changes.is_empty() {
+            return Err("Username can only be changed once per week.".to_owned());
         }
         user.username_changes.push(now);
         let changes_json = serde_json::to_string(&user.username_changes)

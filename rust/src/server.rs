@@ -350,6 +350,7 @@ async fn auth_username(
 
             Json(json!({ "ok": true, "user": updated_user })).into_response()
         }
+        Err(err) if err.contains("once per week") => api_error(StatusCode::TOO_MANY_REQUESTS, &err),
         Err(err) => api_error(StatusCode::BAD_REQUEST, &err),
     }
 }
@@ -563,6 +564,7 @@ async fn broadcast_profile_update(
             continue;
         }
         for room in rooms {
+            let roster = protocol::room_players(state, &room, None).await;
             let profiles = protocol::room_profiles(state, &room, None).await;
             let statuses = protocol::room_statuses(state, &room, None).await;
             let platforms = protocol::room_platforms(state, &room, None).await;
@@ -577,6 +579,7 @@ async fn broadcast_profile_update(
                         "gameId": room,
                         "user": username,
                         "profile": profile,
+                        "players": roster,
                         "profiles": profiles,
                         "statuses": statuses,
                         "platforms": platforms,
