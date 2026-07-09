@@ -1,4 +1,6 @@
 use axum::extract::ws::Message;
+use std::collections::BTreeSet;
+
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 use tracing::error;
@@ -2611,6 +2613,24 @@ async fn dispatch_room_history(
         room_messages.get(room_id).cloned().unwrap_or_default()
     };
 
+    let authors = messages
+        .iter()
+        .map(|message| message.username.trim())
+        .filter(|username| !username.is_empty() && !is_reserved_system_username(username))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut profiles = Map::new();
+    match state.accounts.profiles_by_usernames(&authors).await {
+        Ok(entries) => {
+            for (username, profile) in entries {
+                profiles.insert(username, json!(profile));
+            }
+        }
+        Err(err) => error!("Failed to hydrate room history profiles: {}", err),
+    }
+
     respond_to_sender(
         state,
         session_id,
@@ -2620,7 +2640,8 @@ async fn dispatch_room_history(
                 "d": {
                     "ok": true,
                     "roomId": room_id,
-                    "messages": messages
+                    "messages": messages,
+                    "profiles": profiles
                 }
             }),
             req_id,

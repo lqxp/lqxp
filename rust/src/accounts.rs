@@ -537,6 +537,19 @@ impl AccountDatabase {
         }))
     }
 
+    pub async fn profiles_by_usernames(
+        &self,
+        usernames: &[String],
+    ) -> AccountResult<Vec<(String, UserProfile)>> {
+        let mut profiles = Vec::new();
+        for username in usernames {
+            if let Some(user) = self.user_by_username(username).await? {
+                profiles.push((user.username, user.profile));
+            }
+        }
+        Ok(profiles)
+    }
+
     pub async fn update_profile(&self, user_id: &str, profile: &UserProfile) -> AccountResult<()> {
         let profile_json = serde_json::to_string(profile)
             .map_err(|err| format!("Could not encode profile: {err}"))?;
