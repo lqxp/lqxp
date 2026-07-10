@@ -51,6 +51,7 @@ async fn main() {
         room_messages: Arc::new(RwLock::new(HashMap::new())),
         database,
         accounts,
+        rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     });
 
     let app = build_router(state.clone());

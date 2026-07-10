@@ -861,6 +861,10 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
         .filter(|value| !value.is_empty())
         .map(|value| value.chars().take(80).collect::<String>());
 
+    if crate::utils::rate_limit_hit(state.as_ref(), format!("chat:session:{session_id}"), 30, 60_000).await {
+        return respond_error(state, session_id, 7, "Message rate limited", request_id(&d)).await;
+    }
+
     let now = now_ms();
 
     let chat_result = {

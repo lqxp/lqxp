@@ -38,6 +38,10 @@ pub async fn handle_socket(state: SharedState, socket: WebSocket) {
     while let Some(result) = ws_receiver.next().await {
         match result {
             Ok(Message::Text(text)) => {
+                if crate::utils::rate_limit_hit(state.as_ref(), format!("ws-msg:session:{session_id}"), 120, 60_000).await {
+                    send_json(&tx, json!({ "op": 0, "d": { "error": "Rate limited." } }));
+                    break;
+                }
                 let should_close = protocol::process_message(
                     state.clone(),
                     session_id.clone(),
@@ -51,6 +55,10 @@ pub async fn handle_socket(state: SharedState, socket: WebSocket) {
                 }
             }
             Ok(Message::Binary(payload)) => {
+                if crate::utils::rate_limit_hit(state.as_ref(), format!("ws-msg:session:{session_id}"), 120, 60_000).await {
+                    send_json(&tx, json!({ "op": 0, "d": { "error": "Rate limited." } }));
+                    break;
+                }
                 let text = String::from_utf8_lossy(&payload).into_owned();
                 let should_close = protocol::process_message(
                     state.clone(),

@@ -1,10 +1,11 @@
 use std::{
     collections::{BTreeMap, HashSet},
+    net::SocketAddr,
     path::{Path, PathBuf},
 };
 
 use axum::{
-    extract::{ws::WebSocketUpgrade, DefaultBodyLimit, Multipart, Path as AxumPath, State},
+    extract::{ws::WebSocketUpgrade, ConnectInfo, DefaultBodyLimit, Multipart, Path as AxumPath, State},
     http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -196,8 +197,23 @@ async fn auth_register(
 
 async fn auth_login(
     State(state): State<SharedState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<AuthLoginRequest>,
 ) -> impl IntoResponse {
+    let client_ip = client_ip(&headers, addr);
+    if crate::utils::rate_limit_hit(state.as_ref(), format!("login:ip:{client_ip}"), 8, 60_000).await
+        || crate::utils::rate_limit_hit(
+            state.as_ref(),
+            format!("login:user:{}", body.username.trim().to_ascii_lowercase()),
+            12,
+            60_000,
+        )
+        .await
+    {
+        return api_error(StatusCode::TOO_MANY_REQUESTS, "Too many login attempts.");
+    }
+
     match state.accounts.login(&body.username, &body.password).await {
         Ok((user, token)) => Json(user_response(user, token)).into_response(),
         Err(err) => api_error(StatusCode::UNAUTHORIZED, &err),
@@ -778,6 +794,18 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn client_ip(headers: &HeaderMap, addr: SocketAddr) -> String {
+    headers
+        .get("x-real-ip")
+        .or_else(|| headers.get("x-forwarded-for"))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| addr.ip().to_string())
+}
+
 fn api_error(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({ "ok": false, "error": message }))).into_response()
 }
@@ -960,7 +988,13 @@ fn public_origin(headers: &HeaderMap, configured_domain: &str) -> Option<String>
 
 async fn ws_upgrade(
     State(state): State<SharedState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    let client_ip = client_ip(&headers, addr);
+    if crate::utils::rate_limit_hit(state.as_ref(), format!("ws-connect:ip:{client_ip}"), 30, 60_000).await {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
     ws.on_upgrade(move |socket| handle_socket(state, socket))
 }

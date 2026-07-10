@@ -9,7 +9,10 @@ use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::{models::StoredFile, state::AppState};
+use crate::{
+    models::StoredFile,
+    state::{AppState, RateLimitBucket},
+};
 
 pub fn send_json(tx: &mpsc::UnboundedSender<Message>, payload: Value) {
     let _ = tx.send(Message::Text(payload.to_string().into()));
@@ -61,6 +64,30 @@ pub fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+pub async fn rate_limit_hit(
+    state: &AppState,
+    key: impl Into<String>,
+    limit: u32,
+    window_ms: u64,
+) -> bool {
+    let now = now_ms();
+    let key = key.into();
+    let mut buckets = state.rate_limits.lock().await;
+    if buckets.len() > 10_000 {
+        buckets.retain(|_, bucket| now.saturating_sub(bucket.window_start_ms) <= window_ms * 2);
+    }
+    let bucket = buckets.entry(key).or_insert(RateLimitBucket {
+        window_start_ms: now,
+        count: 0,
+    });
+    if now.saturating_sub(bucket.window_start_ms) > window_ms {
+        bucket.window_start_ms = now;
+        bucket.count = 0;
+    }
+    bucket.count = bucket.count.saturating_add(1);
+    bucket.count > limit
 }
 
 pub fn sanitize_filename(value: &str, fallback: &str, max_len: usize) -> String {

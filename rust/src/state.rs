@@ -4,7 +4,7 @@ use std::{
 };
 
 use axum::extract::ws::Message;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 use crate::{
     accounts::SharedAccounts,
@@ -21,9 +21,16 @@ pub struct AppState {
     pub room_messages: Arc<RwLock<HashMap<String, Vec<ChatMessageRecord>>>>,
     pub database: Arc<RoomDatabase>,
     pub accounts: SharedAccounts,
+    pub rate_limits: Arc<Mutex<HashMap<String, RateLimitBucket>>>,
 }
 
 pub type SharedState = Arc<AppState>;
+
+#[derive(Debug, Clone)]
+pub struct RateLimitBucket {
+    pub window_start_ms: u64,
+    pub count: u32,
+}
 
 #[derive(Debug, Clone)]
 pub struct PlayerSession {
