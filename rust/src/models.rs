@@ -102,6 +102,10 @@ pub struct EncryptedPayload {
     pub v: u8,
     pub alg: String,
     pub iv: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub salt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n: Option<u64>,
     pub ciphertext: String,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "roomId")]
     pub room_id: Option<String>,

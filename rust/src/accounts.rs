@@ -28,7 +28,7 @@ use crate::{
 
 pub type AccountResult<T> = Result<T, String>;
 
-const SESSION_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+const SESSION_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 const USERNAME_MIN: usize = 2;
 const USERNAME_MAX: usize = 32;
 const RESERVED_USERNAMES: &[&str] = &["system"];
@@ -520,21 +520,26 @@ impl AccountDatabase {
         }
     }
 
-    pub async fn me(&self, token: &str) -> AccountResult<Option<PublicUser>> {
+    pub async fn refresh_session(&self, token: &str) -> AccountResult<Option<(PublicUser, String)>> {
         let Some(user) = self.authenticate_token(token).await? else {
             return Ok(None);
         };
-        Ok(Some(PublicUser {
-            id: user.id.clone(),
-            username: user.username.clone(),
-            profile: user.profile.clone(),
-            status: user.status,
-            disabled: user.disabled,
-            banned: user.banned,
-            admin: user.admin,
-            badges: user.badges,
-            created_at: 0,
-        }))
+        self.logout(token).await?;
+        let token = self.create_session(&user.id).await?;
+        Ok(Some((
+            PublicUser {
+                id: user.id.clone(),
+                username: user.username.clone(),
+                profile: user.profile.clone(),
+                status: user.status,
+                disabled: user.disabled,
+                banned: user.banned,
+                admin: user.admin,
+                badges: user.badges,
+                created_at: 0,
+            },
+            token,
+        )))
     }
 
     pub async fn profiles_by_usernames(

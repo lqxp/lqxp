@@ -36,6 +36,7 @@ const MAX_PROFILE_DESCRIPTION_CHARS: usize = 512;
 const MAX_PROFILE_PRONOUNS_CHARS: usize = 24;
 const MAX_ENCRYPTED_ALG_LEN: usize = 32;
 const MAX_ENCRYPTED_IV_LEN: usize = 128;
+const MAX_ENCRYPTED_SALT_LEN: usize = 128;
 const MAX_ENCRYPTED_CIPHERTEXT_LEN: usize = 18 * 1024 * 1024;
 const MAX_ENCRYPTED_ROOM_ID_LEN: usize = 64;
 const MAX_PREVIEW_URL_LEN: usize = 2048;
@@ -2552,6 +2553,8 @@ fn encrypted_payloads_match(
             left.v == right.v
                 && left.alg == right.alg
                 && left.iv == right.iv
+                && left.salt == right.salt
+                && left.n == right.n
                 && left.ciphertext == right.ciphertext
                 && left.room_id == right.room_id
         }
@@ -2986,7 +2989,7 @@ fn parse_encrypted_payload(raw: Option<&Value>) -> Result<Option<EncryptedPayloa
         .get("v")
         .and_then(Value::as_u64)
         .ok_or("Encrypted payload missing version")?;
-    if v != 1 {
+    if v != 2 {
         return Err("Unsupported encrypted payload version");
     }
 
@@ -3010,6 +3013,22 @@ fn parse_encrypted_payload(raw: Option<&Value>) -> Result<Option<EncryptedPayloa
         .take(MAX_ENCRYPTED_IV_LEN)
         .collect::<String>();
 
+    let salt = obj
+        .get("salt")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("Encrypted payload missing salt")?
+        .chars()
+        .take(MAX_ENCRYPTED_SALT_LEN)
+        .collect::<String>();
+
+    let n = obj
+        .get("n")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or("Encrypted payload missing ratchet counter")?;
+
     let ciphertext = obj
         .get("ciphertext")
         .and_then(Value::as_str)
@@ -3028,9 +3047,11 @@ fn parse_encrypted_payload(raw: Option<&Value>) -> Result<Option<EncryptedPayloa
         .map(|value| value.chars().take(MAX_ENCRYPTED_ROOM_ID_LEN).collect::<String>());
 
     Ok(Some(EncryptedPayload {
-        v: 1,
+        v: 2,
         alg,
         iv,
+        salt,
+        n: Some(n),
         ciphertext: ciphertext.to_owned(),
         room_id,
     }))

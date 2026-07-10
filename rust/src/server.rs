@@ -202,15 +202,7 @@ async fn auth_login(
     Json(body): Json<AuthLoginRequest>,
 ) -> impl IntoResponse {
     let client_ip = client_ip(&headers, addr);
-    if crate::utils::rate_limit_hit(state.as_ref(), format!("login:ip:{client_ip}"), 8, 60_000).await
-        || crate::utils::rate_limit_hit(
-            state.as_ref(),
-            format!("login:user:{}", body.username.trim().to_ascii_lowercase()),
-            12,
-            60_000,
-        )
-        .await
-    {
+    if crate::utils::rate_limit_hit(state.as_ref(), format!("login:ip:{client_ip}"), 10, 15 * 60_000).await {
         return api_error(StatusCode::TOO_MANY_REQUESTS, "Too many login attempts.");
     }
 
@@ -238,8 +230,8 @@ async fn auth_me(State(state): State<SharedState>, headers: HeaderMap) -> impl I
     let Some(token) = bearer_token(&headers) else {
         return api_error(StatusCode::UNAUTHORIZED, "Missing session.");
     };
-    match state.accounts.me(&token).await {
-        Ok(Some(user)) => Json(json!({ "ok": true, "user": user })).into_response(),
+    match state.accounts.refresh_session(&token).await {
+        Ok(Some((user, token))) => Json(user_response(user, token)).into_response(),
         Ok(None) => api_error(StatusCode::UNAUTHORIZED, "Invalid session."),
         Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
     }
