@@ -37,6 +37,7 @@ const MAX_PROFILE_PRONOUNS_CHARS: usize = 24;
 const MAX_ENCRYPTED_ALG_LEN: usize = 32;
 const MAX_ENCRYPTED_IV_LEN: usize = 128;
 const MAX_ENCRYPTED_CIPHERTEXT_LEN: usize = 18 * 1024 * 1024;
+const MAX_ENCRYPTED_ROOM_ID_LEN: usize = 64;
 const MAX_PREVIEW_URL_LEN: usize = 2048;
 const MAX_REACTION_EMOJI_CHARS: usize = 32;
 const MIN_ROOM_ID_LEN: usize = 8;
@@ -812,9 +813,18 @@ async fn report_kill(state: &SharedState, session_id: &str, d: Value) -> bool {
 
 async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> bool {
     let text = d.get("text").and_then(Value::as_str).unwrap_or("");
+    let encrypted = match parse_encrypted_payload(d.get("encrypted")) {
+        Ok(value) => value,
+        Err(message) => return respond_error(state, session_id, 7, message, request_id(&d)).await,
+    };
 
-    let Some(target_game_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
-        return respond_error(state, session_id, 7, "Missing gameId", request_id(&d)).await;
+    let target_game_id = if let Some(encrypted_room_id) = encrypted.as_ref().and_then(|payload| payload.room_id.as_deref()) {
+        encrypted_room_id
+    } else {
+        let Some(target_game_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
+            return respond_error(state, session_id, 7, "Missing gameId", request_id(&d)).await;
+        };
+        target_game_id
     };
 
     if let Err(message) = validate_room_id(target_game_id) {
@@ -822,10 +832,6 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
     }
 
     let attachment = match parse_attachment(state, d.get("attachment")).await {
-        Ok(value) => value,
-        Err(message) => return respond_error(state, session_id, 7, message, request_id(&d)).await,
-    };
-    let encrypted = match parse_encrypted_payload(d.get("encrypted")) {
         Ok(value) => value,
         Err(message) => return respond_error(state, session_id, 7, message, request_id(&d)).await,
     };
@@ -1373,17 +1379,22 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
         return respond_error(state, session_id, 29, "Missing messageId", request_id(&d)).await;
     }
 
-    let Some(room_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
-        return respond_error(state, session_id, 29, "Missing gameId", request_id(&d)).await;
-    };
-    if let Err(message) = validate_room_id(room_id) {
-        return respond_error(state, session_id, 29, message, request_id(&d)).await;
-    }
-
     let encrypted = match parse_encrypted_payload(d.get("encrypted")) {
         Ok(value) => value,
         Err(message) => return respond_error(state, session_id, 29, message, request_id(&d)).await,
     };
+
+    let room_id = if let Some(encrypted_room_id) = encrypted.as_ref().and_then(|payload| payload.room_id.as_deref()) {
+        encrypted_room_id.to_owned()
+    } else {
+        let Some(room_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
+            return respond_error(state, session_id, 29, "Missing gameId", request_id(&d)).await;
+        };
+        room_id.to_owned()
+    };
+    if let Err(message) = validate_room_id(&room_id) {
+        return respond_error(state, session_id, 29, message, request_id(&d)).await;
+    }
     let text = d.get("text").and_then(Value::as_str).unwrap_or("");
     let trimmed = text
         .trim()
@@ -1409,7 +1420,7 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
         let players = state.players.read().await;
         match players.get(session_id) {
             Some(player) if !player.username.is_empty() => {
-                if !player.rooms.contains(room_id) {
+                if !player.rooms.contains(&room_id) {
                     return respond_error(
                         state,
                         session_id,
@@ -1443,7 +1454,7 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
 
     let edited_message = {
         let mut rooms = state.room_messages.write().await;
-        let Some(messages) = rooms.get_mut(room_id) else {
+        let Some(messages) = rooms.get_mut(&room_id) else {
             return respond_error(state, session_id, 29, "Unknown messageId", request_id(&d)).await;
         };
         let Some(message) = messages.iter_mut().find(|m| m.message_id == message_id) else {
@@ -1488,7 +1499,7 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
 
     broadcast_to_room(
         state,
-        room_id,
+        &room_id,
         json!({
             "op": 30,
             "d": edited_message
@@ -2538,6 +2549,7 @@ fn encrypted_payloads_match(
                 && left.alg == right.alg
                 && left.iv == right.iv
                 && left.ciphertext == right.ciphertext
+                && left.room_id == right.room_id
         }
         _ => false,
     }
@@ -3004,11 +3016,19 @@ fn parse_encrypted_payload(raw: Option<&Value>) -> Result<Option<EncryptedPayloa
         return Err("Encrypted payload too large");
     }
 
+    let room_id = obj
+        .get("roomId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(MAX_ENCRYPTED_ROOM_ID_LEN).collect::<String>());
+
     Ok(Some(EncryptedPayload {
         v: 1,
         alg,
         iv,
         ciphertext: ciphertext.to_owned(),
+        room_id,
     }))
 }
 

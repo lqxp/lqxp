@@ -103,6 +103,8 @@ pub struct EncryptedPayload {
     pub alg: String,
     pub iv: String,
     pub ciphertext: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "roomId")]
+    pub room_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
