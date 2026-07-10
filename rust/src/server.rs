@@ -230,7 +230,7 @@ async fn auth_me(State(state): State<SharedState>, headers: HeaderMap) -> impl I
     let Some(token) = bearer_token(&headers) else {
         return api_error(StatusCode::UNAUTHORIZED, "Missing session.");
     };
-    match state.accounts.refresh_session(&token).await {
+    match state.accounts.me(&token).await {
         Ok(Some((user, token))) => Json(user_response(user, token)).into_response(),
         Ok(None) => api_error(StatusCode::UNAUTHORIZED, "Invalid session."),
         Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
