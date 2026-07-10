@@ -1,10 +1,9 @@
 use std::{
-    net::SocketAddr,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use axum::{extract::ws::Message, http::HeaderMap};
+use axum::extract::ws::Message;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde_json::{Map, Value};
 use tokio::sync::mpsc;
@@ -44,26 +43,6 @@ pub fn admin_allowed(state: &AppState, d: &Value) -> bool {
         == state.config.api.admin_password
 }
 
-pub fn extract_client_ip(headers: &HeaderMap, fallback: SocketAddr) -> String {
-    if let Some(value) = headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-    {
-        if let Some(ip) = value.split(',').next() {
-            return ip.trim().to_owned();
-        }
-    }
-
-    if let Some(value) = headers
-        .get("cf-connecting-ip")
-        .and_then(|value| value.to_str().ok())
-    {
-        return value.trim().to_owned();
-    }
-
-    fallback.ip().to_string()
-}
-
 pub fn random_session_id() -> String {
     let mut rng = thread_rng();
     std::iter::repeat_with(|| rng.sample(Alphanumeric))
@@ -82,14 +61,6 @@ pub fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-pub fn current_day_key() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        / 86_400
 }
 
 pub fn sanitize_filename(value: &str, fallback: &str, max_len: usize) -> String {

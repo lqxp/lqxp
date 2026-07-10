@@ -57,8 +57,6 @@ impl Default for ApiConfig {
 pub struct NetworkConfig {
     #[serde(default = "default_heartbeat_interval", rename = "heartbeatInterval")]
     pub heartbeat_interval: u64,
-    #[serde(default = "default_max_connections", rename = "maxConnectionsPerIp")]
-    pub max_connections_per_ip: usize,
     #[serde(default, rename = "latestVersion")]
     pub latest_version: Option<String>,
     #[serde(default = "default_public_dir", rename = "publicDir")]
@@ -75,7 +73,6 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             heartbeat_interval: default_heartbeat_interval(),
-            max_connections_per_ip: default_max_connections(),
             latest_version: None,
             public_dir: default_public_dir(),
             webchat_index: default_webchat_index(),
@@ -148,10 +145,6 @@ fn default_port() -> u16 {
 
 fn default_heartbeat_interval() -> u64 {
     3_000
-}
-
-fn default_max_connections() -> usize {
-    3
 }
 
 fn default_public_dir() -> String {

@@ -50,8 +50,6 @@ async fn main() {
         config: config.clone(),
         blocklist_terms: Arc::new(blocklist_terms),
         players: Arc::new(RwLock::new(HashMap::new())),
-        ip_connections: Arc::new(RwLock::new(HashMap::new())),
-        ip_room_icon_uploads: Arc::new(RwLock::new(HashMap::new())),
         room_messages: Arc::new(RwLock::new(HashMap::new())),
         database,
         accounts,

@@ -1,11 +1,10 @@
 use std::{
     collections::{BTreeMap, HashSet},
-    net::SocketAddr,
     path::{Path, PathBuf},
 };
 
 use axum::{
-    extract::{ws::WebSocketUpgrade, ConnectInfo, DefaultBodyLimit, Multipart, Path as AxumPath, State},
+    extract::{ws::WebSocketUpgrade, DefaultBodyLimit, Multipart, Path as AxumPath, State},
     http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -20,7 +19,7 @@ use crate::{
     accounts::{user_response, username_hits_blocklist},
     models::{ProfileImage, RoomIcon, RoomRecord},
     state::SharedState,
-    utils::{extract_client_ip, store_uploaded_bytes},
+    utils::store_uploaded_bytes,
     websocket::{handle_socket, protocol},
 };
 
@@ -139,7 +138,6 @@ struct BannedRequest {
 const MAX_PROFILE_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PROFILE_BANNER_BYTES: usize = 5 * 1024 * 1024;
 const MAX_ROOM_ICON_UPLOAD_BYTES: usize = 5 * 1024 * 1024;
-const MAX_ROOM_ICON_UPLOADS_PER_IP: usize = 4;
 
 async fn auth_register(
     State(state): State<SharedState>,
@@ -445,7 +443,6 @@ async fn profile_image_upload(
 
 async fn room_icon_upload(
     State(state): State<SharedState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     AxumPath(room_id): AxumPath<String>,
     mut multipart: Multipart,
@@ -458,35 +455,15 @@ async fn room_icon_upload(
         return api_error(StatusCode::BAD_REQUEST, "Invalid room.");
     }
 
-    let (is_member, client_ip) = {
+    let is_member = {
         let players = state.players.read().await;
-        let mut is_member = false;
-        let mut ip = extract_client_ip(&headers, addr);
-        for player in players.values().filter(|player| player.user_id == user.id) {
-            if player.rooms.contains(&room_id) {
-                is_member = true;
-                ip = player.ip.clone();
-                break;
-            }
-        }
-        (is_member, ip)
+        players
+            .values()
+            .filter(|player| player.user_id == user.id)
+            .any(|player| player.rooms.contains(&room_id))
     };
     if !is_member {
         return api_error(StatusCode::FORBIDDEN, "You are not in this room.");
-    }
-
-    {
-        let mut uploads = state.ip_room_icon_uploads.write().await;
-        let entry = uploads.entry(client_ip).or_default();
-        let today = crate::utils::current_day_key();
-        if entry.day_key != today {
-            entry.day_key = today;
-            entry.count = 0;
-        }
-        if entry.count >= MAX_ROOM_ICON_UPLOADS_PER_IP {
-            return api_error(StatusCode::TOO_MANY_REQUESTS, "Daily room icon upload limit reached for this IP.");
-        }
-        entry.count += 1;
     }
 
     let mut file_name = String::new();
@@ -956,10 +933,7 @@ fn public_origin(headers: &HeaderMap, configured_domain: &str) -> Option<String>
 
 async fn ws_upgrade(
     State(state): State<SharedState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    let ip = extract_client_ip(&headers, addr);
-    ws.on_upgrade(move |socket| handle_socket(state, socket, ip))
+    ws.on_upgrade(move |socket| handle_socket(state, socket))
 }

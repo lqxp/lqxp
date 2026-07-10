@@ -9,13 +9,13 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
 use crate::{
     models::{
-        Attachment, BlacklistEntry, ChatMessageRecord, EncryptedPayload, LoggedIpEntry,
-        MessageReaction, PlayerStatus, ProfileImage, RoomIcon, RoomRecord, SocketPayload,
+        Attachment, ChatMessageRecord, EncryptedPayload, MessageReaction, PlayerStatus, ProfileImage,
+        RoomIcon, RoomRecord, SocketPayload,
         UserPresenceStatus, UserProfile,
     },
     state::SharedState,
     utils::{
-        admin_allowed, current_day_key, now_ms, random_message_id, request_id, sanitize_filename,
+        admin_allowed, now_ms, random_message_id, request_id, sanitize_filename,
         send_json, store_uploaded_bytes, with_request_id,
     },
 };
@@ -30,7 +30,6 @@ const MAX_PROFILE_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PROFILE_AVATAR_B64_LEN: usize = ((MAX_PROFILE_AVATAR_BYTES + 2) / 3) * 4 + 4;
 const MAX_ROOM_ICON_UPLOAD_BYTES: usize = 5 * 1024 * 1024;
 const MAX_ROOM_ICON_UPLOAD_B64_LEN: usize = ((MAX_ROOM_ICON_UPLOAD_BYTES + 2) / 3) * 4 + 4;
-const MAX_ROOM_ICON_UPLOADS_PER_IP: usize = 4;
 const MAX_PROFILE_BANNER_BYTES: usize = 5 * 1024 * 1024;
 const MAX_PROFILE_BANNER_B64_LEN: usize = ((MAX_PROFILE_BANNER_BYTES + 2) / 3) * 4 + 4;
 const MAX_PROFILE_DESCRIPTION_CHARS: usize = 512;
@@ -62,7 +61,6 @@ fn is_reserved_system_username(username: &str) -> bool {
 pub async fn process_message(
     state: SharedState,
     session_id: String,
-    client_ip: String,
     tx: mpsc::UnboundedSender<Message>,
     raw: String,
 ) -> bool {
@@ -91,7 +89,7 @@ pub async fn process_message(
             );
             false
         }
-        2 => identify_player(&state, &session_id, &client_ip, payload.d).await,
+        2 => identify_player(&state, &session_id, payload.d).await,
         3 => join_game(&state, &session_id, payload.d).await,
         4 => leave_game(&state, &session_id, payload.d).await,
         5 => report_kill(&state, &session_id, payload.d).await,
@@ -126,8 +124,6 @@ pub async fn process_message(
         110 => update_call_media_state(&state, &session_id, payload.d).await,
         111 => relay_call_signal(&state, &session_id, payload.d).await,
         101 => admin_status(&state, &session_id, payload.d).await,
-        102 => admin_blacklist(&state, &session_id, payload.d).await,
-        103 => admin_unblacklist(&state, &session_id, payload.d).await,
         104 => admin_broadcast(&state, &session_id, payload.d).await,
         105 => stats_query(&state, &session_id, payload.d).await,
         _ => {
@@ -145,7 +141,7 @@ pub async fn process_message(
     }
 }
 
-async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str, d: Value) -> bool {
+async fn identify_player(state: &SharedState, session_id: &str, d: Value) -> bool {
     let Some(token) = d
         .get("token")
         .or_else(|| d.get("authToken"))
@@ -202,7 +198,7 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
         }
     }
 
-    let (final_username, account_id, is_admin, voice_chat, version, profile, status) = {
+    let (final_username, account_id, is_admin, profile, status) = {
         let mut players = state.players.write().await;
         let Some(player) = players.get_mut(session_id) else {
             return false;
@@ -236,28 +232,10 @@ async fn identify_player(state: &SharedState, session_id: &str, client_ip: &str,
             player.username.clone(),
             player.user_id.clone(),
             player.is_admin,
-            player.is_voice_chat,
-            player.version.clone(),
             player.profile.clone(),
             player.status,
         )
     };
-
-    if let Err(err) = state
-        .database
-        .unique_push(
-            "logged_ips",
-            json!(LoggedIpEntry {
-                ip: client_ip.to_owned(),
-                username: final_username.clone(),
-                version: version.clone(),
-                is_voice_chat: voice_chat,
-            }),
-        )
-        .await
-    {
-        error!("Failed to append logged IP: {}", err);
-    }
 
     respond_to_sender(
         state,
@@ -2020,7 +1998,6 @@ async fn admin_status(state: &SharedState, session_id: &str, d: Value) -> bool {
                 rooms.sort();
                 PlayerStatus {
                     username: player.username.clone(),
-                    ip: player.ip.clone(),
                     id: player.user_id.clone(),
                     is_voice_chat: player.is_voice_chat,
                     rooms,
@@ -2036,9 +2013,6 @@ async fn admin_status(state: &SharedState, session_id: &str, d: Value) -> bool {
             .collect::<Vec<_>>()
     };
 
-    let blacklisted = state.database.blacklisted_ips().await;
-    let logged_ips = state.database.logged_ips().await;
-
     respond_to_sender(
         state,
         session_id,
@@ -2048,135 +2022,7 @@ async fn admin_status(state: &SharedState, session_id: &str, d: Value) -> bool {
                 "d": {
                     "ok": true,
                     "onlineCount": players.len(),
-                    "blacklisted": blacklisted,
-                    "players": players,
-                    "ips": logged_ips
-                }
-            }),
-            request_id(&d),
-        ),
-    )
-    .await;
-    false
-}
-
-async fn admin_blacklist(state: &SharedState, session_id: &str, d: Value) -> bool {
-    if !admin_allowed(state, &d) {
-        return respond_error(state, session_id, 102, "Unauthorized", request_id(&d)).await;
-    }
-
-    let Some(ip) = d.get("ip").and_then(Value::as_str).map(str::trim) else {
-        return respond_error(state, session_id, 102, "Missing ip", request_id(&d)).await;
-    };
-
-    let mut blacklisted = state.database.blacklisted_ips().await;
-    if blacklisted.iter().any(|entry| entry.ip == ip) {
-        return respond_error(
-            state,
-            session_id,
-            102,
-            "Ip is already blacklisted",
-            request_id(&d),
-        )
-        .await;
-    }
-
-    let connected_player = {
-        let players = state.players.read().await;
-        players.values().find(|player| player.ip == ip).cloned()
-    };
-
-    let entry = BlacklistEntry {
-        ip: ip.to_owned(),
-        reason: d
-            .get("reason")
-            .and_then(Value::as_str)
-            .unwrap_or("No reason provided")
-            .to_owned(),
-        timestamp: now_ms(),
-        ign: connected_player
-            .as_ref()
-            .map(|player| player.username.clone())
-            .unwrap_or_else(|| "Unknown".to_owned()),
-    };
-
-    blacklisted.push(entry.clone());
-    if let Err(err) = state.database.set_blacklisted_ips(&blacklisted).await {
-        error!("Failed to persist blacklist: {}", err);
-    }
-
-    if let Some(player) = connected_player {
-        send_json(
-            &player.tx,
-            json!({
-                "op": 24,
-                "d": {
-                    "error": "You are blacklisted.",
-                    "reason": entry.reason.clone(),
-                    "timestamp": entry.timestamp,
-                    "ign": entry.ign.clone()
-                }
-            }),
-        );
-        let _ = player.tx.send(Message::Close(None));
-    }
-
-    respond_to_sender(
-        state,
-        session_id,
-        with_request_id(
-            json!({
-                "op": 102,
-                "d": {
-                    "ok": true,
-                    "ip": entry.ip,
-                    "reason": entry.reason,
-                    "timestamp": entry.timestamp,
-                    "ign": entry.ign
-                }
-            }),
-            request_id(&d),
-        ),
-    )
-    .await;
-    false
-}
-
-async fn admin_unblacklist(state: &SharedState, session_id: &str, d: Value) -> bool {
-    if !admin_allowed(state, &d) {
-        return respond_error(state, session_id, 103, "Unauthorized", request_id(&d)).await;
-    }
-
-    let Some(ip) = d.get("ip").and_then(Value::as_str).map(str::trim) else {
-        return respond_error(state, session_id, 103, "Missing ip", request_id(&d)).await;
-    };
-
-    let mut blacklisted = state.database.blacklisted_ips().await;
-    if !blacklisted.iter().any(|entry| entry.ip == ip) {
-        return respond_error(
-            state,
-            session_id,
-            103,
-            "Ip is not blacklisted",
-            request_id(&d),
-        )
-        .await;
-    }
-
-    blacklisted.retain(|entry| entry.ip != ip);
-    if let Err(err) = state.database.set_blacklisted_ips(&blacklisted).await {
-        error!("Failed to persist blacklist removal: {}", err);
-    }
-
-    respond_to_sender(
-        state,
-        session_id,
-        with_request_id(
-            json!({
-                "op": 103,
-                "d": {
-                    "ok": true,
-                    "ip": ip
+                    "players": players
                 }
             }),
             request_id(&d),
@@ -2290,35 +2136,6 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
             Ok(room_id) => room_id,
             Err(message) => return respond_error(state, session_id, 32, &message, req_id).await,
         };
-
-    let client_ip = {
-        let players = state.players.read().await;
-        let Some(player) = players.get(session_id) else {
-            return false;
-        };
-        player.ip.clone()
-    };
-
-    {
-        let mut uploads = state.ip_room_icon_uploads.write().await;
-        let entry = uploads.entry(client_ip.clone()).or_default();
-        let today = current_day_key();
-        if entry.day_key != today {
-            entry.day_key = today;
-            entry.count = 0;
-        }
-        if entry.count >= MAX_ROOM_ICON_UPLOADS_PER_IP {
-            return respond_error(
-                state,
-                session_id,
-                32,
-                "Daily room icon upload limit reached for this IP",
-                req_id,
-            )
-            .await;
-        }
-        entry.count += 1;
-    }
 
     let Some(raw) = d.get("file") else {
         return respond_error(state, session_id, 32, "Missing file", req_id).await;

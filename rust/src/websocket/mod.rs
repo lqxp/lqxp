@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{sink::SinkExt, stream::StreamExt};
-use serde_json::{json, Value};
+use serde_json::json;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{info, warn};
 
@@ -14,19 +14,14 @@ use crate::{
     utils::{random_session_id, send_json},
 };
 
-pub async fn handle_socket(state: SharedState, socket: WebSocket, ip: String) {
+pub async fn handle_socket(state: SharedState, socket: WebSocket) {
     let session_id = random_session_id();
     let (ws_sender, mut ws_receiver) = socket.split();
     let (tx, rx) = mpsc::unbounded_channel::<Message>();
 
     let writer = spawn_writer_task(ws_sender, rx);
 
-    if let Err(reason) = register_connection(&state, &session_id, &ip, tx.clone()).await {
-        send_json(&tx, reason);
-        let _ = tx.send(Message::Close(None));
-        let _ = writer.await;
-        return;
-    }
+    register_connection(&state, &session_id, tx.clone()).await;
 
     send_json(
         &tx,
@@ -38,7 +33,7 @@ pub async fn handle_socket(state: SharedState, socket: WebSocket, ip: String) {
         }),
     );
 
-    info!("Client connected: {} ({})", session_id, ip);
+    info!("Client connected: {}", session_id);
 
     while let Some(result) = ws_receiver.next().await {
         match result {
@@ -46,7 +41,6 @@ pub async fn handle_socket(state: SharedState, socket: WebSocket, ip: String) {
                 let should_close = protocol::process_message(
                     state.clone(),
                     session_id.clone(),
-                    ip.clone(),
                     tx.clone(),
                     text.to_string(),
                 )
@@ -61,7 +55,6 @@ pub async fn handle_socket(state: SharedState, socket: WebSocket, ip: String) {
                 let should_close = protocol::process_message(
                     state.clone(),
                     session_id.clone(),
-                    ip.clone(),
                     tx.clone(),
                     text,
                 )
@@ -100,39 +93,8 @@ fn spawn_writer_task(
 async fn register_connection(
     state: &SharedState,
     session_id: &str,
-    ip: &str,
     tx: mpsc::UnboundedSender<Message>,
-) -> Result<(), Value> {
-    {
-        let mut ip_connections = state.ip_connections.write().await;
-        let current = ip_connections.entry(ip.to_owned()).or_insert(0);
-        *current += 1;
-
-        if *current > state.config.network.max_connections_per_ip {
-            *current -= 1;
-            return Err(json!({
-                "op": 0,
-                "d": {
-                    "error": "Too many connections from this IP."
-                }
-            }));
-        }
-    }
-
-    let blacklisted = state.database.blacklisted_ips().await;
-    if let Some(entry) = blacklisted.iter().find(|entry| entry.ip == ip) {
-        decrement_ip_connection(state, ip).await;
-        return Err(json!({
-            "op": 24,
-            "d": {
-                "error": "You are blacklisted.",
-                "reason": entry.reason,
-                "timestamp": entry.timestamp,
-                "ign": entry.ign
-            }
-        }));
-    }
-
+) {
     let mut players = state.players.write().await;
     players.insert(
         session_id.to_owned(),
@@ -141,7 +103,6 @@ async fn register_connection(
             user_id: String::new(),
             is_admin: false,
             badges: Vec::new(),
-            ip: ip.to_owned(),
             username: String::new(),
             tx,
             rooms: HashSet::new(),
@@ -161,19 +122,6 @@ async fn register_connection(
             status: UserPresenceStatus::Online,
         },
     );
-
-    Ok(())
-}
-
-pub async fn decrement_ip_connection(state: &SharedState, ip: &str) {
-    let mut ip_connections = state.ip_connections.write().await;
-    if let Some(count) = ip_connections.get_mut(ip) {
-        if *count > 1 {
-            *count -= 1;
-        } else {
-            ip_connections.remove(ip);
-        }
-    }
 }
 
 pub async fn disconnect_player(state: &SharedState, session_id: &str) {
@@ -241,6 +189,5 @@ pub async fn disconnect_player(state: &SharedState, session_id: &str) {
         }
     }
 
-    decrement_ip_connection(state, &player.ip).await;
-    info!("Client disconnected: {} ({})", player.id, player.ip);
+    info!("Client disconnected: {}", player.id);
 }

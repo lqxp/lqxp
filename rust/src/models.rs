@@ -1,26 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlacklistEntry {
-    pub ip: String,
-    pub reason: String,
-    pub timestamp: u64,
-    pub ign: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggedIpEntry {
-    pub ip: String,
-    pub username: String,
-    pub version: String,
-    #[serde(rename = "isVoiceChat")]
-    pub is_voice_chat: bool,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct PlayerStatus {
     pub username: String,
-    pub ip: String,
     pub id: String,
     #[serde(rename = "isVoiceChat")]
     pub is_voice_chat: bool,

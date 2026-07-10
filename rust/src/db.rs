@@ -8,7 +8,7 @@ use serde_json::Value;
 use tokio::{fs, sync::RwLock};
 use tracing::warn;
 
-use crate::models::{BlacklistEntry, RoomIcon, RoomRecord};
+use crate::models::{RoomIcon, RoomRecord};
 
 pub type AppResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -67,21 +67,6 @@ impl JsonDatabase {
         self.flush().await
     }
 
-    pub async fn unique_push(&self, key: &str, item: Value) -> AppResult<()> {
-        let mut current = self
-            .get_value(key)
-            .await
-            .and_then(|value| value.as_array().cloned())
-            .unwrap_or_default();
-
-        if !current.iter().any(|existing| existing == &item) {
-            current.push(item);
-            self.set_value(key, Value::Array(current)).await?;
-        }
-
-        Ok(())
-    }
-
     async fn flush(&self) -> AppResult<()> {
         let parent = self
             .path
@@ -107,25 +92,6 @@ impl JsonDatabase {
         let encoded = serde_json::to_string_pretty(&payload)?;
         fs::write(&self.path, encoded).await?;
         Ok(())
-    }
-
-    pub async fn blacklisted_ips(&self) -> Vec<BlacklistEntry> {
-        self.get_value("blacklisted_ips")
-            .await
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default()
-    }
-
-    pub async fn set_blacklisted_ips(&self, entries: &[BlacklistEntry]) -> AppResult<()> {
-        self.set_value("blacklisted_ips", serde_json::to_value(entries)?)
-            .await
-    }
-
-    pub async fn logged_ips(&self) -> Vec<Value> {
-        self.get_value("logged_ips")
-            .await
-            .and_then(|value| value.as_array().cloned())
-            .unwrap_or_default()
     }
 
     pub async fn room_records(&self) -> HashMap<String, RoomRecord> {
