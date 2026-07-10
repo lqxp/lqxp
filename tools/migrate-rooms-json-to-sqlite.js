@@ -1,56 +1,31 @@
+#!/usr/bin/env bun
 import { Database } from "bun:sqlite";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { mkdirSync } from "node:fs";
 
-type StoredFile = {
-  id: string;
-  url: string;
-  size: number;
-  mimeType: string;
-};
-
-type RoomRecord = {
-  roomId: string;
-  title?: string;
-  icon?: StoredFile | null;
-  members?: string[];
-};
-
-type DatabaseRow = {
-  id: string;
-  value: unknown;
-};
-
-type RawDatabase = {
-  json?: DatabaseRow[];
-};
-
-function argValue(name: string, fallback: string) {
+function argValue(name, fallback) {
   const index = process.argv.indexOf(name);
   if (index >= 0 && process.argv[index + 1]) return process.argv[index + 1];
   return fallback;
 }
 
-function sqlitePath(value: string) {
+function sqlitePath(value) {
   if (value.startsWith("sqlite://")) return value.slice("sqlite://".length);
   if (value.startsWith("sqlite:")) return value.slice("sqlite:".length);
   return value;
 }
 
-function rowValue(raw: RawDatabase, id: string) {
+function rowValue(raw, id) {
   return Array.isArray(raw.json)
     ? raw.json.find((row) => row?.id === id)?.value
     : undefined;
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
+function asRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
-function normalizeRoom(roomId: string, rawRoom: unknown, iconFallback: unknown): RoomRecord {
+function normalizeRoom(roomId, rawRoom, iconFallback) {
   const value = asRecord(rawRoom);
   const storedRoomId = typeof value.roomId === "string" && value.roomId.trim()
     ? value.roomId.trim()
@@ -59,14 +34,14 @@ function normalizeRoom(roomId: string, rawRoom: unknown, iconFallback: unknown):
     ? value.title.trim()
     : storedRoomId;
   const members = Array.isArray(value.members)
-    ? value.members.filter((member): member is string => typeof member === "string")
+    ? value.members.filter((member) => typeof member === "string")
     : [];
   const icon = value.icon ?? iconFallback ?? null;
 
   return {
     roomId: storedRoomId,
     title,
-    icon: icon && typeof icon === "object" ? icon as StoredFile : null,
+    icon: icon && typeof icon === "object" ? icon : null,
     members,
   };
 }
@@ -80,7 +55,7 @@ if (!existsSync(jsonPath)) {
 
 mkdirSync(dirname(sqliteFile), { recursive: true });
 
-const raw = JSON.parse(readFileSync(jsonPath, "utf8")) as RawDatabase;
+const raw = JSON.parse(readFileSync(jsonPath, "utf8"));
 const roomsValue = asRecord(rowValue(raw, "rooms"));
 const roomIconsValue = asRecord(rowValue(raw, "room_icons"));
 const rooms = Object.entries(roomsValue).map(([roomId, room]) =>

@@ -8,7 +8,7 @@ mod state;
 mod utils;
 mod websocket;
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use tokio::{net::TcpListener, sync::RwLock};
 use tracing::info;
@@ -16,14 +16,10 @@ use tracing::info;
 use crate::{
     accounts::AccountDatabase,
     config::{init_tracing, load_blocklist_terms, load_config},
-    db::JsonDatabase,
+    db::RoomDatabase,
     server::build_router,
     state::AppState,
 };
-
-fn project_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
 
 #[tokio::main]
 async fn main() {

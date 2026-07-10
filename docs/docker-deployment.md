@@ -4,7 +4,7 @@
 
 - multi-stage Docker build for the Rust server and web client
 - `docker-compose.yml` for local or single-host deployment
-- persistent mounts for `files/config.custom.toml`, `files/qxp.sqlite`, and `files/database.json`
+- persistent mounts for `files/config.custom.toml` and `files/qxp.sqlite`
 
 ## Prerequisites
 
@@ -90,6 +90,5 @@ docker run -d \
   -e PRODUCTION=1 \
   -v $(pwd)/files/config.custom.toml:/app/files/config.custom.toml:ro \
   -v $(pwd)/files/qxp.sqlite:/app/files/qxp.sqlite \
-  -v $(pwd)/files/database.json:/app/files/database.json \
   lqxp-server:latest
 ```

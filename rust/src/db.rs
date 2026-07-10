@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path, str::FromStr};
+use std::{path::Path, str::FromStr};
 
 use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
 use tokio::fs;
@@ -40,42 +40,6 @@ impl RoomDatabase {
         .execute(&self.pool)
         .await?;
         Ok(())
-    }
-
-    pub async fn room_records(&self) -> HashMap<String, RoomRecord> {
-        let rows = sqlx::query("SELECT room_id, title, icon_json, members_json FROM rooms")
-            .fetch_all(&self.pool)
-            .await
-            .unwrap_or_default();
-
-        rows.into_iter()
-            .filter_map(|row| {
-                let room_id = row.try_get::<String, _>("room_id").ok()?;
-                let title = row
-                    .try_get::<String, _>("title")
-                    .unwrap_or_else(|_| room_id.clone());
-                let icon = row
-                    .try_get::<Option<String>, _>("icon_json")
-                    .ok()
-                    .flatten()
-                    .and_then(|value| serde_json::from_str::<RoomIcon>(&value).ok());
-                let members = row
-                    .try_get::<String, _>("members_json")
-                    .ok()
-                    .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
-                    .unwrap_or_default();
-
-                Some((
-                    room_id.clone(),
-                    RoomRecord {
-                        room_id,
-                        title,
-                        icon,
-                        members,
-                    },
-                ))
-            })
-            .collect()
     }
 
     pub async fn room_record(&self, room_id: &str) -> Option<RoomRecord> {

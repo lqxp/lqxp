@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, RwLock};
 use crate::{
     accounts::SharedAccounts,
     config::Config,
-    db::JsonDatabase,
+    db::RoomDatabase,
     models::{ChatMessageRecord, UserPresenceStatus, UserProfile},
 };
 
