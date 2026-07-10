@@ -13,7 +13,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use tokio::fs;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
     accounts::{user_response, username_hits_blocklist},
@@ -78,15 +78,42 @@ pub fn build_router(state: SharedState) -> Router {
         // Ancien serveur statique si besoin
         .route("/*path", get(public_asset))
         .layer(DefaultBodyLimit::max(6 * 1024 * 1024))
-        .layer(cors_layer())
+        .layer(cors_layer(&state))
         .with_state(state)
 }
 
-fn cors_layer() -> CorsLayer {
+fn cors_layer(state: &SharedState) -> CorsLayer {
     CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(allowed_cors_origins(state))
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+}
+
+fn allowed_cors_origins(state: &SharedState) -> AllowOrigin {
+    let mut origins = [
+        state.config.api.public_domain.trim(),
+        state.config.api.domain.trim(),
+    ]
+    .into_iter()
+    .filter(|origin| !origin.is_empty())
+    .flat_map(|origin| {
+        if origin.starts_with("http://") || origin.starts_with("https://") {
+            vec![origin.to_owned()]
+        } else {
+            vec![format!("https://{origin}"), format!("http://{origin}")]
+        }
+    })
+    .filter_map(|origin| origin.parse().ok())
+    .collect::<Vec<_>>();
+
+    if origins.is_empty() {
+        origins.extend([
+            "http://localhost:5173".parse().unwrap(),
+            "http://127.0.0.1:5173".parse().unwrap(),
+        ]);
+    }
+
+    AllowOrigin::list(origins)
 }
 
 #[derive(Debug, Deserialize)]
