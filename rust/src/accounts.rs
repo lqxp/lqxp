@@ -460,6 +460,26 @@ impl AccountDatabase {
         }))
     }
 
+    pub async fn touch_session(&self, token: &str) -> AccountResult<()> {
+        let hash = token_hash(token);
+        let expires_at = (now_ms() + SESSION_TTL_MS) as i64;
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query("UPDATE sessions SET expires_at = ? WHERE token_hash = ?")
+                .bind(expires_at)
+                .bind(hash)
+                .execute(pool)
+                .await
+                .map(|_| ()),
+            SqlBackend::Postgres(pool) => sqlx::query("UPDATE sessions SET expires_at = $1 WHERE token_hash = $2")
+                .bind(expires_at)
+                .bind(hash)
+                .execute(pool)
+                .await
+                .map(|_| ()),
+        }
+        .map_err(|err| format!("Database query failed: {err}"))
+    }
+
     pub async fn logout(&self, token: &str) -> AccountResult<()> {
         let hash = token_hash(token);
         match &self.backend {
@@ -520,12 +540,11 @@ impl AccountDatabase {
         }
     }
 
-    pub async fn refresh_session(&self, token: &str) -> AccountResult<Option<(PublicUser, String)>> {
+    pub async fn me(&self, token: &str) -> AccountResult<Option<(PublicUser, String)>> {
         let Some(user) = self.authenticate_token(token).await? else {
             return Ok(None);
         };
-        self.logout(token).await?;
-        let token = self.create_session(&user.id).await?;
+        self.touch_session(token).await?;
         Ok(Some((
             PublicUser {
                 id: user.id.clone(),
@@ -538,7 +557,7 @@ impl AccountDatabase {
                 badges: user.badges,
                 created_at: 0,
             },
-            token,
+            token.to_owned(),
         )))
     }
 
