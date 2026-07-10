@@ -19,7 +19,7 @@ pub struct AppState {
     pub blocklist_terms: Arc<Vec<String>>,
     pub players: Arc<RwLock<HashMap<String, PlayerSession>>>,
     pub room_messages: Arc<RwLock<HashMap<String, Vec<ChatMessageRecord>>>>,
-    pub database: Arc<JsonDatabase>,
+    pub database: Arc<RoomDatabase>,
     pub accounts: SharedAccounts,
 }
 

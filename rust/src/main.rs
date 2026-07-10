@@ -34,7 +34,9 @@ async fn main() {
     std::fs::create_dir_all(&config.network.upload_dir)
         .expect("failed to create upload directory");
     let database = Arc::new(
-        JsonDatabase::load(project_root().join("files/database.json")).await,
+        RoomDatabase::connect(&config.database)
+            .await
+            .expect("failed to initialize room database"),
     );
     let accounts = Arc::new(
         AccountDatabase::connect(
