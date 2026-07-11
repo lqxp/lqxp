@@ -37,6 +37,9 @@ const MAX_PROFILE_PRONOUNS_CHARS: usize = 24;
 const MAX_ENCRYPTED_ALG_LEN: usize = 32;
 const MAX_ENCRYPTED_IV_LEN: usize = 128;
 const MAX_ENCRYPTED_SALT_LEN: usize = 128;
+const MAX_ENCRYPTED_DEVICE_ID_LEN: usize = 64;
+const MAX_ENCRYPTED_SIGNATURE_LEN: usize = 256;
+const MAX_ENCRYPTED_SIGNING_KEY_LEN: usize = 2048;
 const MAX_ENCRYPTED_CIPHERTEXT_LEN: usize = 18 * 1024 * 1024;
 const MAX_ENCRYPTED_ROOM_ID_LEN: usize = 64;
 const MAX_PREVIEW_URL_LEN: usize = 2048;
@@ -3029,6 +3032,35 @@ fn parse_encrypted_payload(raw: Option<&Value>) -> Result<Option<EncryptedPayloa
         .filter(|value| *value > 0)
         .ok_or("Encrypted payload missing ratchet counter")?;
 
+    let sender_device_id = obj
+        .get("senderDeviceId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("Encrypted payload missing sender device")?
+        .chars()
+        .take(MAX_ENCRYPTED_DEVICE_ID_LEN)
+        .collect::<String>();
+
+    let sender_signing_key = obj
+        .get("senderSigningKey")
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or("Encrypted payload missing sender signing key")?;
+    if sender_signing_key.to_string().len() > MAX_ENCRYPTED_SIGNING_KEY_LEN {
+        return Err("Encrypted payload signing key too large");
+    }
+
+    let signature = obj
+        .get("signature")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("Encrypted payload missing signature")?
+        .chars()
+        .take(MAX_ENCRYPTED_SIGNATURE_LEN)
+        .collect::<String>();
+
     let ciphertext = obj
         .get("ciphertext")
         .and_then(Value::as_str)
@@ -3052,6 +3084,9 @@ fn parse_encrypted_payload(raw: Option<&Value>) -> Result<Option<EncryptedPayloa
         iv,
         salt,
         n: Some(n),
+        sender_device_id,
+        sender_signing_key: Some(sender_signing_key),
+        signature,
         ciphertext: ciphertext.to_owned(),
         room_id,
     }))

@@ -106,6 +106,12 @@ pub struct EncryptedPayload {
     pub salt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n: Option<u64>,
+    #[serde(default, skip_serializing_if = "String::is_empty", rename = "senderDeviceId")]
+    pub sender_device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "senderSigningKey")]
+    pub sender_signing_key: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signature: String,
     pub ciphertext: String,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "roomId")]
     pub room_id: Option<String>,
