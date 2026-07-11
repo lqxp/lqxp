@@ -1607,9 +1607,23 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
     let media = normalize_call_media(d.get("media"), is_voice_chat);
     let voice_result = {
         let mut players = state.players.write().await;
+        let duplicate_voice_session = if is_voice_chat {
+            players.get(session_id).is_some_and(|current| {
+                !current.user_id.is_empty()
+                    && players.values().any(|player| {
+                        player.id != session_id
+                            && player.user_id == current.user_id
+                            && player.is_voice_chat
+                    })
+            })
+        } else {
+            false
+        };
         if let Some(player) = players.get_mut(session_id) {
             if is_voice_chat && player.status == UserPresenceStatus::Invisible {
                 Err("Invisible users cannot join voice chat")
+            } else if duplicate_voice_session {
+                Err("This account is already connected to a call")
             } else {
                 player.is_voice_chat = is_voice_chat;
                 player.call_camera = media.1;
@@ -1793,11 +1807,25 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
 
     let update_result = {
         let mut players = state.players.write().await;
+        let duplicate_voice_session = if is_voice_chat {
+            players.get(session_id).is_some_and(|current| {
+                !current.user_id.is_empty()
+                    && players.values().any(|player| {
+                        player.id != session_id
+                            && player.user_id == current.user_id
+                            && player.is_voice_chat
+                    })
+            })
+        } else {
+            false
+        };
         if let Some(player) = players.get_mut(session_id) {
             if player.username.is_empty() {
                 Err("You need to be identified before")
             } else if is_voice_chat && player.status == UserPresenceStatus::Invisible {
                 Err("Invisible users cannot join calls")
+            } else if duplicate_voice_session {
+                Err("This account is already connected to a call")
             } else {
                 player.is_voice_chat = is_voice_chat;
                 player.call_camera = camera;
