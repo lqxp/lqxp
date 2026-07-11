@@ -107,12 +107,14 @@ fn allowed_cors_origins(state: &SharedState) -> AllowOrigin {
     .filter_map(|origin| origin.parse().ok())
     .collect::<Vec<_>>();
 
-    if origins.is_empty() {
-        origins.extend([
-            "http://localhost:5173".parse().unwrap(),
-            "http://127.0.0.1:5173".parse().unwrap(),
-        ]);
-    }
+    origins.extend([
+        "tauri://localhost".parse().unwrap(),
+        "http://localhost:5173".parse().unwrap(),
+        "http://127.0.0.1:5173".parse().unwrap(),
+    ]);
+
+    origins.sort();
+    origins.dedup();
 
     AllowOrigin::list(origins)
 }
