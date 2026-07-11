@@ -111,6 +111,8 @@ fn allowed_cors_origins(state: &SharedState) -> AllowOrigin {
         "tauri://localhost".parse().unwrap(),
         "http://tauri.localhost".parse().unwrap(),
         "https://tauri.localhost".parse().unwrap(),
+        "http://localhost:4173".parse().unwrap(),
+        "http://127.0.0.1:4173".parse().unwrap(),
         "http://localhost:5173".parse().unwrap(),
         "http://127.0.0.1:5173".parse().unwrap(),
     ]);
