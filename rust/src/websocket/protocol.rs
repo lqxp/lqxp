@@ -253,7 +253,8 @@ async fn identify_player(state: &SharedState, session_id: &str, d: Value) -> boo
                     "username": final_username.clone(),
                     "admin": is_admin,
                     "profile": profile.clone(),
-                    "status": status
+                    "status": status,
+                    "badges": account.badges
                 }
             }),
             request_id(&d),

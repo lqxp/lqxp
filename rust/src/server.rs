@@ -20,7 +20,7 @@ use crate::{
     accounts::{user_response, username_hits_blocklist},
     models::{ProfileImage, RoomIcon, RoomRecord},
     state::SharedState,
-    utils::store_uploaded_bytes,
+    utils::{send_json, store_uploaded_bytes},
     websocket::{handle_socket, protocol},
 };
 
@@ -73,6 +73,7 @@ pub fn build_router(state: SharedState) -> Router {
             post(admin_user_disabled),
         )
         .route("/api/admin/users/:user_id/banned", post(admin_user_banned))
+        .route("/api/admin/users/:user_id/badges", post(admin_user_badges))
         .route("/api/release", get(latest_release))
         // Websocket
         .route("/ws", get(ws_upgrade))
@@ -167,6 +168,11 @@ struct DisabledRequest {
 #[derive(Debug, Deserialize)]
 struct BannedRequest {
     banned: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct BadgesRequest {
+    badges: Vec<String>,
 }
 
 const MAX_PROFILE_AVATAR_BYTES: usize = 2 * 1024 * 1024;
@@ -766,6 +772,85 @@ async fn admin_user_banned(
     match state.accounts.set_user_banned(&user_id, body.banned).await {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
         Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    }
+}
+
+async fn admin_user_badges(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    AxumPath(user_id): AxumPath<String>,
+    Json(body): Json<BadgesRequest>,
+) -> impl IntoResponse {
+    let Some(user) = authenticated_user(&state, &headers).await else {
+        return api_error(StatusCode::UNAUTHORIZED, "Invalid session.");
+    };
+    if !user.admin {
+        return api_error(StatusCode::FORBIDDEN, "Admin only.");
+    }
+    match state.accounts.set_user_badges(&user_id, &body.badges).await {
+        Ok(updated_user) => {
+            broadcast_badge_update(&state, &updated_user).await;
+            Json(json!({ "ok": true, "user": updated_user })).into_response()
+        }
+        Err(err) => api_error(StatusCode::BAD_REQUEST, &err),
+    }
+}
+
+async fn broadcast_badge_update(state: &SharedState, user: &crate::accounts::PublicUser) {
+    let mut touched_rooms = HashSet::new();
+    let mut txs = Vec::new();
+    {
+        let mut players = state.players.write().await;
+        for player in players.values_mut().filter(|player| player.user_id == user.id) {
+            player.badges = user.badges.clone();
+            touched_rooms.extend(player.rooms.iter().cloned());
+            txs.push(player.tx.clone());
+        }
+    }
+
+    for tx in txs {
+        send_json(
+            &tx,
+            json!({
+                "op": 34,
+                "d": {
+                    "ok": true,
+                    "user": user.username,
+                    "username": user.username,
+                    "userId": user.id,
+                    "badges": user.badges
+                }
+            }),
+        );
+    }
+
+    for room_id in touched_rooms {
+        let players = protocol::room_players(state, &room_id, None).await;
+        let room_txs = {
+            let players = state.players.read().await;
+            players
+                .values()
+                .filter(|player| player.rooms.contains(&room_id))
+                .map(|player| player.tx.clone())
+                .collect::<Vec<_>>()
+        };
+        for tx in room_txs {
+            send_json(
+                &tx,
+                json!({
+                    "op": 34,
+                    "d": {
+                        "ok": true,
+                        "gameId": room_id,
+                        "user": user.username,
+                        "username": user.username,
+                        "userId": user.id,
+                        "badges": user.badges,
+                        "players": players
+                    }
+                }),
+            );
+        }
     }
 }
 

@@ -36,11 +36,13 @@ const PASSWORD_MIN: usize = 8;
 const PASSWORD_MAX: usize = 128;
 const RECOVERY_WORD_COUNT: usize = 16;
 const EARLY_USER_LIMIT: i64 = 200;
-const USER_SELECT_BY_CREATED_DESC: &str = "SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users ORDER BY created_at DESC";
-const USER_SELECT_BY_USERNAME_SQLITE: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) WHERE username = ?";
-const USER_SELECT_BY_USERNAME_POSTGRES: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) ranked_users WHERE username = $1";
-const USER_SELECT_BY_ID_SQLITE: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) WHERE id = ?";
-const USER_SELECT_BY_ID_POSTGRES: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) ranked_users WHERE id = $1";
+const MAX_USER_BADGES: usize = 16;
+const MAX_USER_BADGE_LEN: usize = 32;
+const USER_SELECT_BY_CREATED_DESC: &str = "SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users ORDER BY created_at DESC";
+const USER_SELECT_BY_USERNAME_SQLITE: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) WHERE username = ?";
+const USER_SELECT_BY_USERNAME_POSTGRES: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) ranked_users WHERE username = $1";
+const USER_SELECT_BY_ID_SQLITE: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) WHERE id = ?";
+const USER_SELECT_BY_ID_POSTGRES: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) ranked_users WHERE id = $1";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -98,6 +100,7 @@ struct StoredUser {
     created_at: u64,
     user_rank: i64,
     username_changes: Vec<u64>,
+    custom_badges: Vec<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -113,6 +116,7 @@ struct RawStoredUser {
     created_at: i64,
     user_rank: i64,
     username_changes_json: String,
+    custom_badges_json: String,
 }
 
 #[derive(Debug)]
@@ -176,14 +180,20 @@ impl AccountDatabase {
                 banned BIGINT NOT NULL DEFAULT 0,
                 created_at BIGINT NOT NULL,
                 updated_at BIGINT NOT NULL,
-                username_changes_json TEXT NOT NULL DEFAULT '[]'
+                username_changes_json TEXT NOT NULL DEFAULT '[]',
+                custom_badges_json TEXT NOT NULL DEFAULT '[]'
             )
             "#,
         )
         .await?;
-        self.execute("ALTER TABLE users ADD COLUMN banned BIGINT NOT NULL DEFAULT 0")
-            .await
-            .ok();
+        self.ensure_column("users", "banned", "banned BIGINT NOT NULL DEFAULT 0")
+            .await?;
+        self.ensure_column(
+            "users",
+            "custom_badges_json",
+            "custom_badges_json TEXT NOT NULL DEFAULT '[]'",
+        )
+        .await?;
         self.execute(
             r#"
             CREATE TABLE IF NOT EXISTS sessions (
@@ -213,6 +223,43 @@ impl AccountDatabase {
             SqlBackend::Postgres(pool) => sqlx::query(sql).execute(pool).await.map(|_| ()),
         }
         .map_err(|err| format!("Database query failed: {err}"))
+    }
+
+    async fn ensure_column(
+        &self,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> AccountResult<()> {
+        let exists = match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+                    .fetch_all(pool)
+                    .await
+                    .map_err(|err| format!("Database schema query failed: {err}"))?;
+                rows.iter().any(|row| {
+                    row.try_get::<String, _>("name")
+                        .map(|name| name == column)
+                        .unwrap_or(false)
+                })
+            }
+            SqlBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
+                )
+                .bind(table)
+                .bind(column)
+                .fetch_optional(pool)
+                .await
+                .map_err(|err| format!("Database schema query failed: {err}"))?;
+                row.is_some()
+            }
+        };
+        if exists {
+            return Ok(());
+        }
+        self.execute(&format!("ALTER TABLE {table} ADD COLUMN {definition}"))
+            .await
     }
 
     async fn ensure_feature_defaults(&self, register_enabled: bool) -> AccountResult<()> {
@@ -310,8 +357,8 @@ impl AccountDatabase {
             SqlBackend::Sqlite(pool) => {
                 sqlx::query(
                     "INSERT INTO users \
-                     (id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, updated_at, username_changes_json) \
-                     VALUES (?, ?, ?, ?, ?, 'online', 0, 0, ?, ?, '[]')",
+                     (id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, updated_at, username_changes_json, custom_badges_json) \
+                     VALUES (?, ?, ?, ?, ?, 'online', 0, 0, ?, ?, '[]', '[]')",
                 )
                 .bind(&id)
                 .bind(&username)
@@ -327,8 +374,8 @@ impl AccountDatabase {
             SqlBackend::Postgres(pool) => {
                 sqlx::query(
                     "INSERT INTO users \
-                     (id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, updated_at, username_changes_json) \
-                     VALUES ($1, $2, $3, $4, $5, 'online', 0, 0, $6, $7, '[]')",
+                     (id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, updated_at, username_changes_json, custom_badges_json) \
+                     VALUES ($1, $2, $3, $4, $5, 'online', 0, 0, $6, $7, '[]', '[]')",
                 )
                 .bind(&id)
                 .bind(&username)
@@ -455,7 +502,7 @@ impl AccountDatabase {
             status: user.status,
             disabled: user.disabled,
             banned: user.banned,
-            admin: badges.iter().any(|badge| badge == "admin"),
+            admin: self.is_admin(&user.id),
             badges,
         }))
     }
@@ -729,6 +776,39 @@ impl AccountDatabase {
         .map_err(|err| format!("Database query failed: {err}"))
     }
 
+    pub async fn set_user_badges(&self, user_id: &str, badges: &[String]) -> AccountResult<PublicUser> {
+        let badges = sanitize_custom_badges(badges)?;
+        let badges_json = serde_json::to_string(&badges)
+            .map_err(|err| format!("Could not encode badges: {err}"))?;
+        let now = now_ms() as i64;
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query("UPDATE users SET custom_badges_json = ?, updated_at = ? WHERE id = ?")
+                    .bind(badges_json)
+                    .bind(now)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query("UPDATE users SET custom_badges_json = $1, updated_at = $2 WHERE id = $3")
+                    .bind(badges_json)
+                    .bind(now)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+        }
+        .map_err(|err| format!("Database query failed: {err}"))?;
+        let updated = self
+            .user_by_id(user_id)
+            .await?
+            .ok_or("Account not found.")?;
+        Ok(self.public_user(updated))
+    }
+
     pub async fn set_user_banned(&self, user_id: &str, banned: bool) -> AccountResult<()> {
         let value = if banned { 1i64 } else { 0i64 };
         let now = now_ms() as i64;
@@ -785,6 +865,11 @@ impl AccountDatabase {
         if user.user_rank > 0 && user.user_rank <= EARLY_USER_LIMIT {
             badges.push("early".to_owned());
         }
+        for badge in &user.custom_badges {
+            if !badges.iter().any(|existing| existing == badge) {
+                badges.push(badge.clone());
+            }
+        }
         badges
     }
 
@@ -797,7 +882,7 @@ impl AccountDatabase {
             status: user.status,
             disabled: user.disabled,
             banned: user.banned,
-            admin: badges.iter().any(|badge| badge == "admin"),
+            admin: self.is_admin(&user.id),
             badges,
             created_at: user.created_at,
         }
@@ -902,6 +987,9 @@ impl AccountDatabase {
         let status = parse_status(&row.status);
         let username_changes =
             serde_json::from_str::<Vec<u64>>(&row.username_changes_json).unwrap_or_default();
+        let custom_badges = serde_json::from_str::<Vec<String>>(&row.custom_badges_json)
+            .map(|badges| sanitize_custom_badges(&badges).unwrap_or_default())
+            .unwrap_or_default();
         Ok(StoredUser {
             id: row.id,
             username: row.username,
@@ -914,6 +1002,7 @@ impl AccountDatabase {
             created_at: row.created_at.max(0) as u64,
             user_rank: row.user_rank,
             username_changes,
+            custom_badges,
         })
     }
 }
@@ -934,6 +1023,33 @@ async fn prepare_sqlite_path(url: &str) -> AccountResult<()> {
             .map_err(|err| format!("Could not create SQLite directory: {err}"))?;
     }
     Ok(())
+}
+
+fn sanitize_custom_badges(raw: &[String]) -> AccountResult<Vec<String>> {
+    let mut badges = Vec::new();
+    for value in raw {
+        let badge = value.trim().to_ascii_lowercase();
+        if badge.is_empty()
+            || matches!(badge.as_str(), "staff" | "admin" | "early" | "system")
+            || badges.iter().any(|existing| existing == &badge)
+        {
+            continue;
+        }
+        if badge.chars().count() > MAX_USER_BADGE_LEN {
+            return Err("Badge name is too long.".to_owned());
+        }
+        if !badge
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        {
+            return Err("Badge name may only contain letters, numbers, '-' or '_'.".to_owned());
+        }
+        badges.push(badge);
+        if badges.len() > MAX_USER_BADGES {
+            return Err("Too many badges.".to_owned());
+        }
+    }
+    Ok(badges)
 }
 
 pub fn validate_username(raw: &str) -> AccountResult<String> {
