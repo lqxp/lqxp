@@ -3,37 +3,37 @@
 This repo supports a packaged TURN sidecar deployment:
 
 - `qxp` serves the app and runtime RTC config
-- `coturn` relays all call traffic
+- `turn-rs` relays all call traffic through the `turn-server` binary
 - direct P2P calls stay disabled unless TURN is configured
 - TURN should be managed by `systemd`, not PM2
 
 ## 1. Install dependencies
 
-Ubuntu/Debian example:
+Debian example:
 
 ```bash
 sudo apt update
-sudo apt install coturn certbot
+sudo apt install certbot cargo
+cargo install turn-server
 ```
 
-## 2. Generate qxp + TURN config
+Make sure the `turn-server` binary is available in the service user's `PATH`, or set `TURN_BIN=/absolute/path/to/turn-server` in the systemd environment if needed.
+
+## 2. Generate qxp + turn-rs config
 
 ```bash
 ./scripts/bootstrap-turn-prod.sh \
   --public-domain qxp.example.com \
   --turn-domain turn.qxp.example.com \
   --external-ip 179.61.190.52 \
-  --listen-ip 179.61.190.52 \
-  --relay-ip 179.61.190.52
+  --listen-ip 0.0.0.0
 ```
 
 This generates:
 
 - `files/config.custom.toml`
-- `deploy/turn/turnserver.conf`
+- `deploy/turn/turn-server.toml`
 - `deploy/turn/credentials.env`
-- `deploy/turn/run/turnserver.pid`
-- `deploy/turn/turndb`
 
 ## 3. Obtain TLS certificates with certbot
 
@@ -98,15 +98,14 @@ Only TURN is strongly recommended on `systemd`.
 ## 7. Operational notes
 
 - `qxp` injects TURN runtime config into the served web page
-- `coturn` is started through `scripts/start-turn.sh`
-- the generated TURN config uses a local writable pidfile under `deploy/turn/run/`
-- the generated TURN config uses a local writable SQLite `userdb` under `deploy/turn/`
+- `turn-rs` is started through `scripts/start-turn.sh`
+- `turn-rs` uses `deploy/turn/turn-server.toml`
 - the certbot deploy hook resets owner and mode so the service user can read the certs after renewal
 
 Secrets/config live in:
 
 - `files/config.custom.toml`
-- `deploy/turn/turnserver.conf`
+- `deploy/turn/turn-server.toml`
 - `deploy/turn/credentials.env`
 
 Certificates live in:
@@ -136,7 +135,17 @@ If the service file changed in the repo, rerun:
 sudo ./scripts/install-turn-systemd.sh --enable
 ```
 
-## 10. Security model
+## 10. Remove legacy coturn from Debian
+
+Use the repository script:
+
+```bash
+sudo ./scripts/uninstall-coturn-debian.sh
+```
+
+Add `--purge-data` to also remove common coturn data/config directories.
+
+## 11. Security model
 
 - calls are relay-only when configured through this package
 - participant public IP addresses are not exposed directly to one another through WebRTC mesh

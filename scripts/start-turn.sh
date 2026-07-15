@@ -2,13 +2,16 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TURN_BIN="${TURN_BIN:-$(command -v turnserver || true)}"
-TURN_CONF="${TURN_CONF:-$ROOT_DIR/deploy/turn/turnserver.conf}"
-TURN_RUN_DIR="${TURN_RUN_DIR:-$ROOT_DIR/deploy/turn/run}"
-TURN_PIDFILE="${TURN_PIDFILE:-$TURN_RUN_DIR/turnserver.pid}"
+TURN_BIN="${TURN_BIN:-$(command -v turn-server || true)}"
+TURN_CONF="${TURN_CONF:-$ROOT_DIR/deploy/turn/turn-server.toml}"
+
+if [[ -z "$TURN_BIN" && -n "${USER:-}" && -x "/home/$USER/.cargo/bin/turn-server" ]]; then
+  TURN_BIN="/home/$USER/.cargo/bin/turn-server"
+fi
 
 if [[ -z "$TURN_BIN" ]]; then
-  echo "turnserver binary not found. Install coturn first." >&2
+  echo "turn-server binary not found. Install turn-rs first." >&2
+  echo "Example: cargo install turn-server" >&2
   exit 1
 fi
 
@@ -18,7 +21,5 @@ if [[ ! -f "$TURN_CONF" ]]; then
   exit 1
 fi
 
-mkdir -p "$TURN_RUN_DIR"
-
 cd "$ROOT_DIR"
-exec "$TURN_BIN" -c "$TURN_CONF" --pidfile "$TURN_PIDFILE"
+exec "$TURN_BIN" --config="$TURN_CONF"

@@ -36,7 +36,7 @@ bun.lock
 files/database.sqlite
 files/config.custom.toml
 files/database.json
-deploy/turn/turnserver.conf
+deploy/turn/turn-server.toml
 deploy/turn/credentials.env
 deploy/turn/certs/
 files/database.json

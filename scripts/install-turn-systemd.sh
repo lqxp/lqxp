@@ -14,8 +14,8 @@ Usage:
   sudo ./scripts/install-turn-systemd.sh [options]
 
 Options:
-  --user <name>      Unix user that should run coturn
-  --group <name>     Unix group that should run coturn
+  --user <name>      Unix user that should run turn-rs
+  --group <name>     Unix group that should run turn-rs
   --enable           Run systemctl enable --now after installing the unit
   --help             Show this help
 EOF
@@ -44,7 +44,7 @@ install -d -m 755 "$(dirname "$SERVICE_PATH")"
 
 cat > "$SERVICE_PATH" <<EOF
 [Unit]
-Description=QxProtocol TURN relay
+Description=QxProtocol turn-rs relay
 After=network-online.target
 Wants=network-online.target
 
@@ -81,6 +81,7 @@ Installed $SERVICE_PATH
 Service user:  $SERVICE_USER
 Service group: $SERVICE_GROUP
 Repo root:     $ROOT_DIR
+TURN engine:   turn-rs / turn-server
 
 Useful commands:
   sudo systemctl status $SERVICE_NAME --no-pager

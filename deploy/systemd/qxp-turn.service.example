@@ -1,5 +1,5 @@
 [Unit]
-Description=QxProtocol TURN relay
+Description=QxProtocol turn-rs relay
 After=network-online.target
 Wants=network-online.target
 

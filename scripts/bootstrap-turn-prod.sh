@@ -4,12 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_OUT="$ROOT_DIR/files/config.custom.toml"
 TURN_DIR="$ROOT_DIR/deploy/turn"
-TURN_CONF_OUT="$TURN_DIR/turnserver.conf"
+TURN_CONF_OUT="$TURN_DIR/turn-server.toml"
 CREDENTIALS_OUT="$TURN_DIR/credentials.env"
 CERTS_DIR="$TURN_DIR/certs"
-RUN_DIR="$TURN_DIR/run"
-PIDFILE_PATH="$RUN_DIR/turnserver.pid"
-TURN_DB_PATH="$TURN_DIR/turndb"
 
 BIND_HOST="0.0.0.0"
 PUBLIC_DOMAIN=""
@@ -21,8 +18,7 @@ TURN_CREDENTIAL=""
 TURN_PORT="3478"
 TURNS_PORT="5349"
 EXTERNAL_IP=""
-LISTEN_IP=""
-RELAY_IP=""
+LISTEN_IP="0.0.0.0"
 MIN_PORT="49152"
 MAX_PORT="65535"
 
@@ -40,12 +36,11 @@ Options:
   --turn-username <value>     TURN long-term auth username (default: qxp-turn)
   --turn-credential <value>   TURN long-term auth password (generated if omitted)
   --turn-port <port>          TURN UDP/TCP port (default: 3478)
-  --turns-port <port>         TURN TLS port (default: 5349)
-  --external-ip <ip>          Optional external/public IP for coturn
-  --listen-ip <ip>            Explicit coturn listening IP
-  --relay-ip <ip>             Explicit coturn relay IP
-  --min-port <port>           Relay port range start (default: 49152)
-  --max-port <port>           Relay port range end (default: 65535)
+  --turns-port <port>         TURN TLS TCP port (default: 5349)
+  --external-ip <ip>          Public IP advertised by turn-rs (required if behind NAT)
+  --listen-ip <ip>            Local IP bind address for turn-rs (default: 0.0.0.0)
+  --min-port <port>           Relay virtual port range start (default: 49152)
+  --max-port <port>           Relay virtual port range end (default: 65535)
   --help                      Show this help
 EOF
 }
@@ -74,7 +69,10 @@ while [[ $# -gt 0 ]]; do
     --turns-port) TURNS_PORT="${2:?}"; shift 2 ;;
     --external-ip) EXTERNAL_IP="${2:?}"; shift 2 ;;
     --listen-ip) LISTEN_IP="${2:?}"; shift 2 ;;
-    --relay-ip) RELAY_IP="${2:?}"; shift 2 ;;
+    --relay-ip)
+      echo "--relay-ip was a coturn option and is no longer used with turn-rs." >&2
+      exit 1
+      ;;
     --min-port) MIN_PORT="${2:?}"; shift 2 ;;
     --max-port) MAX_PORT="${2:?}"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
@@ -100,15 +98,11 @@ if [[ -z "$TURN_CREDENTIAL" ]]; then
   TURN_CREDENTIAL="$(random_secret)"
 fi
 
-if [[ -z "$LISTEN_IP" && -n "$EXTERNAL_IP" ]]; then
-  LISTEN_IP="$EXTERNAL_IP"
+if [[ -z "$EXTERNAL_IP" ]]; then
+  EXTERNAL_IP="$TURN_DOMAIN"
 fi
 
-if [[ -z "$RELAY_IP" && -n "$EXTERNAL_IP" ]]; then
-  RELAY_IP="$EXTERNAL_IP"
-fi
-
-mkdir -p "$TURN_DIR" "$CERTS_DIR" "$RUN_DIR"
+mkdir -p "$TURN_DIR" "$CERTS_DIR"
 
 if [[ -f "$CONFIG_OUT" ]]; then
   cp "$CONFIG_OUT" "$CONFIG_OUT.bak.$(date +%Y%m%d%H%M%S)"
@@ -143,36 +137,35 @@ turnCredential = "$TURN_CREDENTIAL"
 EOF
 
 cat > "$TURN_CONF_OUT" <<EOF
-lt-cred-mech
-realm=$TURN_DOMAIN
-server-name=$TURN_DOMAIN
-user=$TURN_USERNAME:$TURN_CREDENTIAL
+[server]
+realm = "$TURN_DOMAIN"
+port-range = "$MIN_PORT..$MAX_PORT"
 
-listening-port=$TURN_PORT
-tls-listening-port=$TURNS_PORT
-fingerprint
-no-cli
-no-multicast-peers
-min-port=$MIN_PORT
-max-port=$MAX_PORT
-pidfile=$PIDFILE_PATH
-userdb=$TURN_DB_PATH
+[[server.interfaces]]
+transport = "udp"
+listen = "$LISTEN_IP:$TURN_PORT"
+external = "$EXTERNAL_IP:$TURN_PORT"
 
-cert=$CERTS_DIR/fullchain.pem
-pkey=$CERTS_DIR/privkey.pem
+[[server.interfaces]]
+transport = "tcp"
+listen = "$LISTEN_IP:$TURN_PORT"
+external = "$EXTERNAL_IP:$TURN_PORT"
+
+[[server.interfaces]]
+transport = "tcp"
+listen = "$LISTEN_IP:$TURNS_PORT"
+external = "$EXTERNAL_IP:$TURNS_PORT"
+
+[server.interfaces.ssl]
+private-key = "$CERTS_DIR/privkey.pem"
+certificate-chain = "$CERTS_DIR/fullchain.pem"
+
+[auth.static-credentials]
+"$TURN_USERNAME" = "$TURN_CREDENTIAL"
+
+[log]
+level = "info"
 EOF
-
-if [[ -n "$LISTEN_IP" ]]; then
-  echo "listening-ip=$LISTEN_IP" >> "$TURN_CONF_OUT"
-fi
-
-if [[ -n "$RELAY_IP" ]]; then
-  echo "relay-ip=$RELAY_IP" >> "$TURN_CONF_OUT"
-fi
-
-if [[ -n "$EXTERNAL_IP" ]]; then
-  echo "external-ip=$EXTERNAL_IP" >> "$TURN_CONF_OUT"
-fi
 
 cat > "$CREDENTIALS_OUT" <<EOF
 QXP_PUBLIC_DOMAIN=$PUBLIC_DOMAIN
@@ -182,17 +175,14 @@ QXP_TURN_CREDENTIAL=$TURN_CREDENTIAL
 QXP_TURN_PORT=$TURN_PORT
 QXP_TURNS_PORT=$TURNS_PORT
 QXP_TURN_LISTEN_IP=$LISTEN_IP
-QXP_TURN_RELAY_IP=$RELAY_IP
 QXP_TURN_EXTERNAL_IP=$EXTERNAL_IP
-QXP_TURN_PIDFILE=$PIDFILE_PATH
-QXP_TURN_USERDB=$TURN_DB_PATH
+QXP_TURN_CONFIG=$TURN_CONF_OUT
 EOF
 
-chmod 700 "$RUN_DIR"
 chmod 600 "$CONFIG_OUT" "$TURN_CONF_OUT" "$CREDENTIALS_OUT"
 
 cat <<EOF
-TURN bootstrap complete.
+TURN bootstrap complete for turn-rs.
 
 Generated:
   - $CONFIG_OUT
@@ -200,12 +190,13 @@ Generated:
   - $CREDENTIALS_OUT
 
 Next steps:
-  1. Obtain certificates for $TURN_DOMAIN with certbot.
-  2. Copy certificates into $CERTS_DIR using:
+  1. Install turn-rs / turn-server on the VPS.
+  2. Obtain certificates for $TURN_DOMAIN with certbot.
+  3. Copy certificates into $CERTS_DIR using:
      ./scripts/certbot-turn-deploy-hook.sh --turn-domain $TURN_DOMAIN
-  3. Build qxp:
+  4. Build qxp:
      cargo build --release
-  4. Install TURN as a systemd service:
+  5. Install TURN as a systemd service:
      sudo ./scripts/install-turn-systemd.sh --enable
-  5. Start the qxp app with your preferred supervisor.
+  6. Start the qxp app with your preferred supervisor.
 EOF
