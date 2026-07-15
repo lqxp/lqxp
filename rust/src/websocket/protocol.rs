@@ -55,7 +55,7 @@ const MAX_VOICE_CHUNK_B64_LEN: usize = ((MAX_VOICE_CHUNK_BYTES + 2) / 3) * 4 + 4
 // on the client is ~800ms per chunk, so 100ms floor allows bursts without
 // letting a spammer saturate the room.
 const MIN_VOICE_CHUNK_INTERVAL_MS: u64 = 100;
-const MIN_BETWEEN_MESSAGE_INTERVAL: u64 = 100;
+const MIN_BETWEEN_MESSAGE_INTERVAL: u64 = 400;
 const SYSTEM_USERNAME: &str = "system";
 
 fn is_reserved_system_username(username: &str) -> bool {
