@@ -55,7 +55,6 @@ const MAX_VOICE_CHUNK_B64_LEN: usize = ((MAX_VOICE_CHUNK_BYTES + 2) / 3) * 4 + 4
 // on the client is ~800ms per chunk, so 100ms floor allows bursts without
 // letting a spammer saturate the room.
 const MIN_VOICE_CHUNK_INTERVAL_MS: u64 = 100;
-const DUPLICATE_MESSAGE_WINDOW_MS: u64 = 5 * 60 * 1000;
 const MIN_BETWEEN_MESSAGE_INTERVAL: u64 = 100;
 const SYSTEM_USERNAME: &str = "system";
 
@@ -940,17 +939,6 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
         preview: None,
         deleted: false,
     };
-
-    if is_duplicate_recent_room_message(state, &room_name, &message_record).await {
-        return respond_error(
-            state,
-            session_id,
-            7,
-            "Duplicate message blocked (same content was already sent in the last 10 minutes)",
-            request_id(&d),
-        )
-        .await;
-    }
 
     let stored_message = store_room_message(state, &room_name, message_record).await;
 
@@ -2528,70 +2516,6 @@ async fn store_room_message(
         room.drain(0..overflow);
     }
     message
-}
-
-async fn is_duplicate_recent_room_message(
-    state: &SharedState,
-    room_id: &str,
-    candidate: &ChatMessageRecord,
-) -> bool {
-    let rooms = state.room_messages.read().await;
-    let Some(messages) = rooms.get(room_id) else {
-        return false;
-    };
-
-    let oldest_allowed = candidate
-        .timestamp
-        .saturating_sub(DUPLICATE_MESSAGE_WINDOW_MS);
-
-    messages
-        .iter()
-        .rev()
-        .take_while(|message| message.timestamp >= oldest_allowed)
-        .any(|message| {
-            !message.deleted
-                && message.username == candidate.username
-                && message.text == candidate.text
-                && message.reply_to_message_id == candidate.reply_to_message_id
-                && encrypted_payloads_match(
-                    message.encrypted.as_ref(),
-                    candidate.encrypted.as_ref(),
-                )
-                && attachments_match(message.attachment.as_ref(), candidate.attachment.as_ref())
-        })
-}
-
-fn attachments_match(left: Option<&Attachment>, right: Option<&Attachment>) -> bool {
-    match (left, right) {
-        (None, None) => true,
-        (Some(left), Some(right)) => {
-            left.id == right.id
-                && left.url == right.url
-                && left.filename == right.filename
-                && left.mime_type == right.mime_type
-                && left.size == right.size
-        }
-        _ => false,
-    }
-}
-
-fn encrypted_payloads_match(
-    left: Option<&EncryptedPayload>,
-    right: Option<&EncryptedPayload>,
-) -> bool {
-    match (left, right) {
-        (None, None) => true,
-        (Some(left), Some(right)) => {
-            left.v == right.v
-                && left.alg == right.alg
-                && left.iv == right.iv
-                && left.salt == right.salt
-                && left.n == right.n
-                && left.ciphertext == right.ciphertext
-                && left.room_id == right.room_id
-        }
-        _ => false,
-    }
 }
 
 async fn update_message_reactions(
