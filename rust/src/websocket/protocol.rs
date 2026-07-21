@@ -899,8 +899,17 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
         }
     };
 
-    let player_name = match chat_result {
-        Ok(name) => name,
+    let (player_name, current_profile) = match chat_result {
+        Ok(name) => {
+            let current_profile = {
+                let players = state.players.read().await;
+                players
+                    .get(session_id)
+                    .map(|player| player.profile.clone())
+                    .unwrap_or_default()
+            };
+            (name, current_profile)
+        }
         Err(message) => return respond_error(state, session_id, 7, &message, request_id(&d)).await,
     };
 
@@ -1414,7 +1423,7 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
         return respond_error(state, session_id, 29, "Empty message", request_id(&d)).await;
     }
 
-    let username = {
+    let (username, current_profile) = {
         let players = state.players.read().await;
         match players.get(session_id) {
             Some(player) if !player.username.is_empty() => {
@@ -1428,7 +1437,7 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
                     )
                     .await;
                 }
-                player.username.clone()
+                (player.username.clone(), player.profile.clone())
             }
             _ => {
                 return respond_error(
