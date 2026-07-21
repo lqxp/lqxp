@@ -971,7 +971,7 @@ async fn upload_asset(
     let Some(full_path) = safe_child_path(&state.config.network.upload_dir, &path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    serve_file(&full_path).await
+    serve_upload_file(&full_path).await
 }
 
 fn safe_child_path(base: &str, raw_path: &str) -> Option<PathBuf> {
@@ -992,11 +992,45 @@ async fn serve_file(path: &Path) -> Response {
             Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", mime.as_ref())
+                .header("x-content-type-options", "nosniff")
                 .body(axum::body::Body::from(bytes))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn serve_upload_file(path: &Path) -> Response {
+    match fs::read(path).await {
+        Ok(bytes) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            let mut builder = Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", mime.as_ref())
+                .header("x-content-type-options", "nosniff");
+            if is_active_upload_path(path) {
+                builder = builder
+                    .header("content-type", "application/octet-stream")
+                    .header("content-disposition", "attachment");
+            }
+            builder
+                .body(axum::body::Body::from(bytes))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn is_active_upload_path(path: &Path) -> bool {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "html" | "htm" | "xhtml" | "svg" | "xml" | "js" | "mjs" | "cjs" | "wasm"
+    )
 }
 
 async fn serve_webchat_index(path: &Path, origin: Option<&str>, state: &SharedState) -> Response {
