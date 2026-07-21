@@ -2367,9 +2367,31 @@ async fn update_room_title(state: &SharedState, session_id: &str, d: Value) -> b
 }
 
 async fn stats_query(state: &SharedState, session_id: &str, d: Value) -> bool {
-    let game_id = d.get("gameId").and_then(Value::as_str);
-    let count = match game_id {
-        Some(game_id) => room_usernames(state, game_id, None).await.len(),
+    let game_id = match d.get("gameId").and_then(Value::as_str) {
+        Some(game_id) => match resolve_room_for_session(state, session_id, Some(game_id)).await {
+            Ok(room_id) => Some(room_id),
+            Err(message) => return respond_error(state, session_id, 105, &message, request_id(&d)).await,
+        },
+        None => {
+            let players = state.players.read().await;
+            match players.get(session_id) {
+                Some(player) if !player.username.is_empty() => None,
+                _ => {
+                    return respond_error(
+                        state,
+                        session_id,
+                        105,
+                        "You need to be identified before",
+                        request_id(&d),
+                    )
+                    .await
+                }
+            }
+        }
+    };
+
+    let count = match &game_id {
+        Some(room_id) => room_usernames(state, room_id, None).await.len(),
         None => {
             let players = state.players.read().await;
             players.len()
