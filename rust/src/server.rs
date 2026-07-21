@@ -28,22 +28,14 @@ async fn app_asset(
     State(state): State<SharedState>,
     AxumPath(path): AxumPath<String>,
 ) -> impl IntoResponse {
-    let path = path.trim_start_matches('/');
+    let Some(full_path) = safe_child_path(&state.config.network.public_dir, &path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
 
-    // /app/foo -> foo
-    let path = path.strip_prefix("app/").unwrap_or(path);
-
-    let full_path = PathBuf::from(&state.config.network.public_dir).join(path);
-
-    // Si quelqu'un ouvre /app/nimportequoi
-    // on renvoie le SPA
     if !full_path.exists() {
         let index = PathBuf::from(&state.config.network.public_dir)
             .join(&state.config.network.webchat_index);
-
-        let origin = None;
-
-        return serve_webchat_index(&index, origin, &state).await;
+        return serve_webchat_index(&index, None, &state).await;
     }
 
     serve_file(&full_path).await
@@ -877,16 +869,8 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn client_ip(headers: &HeaderMap, addr: SocketAddr) -> String {
-    headers
-        .get("x-real-ip")
-        .or_else(|| headers.get("x-forwarded-for"))
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| addr.ip().to_string())
+fn client_ip(_headers: &HeaderMap, addr: SocketAddr) -> String {
+    addr.ip().to_string()
 }
 
 fn api_error(status: StatusCode, message: &str) -> Response {
@@ -933,8 +917,9 @@ async fn public_asset(
     State(state): State<SharedState>,
     AxumPath(path): AxumPath<String>,
 ) -> impl IntoResponse {
-    let sanitized = path.trim_start_matches('/');
-    let full_path = PathBuf::from(&state.config.network.public_dir).join(sanitized);
+    let Some(full_path) = safe_child_path(&state.config.network.public_dir, &path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     serve_file(&full_path).await
 }
 
@@ -942,14 +927,21 @@ async fn upload_asset(
     State(state): State<SharedState>,
     AxumPath(path): AxumPath<String>,
 ) -> impl IntoResponse {
-    let sanitized = path
-        .trim_start_matches('/')
-        .split('/')
-        .filter(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
-        .collect::<Vec<_>>()
-        .join("/");
-    let full_path = PathBuf::from(&state.config.network.upload_dir).join(sanitized);
+    let Some(full_path) = safe_child_path(&state.config.network.upload_dir, &path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     serve_file(&full_path).await
+}
+
+fn safe_child_path(base: &str, raw_path: &str) -> Option<PathBuf> {
+    let relative = Path::new(raw_path.trim_start_matches('/'));
+    if relative
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(Path::new(base).join(relative))
 }
 
 async fn serve_file(path: &Path) -> Response {

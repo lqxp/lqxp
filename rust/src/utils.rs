@@ -39,13 +39,6 @@ pub fn with_request_id(mut payload: Value, request_id: Option<String>) -> Value 
     payload
 }
 
-pub fn admin_allowed(state: &AppState, d: &Value) -> bool {
-    d.get("adminKey")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        == state.config.api.admin_password
-}
-
 pub fn random_session_id() -> String {
     let mut rng = thread_rng();
     std::iter::repeat_with(|| rng.sample(Alphanumeric))

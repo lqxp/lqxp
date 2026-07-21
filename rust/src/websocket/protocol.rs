@@ -15,7 +15,7 @@ use crate::{
     },
     state::SharedState,
     utils::{
-        admin_allowed, now_ms, random_message_id, request_id, sanitize_filename,
+        now_ms, random_message_id, request_id, sanitize_filename,
         send_json, store_uploaded_bytes, with_request_id,
     },
 };
@@ -822,14 +822,16 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
         Err(message) => return respond_error(state, session_id, 7, message, request_id(&d)).await,
     };
 
-    let target_game_id = if let Some(encrypted_room_id) = encrypted.as_ref().and_then(|payload| payload.room_id.as_deref()) {
-        encrypted_room_id
-    } else {
-        let Some(target_game_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
-            return respond_error(state, session_id, 7, "Missing gameId", request_id(&d)).await;
-        };
-        target_game_id
+    let Some(target_game_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
+        return respond_error(state, session_id, 7, "Missing gameId", request_id(&d)).await;
     };
+    if encrypted
+        .as_ref()
+        .and_then(|payload| payload.room_id.as_deref())
+        .is_some_and(|encrypted_room_id| encrypted_room_id != target_game_id)
+    {
+        return respond_error(state, session_id, 7, "Encrypted room mismatch", request_id(&d)).await;
+    }
 
     if let Err(message) = validate_room_id(target_game_id) {
         return respond_error(state, session_id, 7, message, request_id(&d)).await;
@@ -1262,12 +1264,7 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
         let players = state.players.read().await;
         match players.get(session_id) {
             Some(player) if !player.username.is_empty() => {
-                let is_admin = !state.config.api.admin_password.is_empty()
-                    && d.get("adminKey")
-                        .and_then(Value::as_str)
-                        .map(|key| key == state.config.api.admin_password)
-                        .unwrap_or(false);
-                (player.username.clone(), is_admin)
+                (player.username.clone(), player.is_admin)
             }
             _ => {
                 return respond_error(
@@ -1381,14 +1378,17 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
         Err(message) => return respond_error(state, session_id, 29, message, request_id(&d)).await,
     };
 
-    let room_id = if let Some(encrypted_room_id) = encrypted.as_ref().and_then(|payload| payload.room_id.as_deref()) {
-        encrypted_room_id.to_owned()
-    } else {
-        let Some(room_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
-            return respond_error(state, session_id, 29, "Missing gameId", request_id(&d)).await;
-        };
-        room_id.to_owned()
+    let Some(room_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
+        return respond_error(state, session_id, 29, "Missing gameId", request_id(&d)).await;
     };
+    if encrypted
+        .as_ref()
+        .and_then(|payload| payload.room_id.as_deref())
+        .is_some_and(|encrypted_room_id| encrypted_room_id != room_id)
+    {
+        return respond_error(state, session_id, 29, "Encrypted room mismatch", request_id(&d)).await;
+    }
+    let room_id = room_id.to_owned();
     if let Err(message) = validate_room_id(&room_id) {
         return respond_error(state, session_id, 29, message, request_id(&d)).await;
     }
@@ -2021,7 +2021,7 @@ async fn update_mute_state(state: &SharedState, session_id: &str, d: Value) -> b
 }
 
 async fn admin_status(state: &SharedState, session_id: &str, d: Value) -> bool {
-    if !admin_allowed(state, &d) {
+    if !session_is_admin(state, session_id).await {
         return respond_error(state, session_id, 101, "Unauthorized", request_id(&d)).await;
     }
 
@@ -2069,7 +2069,7 @@ async fn admin_status(state: &SharedState, session_id: &str, d: Value) -> bool {
 }
 
 async fn admin_broadcast(state: &SharedState, session_id: &str, d: Value) -> bool {
-    if !admin_allowed(state, &d) {
+    if !session_is_admin(state, session_id).await {
         return respond_error(state, session_id, 104, "Unauthorized", request_id(&d)).await;
     }
 
@@ -2435,24 +2435,39 @@ async fn resolve_room_for_session(
     session_id: &str,
     requested_room: Option<&str>,
 ) -> Result<String, String> {
+    let players = state.players.read().await;
+    let Some(player) = players.get(session_id) else {
+        return Err("You need to be identified before".to_owned());
+    };
+    if player.username.is_empty() {
+        return Err("You need to be identified before".to_owned());
+    }
+
     if let Some(room) = requested_room
         .map(str::trim)
         .filter(|room| !room.is_empty())
     {
         validate_room_id(room).map_err(str::to_owned)?;
+        if !player.rooms.contains(room) {
+            return Err("Not a member of this room".to_owned());
+        }
         return Ok(room.to_owned());
     }
 
+    player
+        .rooms
+        .iter()
+        .next()
+        .cloned()
+        .ok_or_else(|| "Not a member of any room".to_owned())
+}
+
+async fn session_is_admin(state: &SharedState, session_id: &str) -> bool {
     let players = state.players.read().await;
-    if let Some(player) = players.get(session_id) {
-        if let Some(first) = player.rooms.iter().next() {
-            Ok(first.clone())
-        } else {
-            Err("Not a member of any room".to_owned())
-        }
-    } else {
-        Err("You need to be identified before".to_owned())
-    }
+    players
+        .get(session_id)
+        .map(|player| player.is_admin && !player.username.is_empty())
+        .unwrap_or(false)
 }
 
 async fn dispatch_room_history(

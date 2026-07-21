@@ -38,8 +38,6 @@ pub struct ApiConfig {
     pub public_domain: String,
     #[serde(default = "default_port")]
     pub port: u16,
-    #[serde(default, rename = "adminPassword")]
-    pub admin_password: String,
 }
 
 impl Default for ApiConfig {
@@ -48,7 +46,6 @@ impl Default for ApiConfig {
             domain: String::new(),
             public_domain: String::new(),
             port: default_port(),
-            admin_password: String::new(),
         }
     }
 }
