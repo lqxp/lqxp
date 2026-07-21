@@ -5,7 +5,7 @@ use std::{
 };
 
 use axum::{
-    extract::{ws::WebSocketUpgrade, ConnectInfo, DefaultBodyLimit, Multipart, Path as AxumPath, State},
+    extract::{ws::{Message, WebSocketUpgrade}, ConnectInfo, DefaultBodyLimit, Multipart, Path as AxumPath, State},
     http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -65,6 +65,7 @@ pub fn build_router(state: SharedState) -> Router {
             post(admin_user_disabled),
         )
         .route("/api/admin/users/:user_id/banned", post(admin_user_banned))
+        .route("/api/admin/users/:user_id/delete", post(admin_user_delete))
         .route("/api/admin/users/:user_id/badges", post(admin_user_badges))
         .route("/api/release", get(latest_release))
         // Websocket
@@ -767,6 +768,29 @@ async fn admin_user_banned(
     }
 }
 
+async fn admin_user_delete(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    AxumPath(user_id): AxumPath<String>,
+) -> impl IntoResponse {
+    let Some(user) = authenticated_user(&state, &headers).await else {
+        return api_error(StatusCode::UNAUTHORIZED, "Invalid session.");
+    };
+    if !user.admin {
+        return api_error(StatusCode::FORBIDDEN, "Admin only.");
+    }
+    if user.id == user_id {
+        return api_error(StatusCode::BAD_REQUEST, "You cannot delete your own account.");
+    }
+    match state.accounts.delete_user_account(&user_id).await {
+        Ok(()) => {
+            disconnect_user_sessions(&state, &user_id).await;
+            Json(json!({ "ok": true })).into_response()
+        }
+        Err(err) => api_error(StatusCode::BAD_REQUEST, &err),
+    }
+}
+
 async fn admin_user_badges(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -843,6 +867,23 @@ async fn broadcast_badge_update(state: &SharedState, user: &crate::accounts::Pub
                 }),
             );
         }
+    }
+}
+
+async fn disconnect_user_sessions(state: &SharedState, user_id: &str) {
+    let sessions = {
+        let players = state.players.read().await;
+        players
+            .values()
+            .filter(|player| player.user_id == user_id)
+            .map(|player| (player.id.clone(), player.tx.clone()))
+            .collect::<Vec<_>>()
+    };
+
+    for (session_id, tx) in sessions {
+        send_json(&tx, json!({ "op": 0, "d": { "error": "Account deleted." } }));
+        let _ = tx.send(Message::Close(None));
+        crate::websocket::disconnect_player(state, &session_id).await;
     }
 }
 

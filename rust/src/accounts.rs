@@ -554,17 +554,23 @@ impl AccountDatabase {
             .ok_or("Account not found.")?;
         verify_secret(password, &stored.password_hash)
             .map_err(|_| "Invalid password.".to_owned())?;
-        let user_id = user.id.clone();
+        self.delete_user_account(&user.id).await
+    }
+
+    pub async fn delete_user_account(&self, user_id: &str) -> AccountResult<()> {
+        if self.user_by_id(user_id).await?.is_none() {
+            return Err("Account not found.".to_owned());
+        }
         match &self.backend {
             SqlBackend::Sqlite(pool) => {
                 sqlx::query("DELETE FROM sessions WHERE user_id = ?")
-                    .bind(&user_id)
+                    .bind(user_id)
                     .execute(pool)
                     .await
                     .map(|_| ())
                     .map_err(|err| format!("Database query failed: {err}"))?;
                 sqlx::query("DELETE FROM users WHERE id = ?")
-                    .bind(&user_id)
+                    .bind(user_id)
                     .execute(pool)
                     .await
                     .map(|_| ())
@@ -572,13 +578,13 @@ impl AccountDatabase {
             }
             SqlBackend::Postgres(pool) => {
                 sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-                    .bind(&user_id)
+                    .bind(user_id)
                     .execute(pool)
                     .await
                     .map(|_| ())
                     .map_err(|err| format!("Database query failed: {err}"))?;
                 sqlx::query("DELETE FROM users WHERE id = $1")
-                    .bind(&user_id)
+                    .bind(user_id)
                     .execute(pool)
                     .await
                     .map(|_| ())
