@@ -928,6 +928,7 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
             trimmed
         },
         timestamp: now,
+        profile: current_profile.clone(),
         edited_at: None,
         system: false,
         reactions: Vec::new(),
@@ -1487,6 +1488,7 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
         } else {
             trimmed
         };
+        message.profile = current_profile.clone();
         message.attachment = None;
         message.encrypted = encrypted;
         message.preview = None;

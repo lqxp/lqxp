@@ -140,6 +140,8 @@ pub struct ChatMessageRecord {
     pub username: String,
     pub text: String,
     pub timestamp: u64,
+    #[serde(default)]
+    pub profile: UserProfile,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "editedAt")]
     pub edited_at: Option<u64>,
     pub system: bool,
