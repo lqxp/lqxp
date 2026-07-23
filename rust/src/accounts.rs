@@ -1036,7 +1036,7 @@ fn sanitize_custom_badges(raw: &[String]) -> AccountResult<Vec<String>> {
     for value in raw {
         let badge = value.trim().to_ascii_lowercase();
         if badge.is_empty()
-            || matches!(badge.as_str(), "staff" | "admin" | "early" | "system")
+            || matches!(badge.as_str(), "staff" | "admin" | "system")
             || badges.iter().any(|existing| existing == &badge)
         {
             continue;
