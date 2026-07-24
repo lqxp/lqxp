@@ -248,7 +248,7 @@ async fn identify_player(state: &SharedState, session_id: &str, d: Value) -> boo
             json!({
                 "op": 2,
                 "d": {
-                    "uuid": account_id,
+                    "userId": account_id,
                     "username": final_username.clone(),
                     "admin": is_admin,
                     "profile": profile.clone(),
