@@ -4,14 +4,15 @@ set -euo pipefail
 git pull --recurse-submodules
 git submodule update --init --recursive
 
-cargo build -r
-
 cd web
 bun install
 bun run build
 cd ..
 
-pm2 restart pm2.config.cjs
+cargo build --release
 
-# git submodule sync
-# git submodule update --remote web
+if pm2 describe qxp-app >/dev/null 2>&1; then
+    pm2 restart qxp-app
+else
+    pm2 start pm2.config.cjs
+fi
