@@ -11,7 +11,7 @@ bun install
 bun run build
 cd ..
 
-pm2 restart qxp-app
+pm2 restart pm2.config.cjs
 
 # git submodule sync
 # git submodule update --remote web
