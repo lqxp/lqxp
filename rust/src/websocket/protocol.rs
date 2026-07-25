@@ -2949,7 +2949,7 @@ async fn parse_attachment(
         MAX_FILENAME_LEN,
     );
 
-    let declared_mime = obj
+    let mime_type = obj
         .get("mimeType")
         .and_then(Value::as_str)
         .map(str::trim)
@@ -2959,15 +2959,12 @@ async fn parse_attachment(
         .take(MAX_MIMETYPE_LEN)
         .collect::<String>();
 
-    let (mime_type, _, _) = detect_profile_image(&decoded, &declared_mime)
-        .map_err(|_| "Only PNG, GIF, and JPEG image attachments are allowed")?;
-    let extension = match mime_type {
-        "image/png" => "png",
-        "image/gif" => "gif",
-        "image/jpeg" => "jpg",
-        _ => return Err("Only PNG, GIF, and JPEG image attachments are allowed"),
-    };
-    let stored = store_uploaded_bytes(state.as_ref(), extension, &decoded, mime_type)
+    let extension = filename
+        .rsplit('.')
+        .next()
+        .filter(|segment| *segment != filename)
+        .unwrap_or("");
+    let stored = store_uploaded_bytes(state.as_ref(), extension, &decoded, &mime_type)
         .await
         .map_err(|_| "Failed to store attachment")?;
 
@@ -2975,7 +2972,7 @@ async fn parse_attachment(
         id: stored.id,
         url: stored.url,
         filename,
-        mime_type: mime_type.to_owned(),
+        mime_type,
         size: decoded.len() as u64,
     }))
 }
