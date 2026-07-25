@@ -52,6 +52,7 @@ async fn main() {
         database,
         accounts,
         rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        public_profile_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     });
 
     let app = build_router(state.clone());

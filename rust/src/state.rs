@@ -6,6 +6,8 @@ use std::{
 use axum::extract::ws::Message;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
+use serde_json::Value;
+
 use crate::{
     accounts::SharedAccounts,
     config::Config,
@@ -22,6 +24,7 @@ pub struct AppState {
     pub database: Arc<RoomDatabase>,
     pub accounts: SharedAccounts,
     pub rate_limits: Arc<Mutex<HashMap<String, RateLimitBucket>>>,
+    pub public_profile_cache: Arc<Mutex<HashMap<String, CachedPublicProfile>>>,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -30,6 +33,12 @@ pub type SharedState = Arc<AppState>;
 pub struct RateLimitBucket {
     pub window_start_ms: u64,
     pub count: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedPublicProfile {
+    pub expires_at_ms: u64,
+    pub value: Value,
 }
 
 #[derive(Debug, Clone)]

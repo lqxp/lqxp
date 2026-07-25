@@ -1,5 +1,5 @@
 use axum::extract::ws::Message;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
@@ -15,7 +15,7 @@ use crate::{
     },
     state::SharedState,
     utils::{
-        now_ms, random_message_id, request_id, sanitize_filename,
+        now_ms, random_message_id, rate_limit_hit, request_id, sanitize_filename,
         send_json, store_uploaded_bytes, with_request_id,
     },
 };
@@ -56,6 +56,10 @@ const MAX_VOICE_CHUNK_B64_LEN: usize = ((MAX_VOICE_CHUNK_BYTES + 2) / 3) * 4 + 4
 // letting a spammer saturate the room.
 const MIN_VOICE_CHUNK_INTERVAL_MS: u64 = 100;
 const MIN_BETWEEN_MESSAGE_INTERVAL: u64 = 400;
+const PUBLIC_PROFILE_CACHE_TTL_MS: u64 = 5 * 60 * 1000;
+const PUBLIC_PROFILE_RATE_LIMIT_WINDOW_MS: u64 = 10_000;
+const PUBLIC_PROFILE_RATE_LIMIT_MAX: u32 = 12;
+const PUBLIC_PROFILE_MAX_LOOKUPS: usize = 32;
 const SYSTEM_USERNAME: &str = "system";
 
 fn is_reserved_system_username(username: &str) -> bool {
@@ -122,6 +126,7 @@ pub async fn process_message(
         31 => update_typing_state(&state, &session_id, payload.d).await,
         32 => upload_room_icon(&state, &session_id, payload.d).await,
         33 => update_room_title(&state, &session_id, payload.d).await,
+        35 => request_public_profiles(&state, &session_id, payload.d).await,
         98 => update_voice_chat(&state, &session_id, payload.d).await,
         99 => relay_voice_data(&state, &session_id, payload.d, payload.u).await,
         100 => update_mute_state(&state, &session_id, payload.d).await,
@@ -2426,6 +2431,169 @@ async fn stats_query(state: &SharedState, session_id: &str, d: Value) -> bool {
     )
     .await;
     false
+}
+
+async fn request_public_profiles(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+
+    let rate_key = format!("public-profile:{}", session_id);
+    if rate_limit_hit(state.as_ref(), rate_key, PUBLIC_PROFILE_RATE_LIMIT_MAX, PUBLIC_PROFILE_RATE_LIMIT_WINDOW_MS).await {
+        return respond_error(state, session_id, 35, "Rate limit exceeded", req_id).await;
+    }
+
+    let authenticated = {
+        let players = state.players.read().await;
+        players
+            .get(session_id)
+            .map(|player| !player.username.trim().is_empty())
+            .unwrap_or(false)
+    };
+    if !authenticated {
+        return respond_error(state, session_id, 35, "You need to be identified before", req_id).await;
+    }
+
+    let mut lookups = Vec::new();
+    if let Some(arr) = d.get("users").and_then(Value::as_array) {
+        for item in arr.iter().take(PUBLIC_PROFILE_MAX_LOOKUPS) {
+            lookups.push((
+                item.get("userId")
+                    .or_else(|| item.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned),
+                item.get("username")
+                    .or_else(|| item.get("user"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned),
+            ));
+        }
+    } else {
+        lookups.push((
+            d.get("userId")
+                .or_else(|| d.get("id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            d.get("username")
+                .or_else(|| d.get("user"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+        ));
+    }
+
+    lookups.retain(|(user_id, username)| user_id.is_some() || username.is_some());
+    if lookups.is_empty() {
+        return respond_error(state, session_id, 35, "Missing userId or username", req_id).await;
+    }
+
+    let now = now_ms();
+    let mut users = BTreeMap::new();
+    let mut profiles = Map::new();
+    let mut badges = Map::new();
+
+    for (user_id, username) in lookups {
+        let cache_key = public_profile_cache_key(user_id.as_deref(), username.as_deref());
+        if let Some(cached) = {
+            let cache = state.public_profile_cache.lock().await;
+            cache
+                .get(&cache_key)
+                .filter(|entry| entry.expires_at_ms > now)
+                .map(|entry| entry.value.clone())
+        } {
+            insert_public_profile_payload(&mut users, &mut profiles, &mut badges, cached);
+            continue;
+        }
+
+        match state
+            .accounts
+            .public_user_by_id_or_username(user_id.as_deref(), username.as_deref())
+            .await
+        {
+            Ok(Some(user)) => {
+                let value = json!({
+                    "userId": user.id,
+                    "id": user.id,
+                    "username": user.username,
+                    "profile": user.profile,
+                    "badges": user.badges,
+                    "createdAt": user.created_at
+                });
+                {
+                    let mut cache = state.public_profile_cache.lock().await;
+                    if cache.len() > 10_000 {
+                        cache.retain(|_, entry| entry.expires_at_ms > now);
+                    }
+                    cache.insert(cache_key, crate::state::CachedPublicProfile {
+                        expires_at_ms: now + PUBLIC_PROFILE_CACHE_TTL_MS,
+                        value: value.clone(),
+                    });
+                }
+                insert_public_profile_payload(&mut users, &mut profiles, &mut badges, value);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                error!("Failed to lookup public profile: {}", err);
+                return respond_error(state, session_id, 35, "Profile lookup failed", req_id).await;
+            }
+        }
+    }
+
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(
+            json!({
+                "op": 35,
+                "d": {
+                    "ok": true,
+                    "users": users.values().cloned().collect::<Vec<_>>(),
+                    "profiles": profiles,
+                    "badges": badges,
+                    "ttlMs": PUBLIC_PROFILE_CACHE_TTL_MS
+                }
+            }),
+            req_id,
+        ),
+    )
+    .await;
+    false
+}
+
+fn public_profile_cache_key(user_id: Option<&str>, username: Option<&str>) -> String {
+    if let Some(user_id) = user_id.map(str::trim).filter(|value| !value.is_empty()) {
+        return format!("id:{}", user_id);
+    }
+    format!("username:{}", username.unwrap_or_default().trim().to_ascii_lowercase())
+}
+
+fn insert_public_profile_payload(
+    users: &mut BTreeMap<String, Value>,
+    profiles: &mut Map<String, Value>,
+    badges: &mut Map<String, Value>,
+    value: Value,
+) {
+    let username = value
+        .get("username")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if username.is_empty() {
+        return;
+    }
+    if let Some(profile) = value.get("profile") {
+        profiles.insert(username.clone(), profile.clone());
+    }
+    if let Some(user_badges) = value.get("badges") {
+        badges.insert(username.clone(), user_badges.clone());
+    }
+    users.insert(username, value);
 }
 
 async fn respond_error(

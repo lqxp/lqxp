@@ -627,6 +627,26 @@ impl AccountDatabase {
         Ok(profiles)
     }
 
+    pub async fn public_user_by_id_or_username(
+        &self,
+        user_id: Option<&str>,
+        username: Option<&str>,
+    ) -> AccountResult<Option<PublicUser>> {
+        if let Some(user_id) = user_id.map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(user) = self.user_by_id(user_id).await? {
+                return Ok(Some(self.public_user(user)));
+            }
+        }
+
+        if let Some(username) = username.map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(user) = self.user_by_username(username).await? {
+                return Ok(Some(self.public_user(user)));
+            }
+        }
+
+        Ok(None)
+    }
+
     pub async fn update_profile(&self, user_id: &str, profile: &UserProfile) -> AccountResult<()> {
         let profile_json = serde_json::to_string(profile)
             .map_err(|err| format!("Could not encode profile: {err}"))?;
