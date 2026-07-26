@@ -5,8 +5,16 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TURN_BIN="${TURN_BIN:-$(command -v turn-server || true)}"
 TURN_CONF="${TURN_CONF:-$ROOT_DIR/deploy/turn/turn-server.toml}"
 
-if [[ -z "$TURN_BIN" && -n "${USER:-}" && -x "/home/$USER/.cargo/bin/turn-server" ]]; then
-  TURN_BIN="/home/$USER/.cargo/bin/turn-server"
+if [[ -z "$TURN_BIN" ]]; then
+  for candidate in \
+    "/home/${USER:-}/.cargo/bin/turn-server" \
+    "/usr/local/bin/turn-server" \
+    "/usr/bin/turn-server"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      TURN_BIN="$candidate"
+      break
+    fi
+  done
 fi
 
 if [[ -z "$TURN_BIN" ]]; then

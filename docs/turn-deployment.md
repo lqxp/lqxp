@@ -1,25 +1,34 @@
-# TURN Packaging For qxp
+# TURN-only deployment for qxp
 
-This repo supports a packaged TURN sidecar deployment:
+This repo supports deploying only the TURN relay on a VPS, without building or running the full `qxp` platform on that machine.
 
-- `qxp` serves the app and runtime RTC config
-- `turn-rs` relays all call traffic through the `turn-server` binary
-- direct P2P calls stay disabled unless TURN is configured
-- TURN should be managed by `systemd`, not PM2
+Use this when:
 
-## 1. Install dependencies
+- the app is hosted somewhere else;
+- the VPS only needs to relay WebRTC traffic;
+- you want `turn-rs` managed by `systemd`.
+
+The TURN service uses:
+
+- `turn-rs` through the `turn-server` binary;
+- `deploy/turn/turn-server.toml` as runtime config;
+- `scripts/start-turn.sh` as the service entrypoint;
+- `scripts/install-turn-systemd.sh` to install the systemd unit.
+
+## 1. Install minimal dependencies
 
 Debian example:
 
 ```bash
 sudo apt update
 sudo apt install certbot cargo
-cargo install turn-server
 ```
 
-Make sure the `turn-server` binary is available in the service user's `PATH`, or set `TURN_BIN=/absolute/path/to/turn-server` in the systemd environment if needed.
+You do not need to build `qxp` for a TURN-only VPS.
 
 ## 2. Generate qxp + turn-rs config
+
+Run this from the checked-out repo:
 
 ```bash
 ./scripts/bootstrap-turn-prod.sh \
@@ -34,6 +43,8 @@ This generates:
 - `files/config.custom.toml`
 - `deploy/turn/turn-server.toml`
 - `deploy/turn/credentials.env`
+
+`files/config.custom.toml` is for the qxp app runtime config. On a TURN-only VPS, the TURN service itself only needs the files under `deploy/turn/`.
 
 ## 3. Obtain TLS certificates with certbot
 
@@ -58,49 +69,61 @@ For renewal:
 sudo certbot renew --deploy-hook "/absolute/path/to/lqxp/scripts/certbot-turn-deploy-hook.sh --turn-domain turn.qxp.example.com --owner-user anaissar --owner-group anaissar"
 ```
 
-## 4. Build qxp
+## 4. Install only turn-server
+
+The systemd installer can install the `turn-server` binary with Cargo for the service user:
 
 ```bash
-cargo build --release
+sudo ./scripts/install-turn-systemd.sh \
+  --user anaissar \
+  --group anaissar \
+  --install-turn \
+  --enable
 ```
 
-## 5. Install TURN as a systemd service
+This installs only the upstream `turn-server` crate. It does not build `qxp`.
 
-Install or refresh the unit in one command:
+If `turn-server` is already installed, provide the binary explicitly:
 
 ```bash
-sudo ./scripts/install-turn-systemd.sh --enable
+sudo ./scripts/install-turn-systemd.sh \
+  --user anaissar \
+  --group anaissar \
+  --turn-bin /home/anaissar/.cargo/bin/turn-server \
+  --enable
 ```
 
-If you need a different Unix user/group:
+Or let the installer auto-detect it from:
 
-```bash
-sudo ./scripts/install-turn-systemd.sh --user anaissar --group anaissar --enable
-```
+- the current `PATH`;
+- `/home/<service-user>/.cargo/bin/turn-server`;
+- `/usr/local/bin/turn-server`;
+- `/usr/bin/turn-server`.
 
-Inspect it:
+## 5. Inspect the service
 
 ```bash
 sudo systemctl status qxp-turn --no-pager
 sudo journalctl -u qxp-turn -n 100 --no-pager
 ```
 
-## 6. Start qxp app
+The installed unit injects the resolved binary path through `TURN_BIN`, so it does not depend on systemd's minimal `PATH`.
 
-For the app itself, use whatever you prefer:
+## 6. Configure the qxp app to use this TURN relay
 
-- PM2
-- systemd
-- container supervisor
+On the machine that runs the qxp app, reuse the generated TURN values from:
 
-Only TURN is strongly recommended on `systemd`.
+- `files/config.custom.toml`
+- `deploy/turn/credentials.env`
+
+The app must serve these TURN runtime values so clients connect through the relay.
 
 ## 7. Operational notes
 
-- `qxp` injects TURN runtime config into the served web page
-- `turn-rs` is started through `scripts/start-turn.sh`
-- `turn-rs` uses `deploy/turn/turn-server.toml`
-- the certbot deploy hook resets owner and mode so the service user can read the certs after renewal
+- TURN should be managed by `systemd`, not PM2.
+- `turn-rs` is started through `scripts/start-turn.sh`.
+- `turn-rs` uses `deploy/turn/turn-server.toml`.
+- The certbot deploy hook resets owner and mode so the service user can read the certs after renewal.
 
 Secrets/config live in:
 
@@ -122,7 +145,7 @@ Open at minimum:
 - TCP 5349
 - UDP relay range from your TURN config, default `49152-65535`
 
-## 9. Local restart routines
+## 9. Restart routines
 
 ```bash
 sudo systemctl restart qxp-turn
@@ -132,7 +155,7 @@ sudo journalctl -u qxp-turn -n 100 --no-pager
 If the service file changed in the repo, rerun:
 
 ```bash
-sudo ./scripts/install-turn-systemd.sh --enable
+sudo ./scripts/install-turn-systemd.sh --user anaissar --group anaissar --enable
 ```
 
 ## 10. Remove legacy coturn from Debian
@@ -147,6 +170,6 @@ Add `--purge-data` to also remove common coturn data/config directories.
 
 ## 11. Security model
 
-- calls are relay-only when configured through this package
-- participant public IP addresses are not exposed directly to one another through WebRTC mesh
-- TURN credentials generated by the bootstrap script should be treated as secrets
+- Calls are relay-only when configured through this package.
+- Participant public IP addresses are not exposed directly to one another through WebRTC mesh.
+- TURN credentials generated by the bootstrap script should be treated as secrets.

@@ -6,6 +6,8 @@ SERVICE_NAME="qxp-turn"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 SERVICE_USER="${SUDO_USER:-${USER}}"
 SERVICE_GROUP="$SERVICE_USER"
+TURN_BIN=""
+INSTALL_TURN_SERVER=false
 ENABLE_NOW=false
 
 usage() {
@@ -16,6 +18,8 @@ Usage:
 Options:
   --user <name>      Unix user that should run turn-rs
   --group <name>     Unix group that should run turn-rs
+  --turn-bin <path>  Path to turn-server binary
+  --install-turn     Install turn-server with cargo for the service user
   --enable           Run systemctl enable --now after installing the unit
   --help             Show this help
 EOF
@@ -25,6 +29,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --user) SERVICE_USER="${2:?}"; shift 2 ;;
     --group) SERVICE_GROUP="${2:?}"; shift 2 ;;
+    --turn-bin) TURN_BIN="${2:?}"; shift 2 ;;
+    --install-turn) INSTALL_TURN_SERVER=true; shift ;;
     --enable) ENABLE_NOW=true; shift ;;
     --help|-h) usage; exit 0 ;;
     *)
@@ -37,6 +43,35 @@ done
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run this script with sudo/root so it can install the systemd unit." >&2
+  exit 1
+fi
+
+if [[ "$INSTALL_TURN_SERVER" == true ]]; then
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "cargo not found. Install Rust first, then rerun this script." >&2
+    exit 1
+  fi
+
+  sudo -u "$SERVICE_USER" env HOME="/home/$SERVICE_USER" cargo install turn-server
+fi
+
+if [[ -z "$TURN_BIN" ]]; then
+  for candidate in \
+    "$(command -v turn-server || true)" \
+    "/home/$SERVICE_USER/.cargo/bin/turn-server" \
+    "/usr/local/bin/turn-server" \
+    "/usr/bin/turn-server"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      TURN_BIN="$candidate"
+      break
+    fi
+  done
+fi
+
+if [[ -z "$TURN_BIN" ]]; then
+  echo "turn-server binary not found." >&2
+  echo "Install it with: cargo install turn-server" >&2
+  echo "Or pass its path with: --turn-bin /path/to/turn-server" >&2
   exit 1
 fi
 
@@ -53,6 +88,7 @@ Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_GROUP
 WorkingDirectory=$ROOT_DIR
+Environment="TURN_BIN=$TURN_BIN"
 ExecStart=$ROOT_DIR/scripts/start-turn.sh
 Restart=on-failure
 RestartSec=3
@@ -82,6 +118,7 @@ Service user:  $SERVICE_USER
 Service group: $SERVICE_GROUP
 Repo root:     $ROOT_DIR
 TURN engine:   turn-rs / turn-server
+TURN binary:   $TURN_BIN
 
 Useful commands:
   sudo systemctl status $SERVICE_NAME --no-pager
