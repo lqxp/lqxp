@@ -647,6 +647,24 @@ impl AccountDatabase {
         Ok(None)
     }
 
+    pub async fn profile_uses_file_id(&self, file_id: &str) -> AccountResult<bool> {
+        let pattern = format!("%\"id\":\"{}\"%", file_id.replace('%', "\\%").replace('_', "\\_"));
+        let found = match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query("SELECT 1 FROM users WHERE profile_json LIKE ? LIMIT 1")
+                .bind(&pattern)
+                .fetch_optional(pool)
+                .await
+                .map(|row| row.is_some()),
+            SqlBackend::Postgres(pool) => sqlx::query("SELECT 1 FROM users WHERE profile_json LIKE $1 LIMIT 1")
+                .bind(&pattern)
+                .fetch_optional(pool)
+                .await
+                .map(|row| row.is_some()),
+        }
+        .map_err(|err| format!("Database query failed: {err}"))?;
+        Ok(found)
+    }
+
     pub async fn update_profile(&self, user_id: &str, profile: &UserProfile) -> AccountResult<()> {
         let profile_json = serde_json::to_string(profile)
             .map_err(|err| format!("Could not encode profile: {err}"))?;

@@ -99,6 +99,16 @@ impl RoomDatabase {
         self.room_record(room_id).await.and_then(|room| room.icon)
     }
 
+    pub async fn room_icon_uses_file_id(&self, file_id: &str) -> AppResult<bool> {
+        let pattern = format!("%\"id\":\"{}\"%", file_id.replace('%', "\\%").replace('_', "\\_"));
+        let found = sqlx::query("SELECT 1 FROM rooms WHERE icon_json LIKE ? LIMIT 1")
+            .bind(pattern)
+            .fetch_optional(&self.pool)
+            .await?
+            .is_some();
+        Ok(found)
+    }
+
     pub async fn set_room_icon(&self, room_id: &str, icon: &RoomIcon) -> AppResult<()> {
         let mut room = self.room_record(room_id).await.unwrap_or(RoomRecord {
             room_id: room_id.to_owned(),

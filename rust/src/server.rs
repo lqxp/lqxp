@@ -971,7 +971,47 @@ async fn upload_asset(
     let Some(full_path) = safe_child_path(&state.config.network.upload_dir, &path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if !upload_is_live(&state, &path).await {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     serve_file(&full_path).await
+}
+
+async fn upload_is_live(state: &SharedState, raw_path: &str) -> bool {
+    let Some(file_id) = Path::new(raw_path.trim_start_matches('/'))
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+    else {
+        return false;
+    };
+
+    {
+        let rooms = state.room_messages.read().await;
+        if rooms.values().any(|messages| {
+            messages
+                .iter()
+                .filter(|message| !message.deleted)
+                .any(|message| message.attachment.as_ref().is_some_and(|attachment| attachment.id == file_id))
+        }) {
+            return true;
+        }
+    }
+
+    if state
+        .accounts
+        .profile_uses_file_id(&file_id)
+        .await
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    state
+        .database
+        .room_icon_uses_file_id(&file_id)
+        .await
+        .unwrap_or(false)
 }
 
 fn safe_child_path(base: &str, raw_path: &str) -> Option<PathBuf> {
