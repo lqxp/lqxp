@@ -168,9 +168,9 @@ struct BadgesRequest {
     badges: Vec<String>,
 }
 
-const MAX_PROFILE_AVATAR_BYTES: usize = 2 * 1024 * 1024;
-const MAX_PROFILE_BANNER_BYTES: usize = 5 * 1024 * 1024;
-const MAX_ROOM_ICON_UPLOAD_BYTES: usize = 5 * 1024 * 1024;
+const MAX_PROFILE_AVATAR_BYTES: usize = 10 * 1024 * 1024;
+const MAX_PROFILE_BANNER_BYTES: usize = 15 * 1024 * 1024;
+const MAX_ROOM_ICON_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
 
 async fn auth_register(
     State(state): State<SharedState>,
