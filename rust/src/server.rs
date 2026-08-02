@@ -763,7 +763,12 @@ async fn admin_user_banned(
         return api_error(StatusCode::BAD_REQUEST, "You cannot ban your own account.");
     }
     match state.accounts.set_user_banned(&user_id, body.banned).await {
-        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Ok(()) => {
+            if body.banned {
+                state.evict_banned_user(&user_id).await;
+            }
+            Json(json!({ "ok": true })).into_response()
+        }
         Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
     }
 }
