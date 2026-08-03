@@ -29,6 +29,28 @@ pub struct AppState {
 
 pub type SharedState = Arc<AppState>;
 
+impl AppState {
+    pub async fn evict_banned_user(&self, user_id: &str) {
+        let recipients = {
+            let players = self.players.read().await;
+            players
+                .values()
+                .filter(|player| player.user_id == user_id)
+                .map(|player| player.tx.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let payload = serde_json::json!({
+            "op": 999,
+            "d": { "reason": "account_banned" }
+        })
+        .to_string();
+        for tx in recipients {
+            let _ = tx.send(Message::Text(payload.clone().into()));
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RateLimitBucket {
     pub window_start_ms: u64,
