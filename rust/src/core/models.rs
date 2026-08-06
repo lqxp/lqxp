@@ -1,4 +1,12 @@
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PlayerStatus {
@@ -30,6 +38,22 @@ pub enum UserPresenceStatus {
 impl Default for UserPresenceStatus {
     fn default() -> Self {
         Self::Online
+    }
+}
+
+pub fn status_to_str(status: UserPresenceStatus) -> &'static str {
+    match status {
+        UserPresenceStatus::Online => "online",
+        UserPresenceStatus::Invisible => "invisible",
+        UserPresenceStatus::Dnd => "dnd",
+    }
+}
+
+pub fn status_from_str(s: &str) -> UserPresenceStatus {
+    match s.trim().to_lowercase().as_str() {
+        "invisible" => UserPresenceStatus::Invisible,
+        "dnd" => UserPresenceStatus::Dnd,
+        _ => UserPresenceStatus::Online,
     }
 }
 

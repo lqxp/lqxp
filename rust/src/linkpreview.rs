@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use tracing::debug;
 use url::Url;
 
-use crate::models::LinkPreview;
+use crate::core::models::LinkPreview;
 
 const MAX_HTML_BYTES: usize = 256 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(4);

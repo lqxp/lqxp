@@ -9,8 +9,11 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{info, warn};
 
 use crate::{
-    models::{UserPresenceStatus, UserProfile},
-    state::{PlayerSession, SharedState},
+    core::{
+        models::{UserPresenceStatus, UserProfile},
+        presence::{PlayerSession, SharedState},
+        security::rate_limit_hit,
+    },
     utils::{random_session_id, send_json},
 };
 
@@ -38,7 +41,7 @@ pub async fn handle_socket(state: SharedState, socket: WebSocket) {
     while let Some(result) = ws_receiver.next().await {
         match result {
             Ok(Message::Text(text)) => {
-                if crate::utils::rate_limit_hit(state.as_ref(), format!("ws-msg:session:{session_id}"), 120, 60_000).await {
+                if rate_limit_hit(&state, format!("ws-msg:session:{session_id}"), 120, 60_000).await {
                     send_json(&tx, json!({ "op": 0, "d": { "error": "Rate limited." } }));
                     break;
                 }
@@ -55,7 +58,7 @@ pub async fn handle_socket(state: SharedState, socket: WebSocket) {
                 }
             }
             Ok(Message::Binary(payload)) => {
-                if crate::utils::rate_limit_hit(state.as_ref(), format!("ws-msg:session:{session_id}"), 120, 60_000).await {
+                if rate_limit_hit(&state, format!("ws-msg:session:{session_id}"), 120, 60_000).await {
                     send_json(&tx, json!({ "op": 0, "d": { "error": "Rate limited." } }));
                     break;
                 }
@@ -150,7 +153,7 @@ pub async fn disconnect_player(state: &SharedState, session_id: &str) {
         }
         if player.status != UserPresenceStatus::Invisible {
             let room_record = state.database.room_record(game_id).await.unwrap_or(
-                crate::models::RoomRecord {
+                crate::core::models::RoomRecord {
                     room_id: game_id.clone(),
                     title: game_id.clone(),
                     icon: None,

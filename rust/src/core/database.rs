@@ -1,18 +1,6 @@
-use std::{path::Path, str::FromStr, sync::Arc};
+use std::{path::Path, str::FromStr};
 
-use argon2::{
-    password_hash::{
-        rand_core::OsRng as PasswordOsRng, PasswordHash, PasswordHasher, PasswordVerifier,
-        SaltString,
-    },
-    Argon2,
-};
-use base64::Engine as _;
-use bip39::Language;
-use rand::{rngs::OsRng, thread_rng, Rng, RngCore};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use sha2::{Digest, Sha256};
 use sqlx::{
     postgres::{PgPool, PgPoolOptions},
     sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions},
@@ -20,29 +8,23 @@ use sqlx::{
 };
 use tokio::fs;
 
-use crate::{
+use crate::core::{
     config::DatabaseConfig,
-    models::{UserPresenceStatus, UserProfile},
-    utils::now_ms,
+    models::{now_ms, status_from_str, status_to_str, RoomIcon, RoomRecord, UserPresenceStatus, UserProfile},
+    result::{ApiError, ApiResult},
+    security::{
+        generate_recovery_words, generate_session_token, generate_snowflake_id, hash_secret,
+        normalize_recovery_phrase, normalize_username, token_hash, validate_password,
+        validate_username, verify_secret,
+    },
 };
 
-pub type AccountResult<T> = Result<T, String>;
-
 const SESSION_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
-const USERNAME_MIN: usize = 2;
-const USERNAME_MAX: usize = 32;
-const RESERVED_USERNAMES: &[&str] = &["system"];
-const PASSWORD_MIN: usize = 8;
-const PASSWORD_MAX: usize = 128;
-const RECOVERY_WORD_COUNT: usize = 16;
-const EARLY_USER_LIMIT: i64 = 200;
 const MAX_USER_BADGES: usize = 16;
 const MAX_USER_BADGE_LEN: usize = 32;
-const USER_SELECT_BY_CREATED_DESC: &str = "SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users ORDER BY created_at DESC";
-const USER_SELECT_BY_USERNAME_SQLITE: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) WHERE username = ?";
-const USER_SELECT_BY_USERNAME_POSTGRES: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) ranked_users WHERE username = $1";
-const USER_SELECT_BY_ID_SQLITE: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) WHERE id = ?";
-const USER_SELECT_BY_ID_POSTGRES: &str = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) ranked_users WHERE id = $1";
+
+const USER_SELECT_BY_CREATED_DESC: &str =
+    "SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users ORDER BY created_at DESC";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -136,7 +118,7 @@ impl AccountDatabase {
         config: &DatabaseConfig,
         admin_ids: Vec<String>,
         register_enabled: bool,
-    ) -> AccountResult<Self> {
+    ) -> ApiResult<Self> {
         let kind = config.kind.trim().to_ascii_lowercase();
         let backend = if kind == "postgres" || kind == "postgresql" {
             SqlBackend::Postgres(
@@ -144,19 +126,19 @@ impl AccountDatabase {
                     .max_connections(5)
                     .connect(&config.url)
                     .await
-                    .map_err(|err| format!("PostgreSQL connection failed: {err}"))?,
+                    .map_err(|err| ApiError::internal("PostgreSQL connection", err))?,
             )
         } else {
             prepare_sqlite_path(&config.url).await?;
             let options = SqliteConnectOptions::from_str(&config.url)
-                .map_err(|err| format!("SQLite URL invalid: {err}"))?
+                .map_err(|err| ApiError::internal("SQLite URL invalid", err))?
                 .create_if_missing(true);
             SqlBackend::Sqlite(
                 SqlitePoolOptions::new()
                     .max_connections(5)
                     .connect_with(options)
                     .await
-                    .map_err(|err| format!("SQLite connection failed: {err}"))?,
+                    .map_err(|err| ApiError::internal("SQLite connection", err))?,
             )
         };
 
@@ -166,7 +148,7 @@ impl AccountDatabase {
         Ok(db)
     }
 
-    async fn migrate(&self) -> AccountResult<()> {
+    async fn migrate(&self) -> ApiResult<()> {
         self.execute(
             r#"
             CREATE TABLE IF NOT EXISTS users (
@@ -217,12 +199,12 @@ impl AccountDatabase {
         Ok(())
     }
 
-    async fn execute(&self, sql: &str) -> AccountResult<()> {
+    async fn execute(&self, sql: &str) -> ApiResult<()> {
         match &self.backend {
             SqlBackend::Sqlite(pool) => sqlx::query(sql).execute(pool).await.map(|_| ()),
             SqlBackend::Postgres(pool) => sqlx::query(sql).execute(pool).await.map(|_| ()),
         }
-        .map_err(|err| format!("Database query failed: {err}"))
+        .map_err(|err| ApiError::internal("Database execution", err))
     }
 
     async fn ensure_column(
@@ -230,13 +212,13 @@ impl AccountDatabase {
         table: &str,
         column: &str,
         definition: &str,
-    ) -> AccountResult<()> {
+    ) -> ApiResult<()> {
         let exists = match &self.backend {
             SqlBackend::Sqlite(pool) => {
                 let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
                     .fetch_all(pool)
                     .await
-                    .map_err(|err| format!("Database schema query failed: {err}"))?;
+                    .map_err(|err| ApiError::internal("Database schema query", err))?;
                 rows.iter().any(|row| {
                     row.try_get::<String, _>("name")
                         .map(|name| name == column)
@@ -251,7 +233,7 @@ impl AccountDatabase {
                 .bind(column)
                 .fetch_optional(pool)
                 .await
-                .map_err(|err| format!("Database schema query failed: {err}"))?;
+                .map_err(|err| ApiError::internal("Database schema query", err))?;
                 row.is_some()
             }
         };
@@ -262,14 +244,13 @@ impl AccountDatabase {
             .await
     }
 
-    async fn ensure_feature_defaults(&self, register_enabled: bool) -> AccountResult<()> {
-        self.set_feature_default("register_enabled", register_enabled)
-            .await?;
+    async fn ensure_feature_defaults(&self, register_enabled: bool) -> ApiResult<()> {
+        self.set_feature_default("register_enabled", register_enabled).await?;
         self.set_feature_default("calls_enabled", true).await?;
         Ok(())
     }
 
-    async fn set_feature_default(&self, key: &str, enabled: bool) -> AccountResult<()> {
+    async fn set_feature_default(&self, key: &str, enabled: bool) -> ApiResult<()> {
         let exists = self.feature_value(key).await?.is_some();
         if exists {
             return Ok(());
@@ -277,7 +258,7 @@ impl AccountDatabase {
         self.set_feature(key, enabled).await
     }
 
-    pub async fn feature_flags(&self) -> AccountResult<FeatureFlags> {
+    pub async fn feature_flags(&self) -> ApiResult<FeatureFlags> {
         Ok(FeatureFlags {
             register_enabled: self
                 .feature_value("register_enabled")
@@ -287,14 +268,14 @@ impl AccountDatabase {
         })
     }
 
-    async fn feature_value(&self, key: &str) -> AccountResult<Option<bool>> {
+    async fn feature_value(&self, key: &str) -> ApiResult<Option<bool>> {
         match &self.backend {
             SqlBackend::Sqlite(pool) => {
                 let row = sqlx::query("SELECT enabled FROM feature_flags WHERE key = ?")
                     .bind(key)
                     .fetch_optional(pool)
                     .await
-                    .map_err(|err| format!("Database query failed: {err}"))?;
+                    .map_err(|err| ApiError::internal("Database feature query", err))?;
                 Ok(row.map(|row| row.get::<i64, _>("enabled") != 0))
             }
             SqlBackend::Postgres(pool) => {
@@ -302,13 +283,13 @@ impl AccountDatabase {
                     .bind(key)
                     .fetch_optional(pool)
                     .await
-                    .map_err(|err| format!("Database query failed: {err}"))?;
+                    .map_err(|err| ApiError::internal("Database feature query", err))?;
                 Ok(row.map(|row| row.get::<i64, _>("enabled") != 0))
             }
         }
     }
 
-    pub async fn set_feature(&self, key: &str, enabled: bool) -> AccountResult<()> {
+    pub async fn set_feature(&self, key: &str, enabled: bool) -> ApiResult<()> {
         let value = if enabled { 1i64 } else { 0i64 };
         match &self.backend {
             SqlBackend::Sqlite(pool) => sqlx::query(
@@ -330,18 +311,18 @@ impl AccountDatabase {
             .await
             .map(|_| ()),
         }
-        .map_err(|err| format!("Database query failed: {err}"))
+        .map_err(|err| ApiError::internal("Database set feature", err))
     }
 
     pub async fn register(
         &self,
         username: &str,
         password: &str,
-    ) -> AccountResult<(PublicUser, String, Vec<String>)> {
+    ) -> ApiResult<(PublicUser, String, Vec<String>)> {
         let username = validate_username(username)?;
         validate_password(password)?;
         if self.user_by_username(&username).await?.is_some() {
-            return Err("Username is already taken.".to_owned());
+            return Err(ApiError::bad_request("Username is already taken."));
         }
 
         let id = generate_snowflake_id();
@@ -351,7 +332,7 @@ impl AccountDatabase {
         let recovery_hash = hash_secret(&recovery_phrase)?;
         let now = now_ms();
         let profile_json = serde_json::to_string(&UserProfile::default())
-            .map_err(|err| format!("Could not encode profile: {err}"))?;
+            .map_err(|err| ApiError::internal("Profile encoding", err))?;
 
         let result = match &self.backend {
             SqlBackend::Sqlite(pool) => {
@@ -390,13 +371,13 @@ impl AccountDatabase {
             }
         };
         if result.is_err() {
-            return Err("Username is already taken.".to_owned());
+            return Err(ApiError::bad_request("Username is already taken."));
         }
 
         let user = self
             .user_by_id(&id)
             .await?
-            .ok_or("Account was not created.")?;
+            .ok_or_else(|| ApiError::bad_request("Account was not created."))?;
         let token = self.create_session(&id).await?;
         Ok((self.public_user(user), token, recovery_words))
     }
@@ -405,20 +386,19 @@ impl AccountDatabase {
         &self,
         username: &str,
         password: &str,
-    ) -> AccountResult<(PublicUser, String)> {
+    ) -> ApiResult<(PublicUser, String)> {
         let username = normalize_username(username);
         let user = self
             .user_by_username(&username)
             .await?
-            .ok_or_else(|| "Invalid username or password.".to_owned())?;
+            .ok_or_else(|| ApiError::unauthorized("Invalid username or password."))?;
         if user.banned {
-            return Err("Account is banned.".to_owned());
+            return Err(ApiError::forbidden("Account is banned."));
         }
         if user.disabled {
-            return Err("Account is disabled.".to_owned());
+            return Err(ApiError::forbidden("Account is disabled."));
         }
-        verify_secret(password, &user.password_hash)
-            .map_err(|_| "Invalid username or password.".to_owned())?;
+        verify_secret(password, &user.password_hash)?;
         let token = self.create_session(&user.id).await?;
         Ok((self.public_user(user), token))
     }
@@ -428,21 +408,20 @@ impl AccountDatabase {
         username: &str,
         recovery_words: &str,
         new_password: &str,
-    ) -> AccountResult<(PublicUser, String)> {
+    ) -> ApiResult<(PublicUser, String)> {
         validate_password(new_password)?;
         let username = normalize_username(username);
         let user = self
             .user_by_username(&username)
             .await?
-            .ok_or_else(|| "Invalid recovery credentials.".to_owned())?;
+            .ok_or_else(|| ApiError::bad_request("Invalid recovery credentials."))?;
         if user.banned {
-            return Err("Account is banned.".to_owned());
+            return Err(ApiError::forbidden("Account is banned."));
         }
         verify_secret(
             &normalize_recovery_phrase(recovery_words),
             &user.recovery_hash,
-        )
-        .map_err(|_| "Invalid recovery credentials.".to_owned())?;
+        )?;
         let password_hash = hash_secret(new_password)?;
         let now = now_ms();
         self.update_password_hash(&user.id, &password_hash, now)
@@ -451,14 +430,45 @@ impl AccountDatabase {
         let updated = self
             .user_by_id(&user.id)
             .await?
-            .ok_or("Account not found.")?;
+            .ok_or_else(|| ApiError::bad_request("Account not found."))?;
         Ok((self.public_user(updated), token))
+    }
+
+    pub async fn create_session(&self, user_id: &str) -> ApiResult<String> {
+        let token = generate_session_token();
+        let hash = token_hash(&token);
+        let now = now_ms() as i64;
+        let expires_at = (now_ms() + SESSION_TTL_MS) as i64;
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)")
+                    .bind(hash)
+                    .bind(user_id)
+                    .bind(now)
+                    .bind(expires_at)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)")
+                    .bind(hash)
+                    .bind(user_id)
+                    .bind(now)
+                    .bind(expires_at)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+        }
+        .map_err(|err| ApiError::internal("Session creation", err))?;
+        Ok(token)
     }
 
     pub async fn authenticate_token(
         &self,
         token: &str,
-    ) -> AccountResult<Option<AuthenticatedUser>> {
+    ) -> ApiResult<Option<AuthenticatedUser>> {
         let hash = token_hash(token);
         let now = now_ms() as i64;
         let user_id = match &self.backend {
@@ -470,7 +480,7 @@ impl AccountDatabase {
                 .bind(now)
                 .fetch_optional(pool)
                 .await
-                .map_err(|err| format!("Database query failed: {err}"))?;
+                .map_err(|err| ApiError::internal("Session authentication", err))?;
                 row.map(|row| row.get::<String, _>("user_id"))
             }
             SqlBackend::Postgres(pool) => {
@@ -481,7 +491,7 @@ impl AccountDatabase {
                 .bind(now)
                 .fetch_optional(pool)
                 .await
-                .map_err(|err| format!("Database query failed: {err}"))?;
+                .map_err(|err| ApiError::internal("Session authentication", err))?;
                 row.map(|row| row.get::<String, _>("user_id"))
             }
         };
@@ -507,7 +517,7 @@ impl AccountDatabase {
         }))
     }
 
-    pub async fn touch_session(&self, token: &str) -> AccountResult<()> {
+    pub async fn touch_session(&self, token: &str) -> ApiResult<()> {
         let hash = token_hash(token);
         let expires_at = (now_ms() + SESSION_TTL_MS) as i64;
         match &self.backend {
@@ -524,10 +534,10 @@ impl AccountDatabase {
                 .await
                 .map(|_| ()),
         }
-        .map_err(|err| format!("Database query failed: {err}"))
+        .map_err(|err| ApiError::internal("Session update", err))
     }
 
-    pub async fn logout(&self, token: &str) -> AccountResult<()> {
+    pub async fn logout(&self, token: &str) -> ApiResult<()> {
         let hash = token_hash(token);
         match &self.backend {
             SqlBackend::Sqlite(pool) => sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
@@ -541,25 +551,24 @@ impl AccountDatabase {
                 .await
                 .map(|_| ()),
         }
-        .map_err(|err| format!("Database query failed: {err}"))
+        .map_err(|err| ApiError::internal("Session deletion", err))
     }
 
-    pub async fn delete_account(&self, token: &str, password: &str) -> AccountResult<()> {
+    pub async fn delete_account(&self, token: &str, password: &str) -> ApiResult<()> {
         let Some(user) = self.authenticate_token(token).await? else {
-            return Err("Not authenticated.".to_owned());
+            return Err(ApiError::unauthorized("Not authenticated."));
         };
         let stored = self
             .user_by_id(&user.id)
             .await?
-            .ok_or("Account not found.")?;
-        verify_secret(password, &stored.password_hash)
-            .map_err(|_| "Invalid password.".to_owned())?;
+            .ok_or_else(|| ApiError::bad_request("Account not found."))?;
+        verify_secret(password, &stored.password_hash)?;
         self.delete_user_account(&user.id).await
     }
 
-    pub async fn delete_user_account(&self, user_id: &str) -> AccountResult<()> {
+    pub async fn delete_user_account(&self, user_id: &str) -> ApiResult<()> {
         if self.user_by_id(user_id).await?.is_none() {
-            return Err("Account not found.".to_owned());
+            return Err(ApiError::bad_request("Account not found."));
         }
         match &self.backend {
             SqlBackend::Sqlite(pool) => {
@@ -568,13 +577,13 @@ impl AccountDatabase {
                     .execute(pool)
                     .await
                     .map(|_| ())
-                    .map_err(|err| format!("Database query failed: {err}"))?;
+                    .map_err(|err| ApiError::internal("Delete user sessions", err))?;
                 sqlx::query("DELETE FROM users WHERE id = ?")
                     .bind(user_id)
                     .execute(pool)
                     .await
                     .map(|_| ())
-                    .map_err(|err| format!("Database query failed: {err}"))
+                    .map_err(|err| ApiError::internal("Delete user record", err))
             }
             SqlBackend::Postgres(pool) => {
                 sqlx::query("DELETE FROM sessions WHERE user_id = $1")
@@ -582,18 +591,18 @@ impl AccountDatabase {
                     .execute(pool)
                     .await
                     .map(|_| ())
-                    .map_err(|err| format!("Database query failed: {err}"))?;
+                    .map_err(|err| ApiError::internal("Delete user sessions", err))?;
                 sqlx::query("DELETE FROM users WHERE id = $1")
                     .bind(user_id)
                     .execute(pool)
                     .await
                     .map(|_| ())
-                    .map_err(|err| format!("Database query failed: {err}"))
+                    .map_err(|err| ApiError::internal("Delete user record", err))
             }
         }
     }
 
-    pub async fn me(&self, token: &str) -> AccountResult<Option<(PublicUser, String)>> {
+    pub async fn me(&self, token: &str) -> ApiResult<Option<(PublicUser, String)>> {
         let Some(user) = self.authenticate_token(token).await? else {
             return Ok(None);
         };
@@ -617,7 +626,7 @@ impl AccountDatabase {
     pub async fn profiles_by_usernames(
         &self,
         usernames: &[String],
-    ) -> AccountResult<Vec<(String, UserProfile)>> {
+    ) -> ApiResult<Vec<(String, UserProfile)>> {
         let mut profiles = Vec::new();
         for username in usernames {
             if let Some(user) = self.user_by_username(username).await? {
@@ -631,7 +640,7 @@ impl AccountDatabase {
         &self,
         user_id: Option<&str>,
         username: Option<&str>,
-    ) -> AccountResult<Option<PublicUser>> {
+    ) -> ApiResult<Option<PublicUser>> {
         if let Some(user_id) = user_id.map(str::trim).filter(|value| !value.is_empty()) {
             if let Some(user) = self.user_by_id(user_id).await? {
                 return Ok(Some(self.public_user(user)));
@@ -647,7 +656,7 @@ impl AccountDatabase {
         Ok(None)
     }
 
-    pub async fn profile_uses_file_id(&self, file_id: &str) -> AccountResult<bool> {
+    pub async fn profile_uses_file_id(&self, file_id: &str) -> ApiResult<bool> {
         let pattern = format!("%\"id\":\"{}\"%", file_id.replace('%', "\\%").replace('_', "\\_"));
         let found = match &self.backend {
             SqlBackend::Sqlite(pool) => sqlx::query("SELECT 1 FROM users WHERE profile_json LIKE ? LIMIT 1")
@@ -661,13 +670,13 @@ impl AccountDatabase {
                 .await
                 .map(|row| row.is_some()),
         }
-        .map_err(|err| format!("Database query failed: {err}"))?;
+        .map_err(|err| ApiError::internal("Profile file search", err))?;
         Ok(found)
     }
 
-    pub async fn update_profile(&self, user_id: &str, profile: &UserProfile) -> AccountResult<()> {
+    pub async fn update_profile(&self, user_id: &str, profile: &UserProfile) -> ApiResult<()> {
         let profile_json = serde_json::to_string(profile)
-            .map_err(|err| format!("Could not encode profile: {err}"))?;
+            .map_err(|err| ApiError::internal("Profile encoding", err))?;
         let now = now_ms() as i64;
         match &self.backend {
             SqlBackend::Sqlite(pool) => {
@@ -689,14 +698,14 @@ impl AccountDatabase {
                     .map(|_| ())
             }
         }
-        .map_err(|err| format!("Database query failed: {err}"))
+        .map_err(|err| ApiError::internal("Profile update", err))
     }
 
     pub async fn update_status(
         &self,
         user_id: &str,
         status: UserPresenceStatus,
-    ) -> AccountResult<()> {
+    ) -> ApiResult<()> {
         let status_text = status_to_str(status);
         let now = now_ms() as i64;
         match &self.backend {
@@ -719,24 +728,24 @@ impl AccountDatabase {
                     .map(|_| ())
             }
         }
-        .map_err(|err| format!("Database query failed: {err}"))
+        .map_err(|err| ApiError::internal("Status update", err))
     }
 
     pub async fn change_username(
         &self,
         user_id: &str,
         username: &str,
-    ) -> AccountResult<PublicUser> {
+    ) -> ApiResult<PublicUser> {
         let username = validate_username(username)?;
         if let Some(existing) = self.user_by_username(&username).await? {
             if existing.id != user_id {
-                return Err("Username is already taken.".to_owned());
+                return Err(ApiError::bad_request("Username is already taken."));
             }
         }
         let mut user = self
             .user_by_id(user_id)
             .await?
-            .ok_or("Account not found.")?;
+            .ok_or_else(|| ApiError::bad_request("Account not found."))?;
         if user.username == username {
             return Ok(self.public_user(user));
         }
@@ -744,11 +753,13 @@ impl AccountDatabase {
         let window_start = now.saturating_sub(7 * 24 * 60 * 60 * 1000);
         user.username_changes.retain(|stamp| *stamp >= window_start);
         if !user.username_changes.is_empty() {
-            return Err("Username can only be changed once per week.".to_owned());
+            return Err(ApiError::too_many_requests(
+                "Username can only be changed once per week.",
+            ));
         }
         user.username_changes.push(now);
         let changes_json = serde_json::to_string(&user.username_changes)
-            .map_err(|err| format!("Could not encode username changes: {err}"))?;
+            .map_err(|err| ApiError::internal("Username changes encoding", err))?;
         match &self.backend {
             SqlBackend::Sqlite(pool) => sqlx::query("UPDATE users SET username = ?, username_changes_json = ?, updated_at = ? WHERE id = ?")
                 .bind(&username)
@@ -767,15 +778,15 @@ impl AccountDatabase {
                 .await
                 .map(|_| ()),
         }
-        .map_err(|err| format!("Database query failed: {err}"))?;
+        .map_err(|err| ApiError::internal("Username update", err))?;
         let updated = self
             .user_by_id(user_id)
             .await?
-            .ok_or("Account not found.")?;
+            .ok_or_else(|| ApiError::bad_request("Account not found."))?;
         Ok(self.public_user(updated))
     }
 
-    pub async fn list_users(&self) -> AccountResult<Vec<PublicUser>> {
+    pub async fn list_users(&self) -> ApiResult<Vec<PublicUser>> {
         let rows = match &self.backend {
             SqlBackend::Sqlite(pool) => {
                 sqlx::query_as::<_, RawStoredUser>(USER_SELECT_BY_CREATED_DESC)
@@ -788,175 +799,136 @@ impl AccountDatabase {
                     .await
             }
         }
-        .map_err(|err| format!("Database query failed: {err}"))?;
+        .map_err(|err| ApiError::internal("List users query", err))?;
         rows.into_iter()
             .map(|row| self.stored_from_raw(row).map(|user| self.public_user(user)))
             .collect()
     }
 
-    pub async fn set_user_disabled(&self, user_id: &str, disabled: bool) -> AccountResult<()> {
+    pub async fn set_user_disabled(&self, user_id: &str, disabled: bool) -> ApiResult<()> {
         let value = if disabled { 1i64 } else { 0i64 };
         let now = now_ms() as i64;
         match &self.backend {
-            SqlBackend::Sqlite(pool) => {
-                sqlx::query("UPDATE users SET disabled = ?, updated_at = ? WHERE id = ?")
-                    .bind(value)
-                    .bind(now)
-                    .bind(user_id)
-                    .execute(pool)
-                    .await
-                    .map(|_| ())
-            }
-            SqlBackend::Postgres(pool) => {
-                sqlx::query("UPDATE users SET disabled = $1, updated_at = $2 WHERE id = $3")
-                    .bind(value)
-                    .bind(now)
-                    .bind(user_id)
-                    .execute(pool)
-                    .await
-                    .map(|_| ())
-            }
+            SqlBackend::Sqlite(pool) => sqlx::query("UPDATE users SET disabled = ?, updated_at = ? WHERE id = ?")
+                .bind(value)
+                .bind(now)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .map(|_| ()),
+            SqlBackend::Postgres(pool) => sqlx::query("UPDATE users SET disabled = $1, updated_at = $2 WHERE id = $3")
+                .bind(value)
+                .bind(now)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .map(|_| ()),
         }
-        .map_err(|err| format!("Database query failed: {err}"))
+        .map_err(|err| ApiError::internal("Set user disabled", err))
     }
 
-    pub async fn set_user_badges(&self, user_id: &str, badges: &[String]) -> AccountResult<PublicUser> {
-        let badges = sanitize_custom_badges(badges)?;
-        let badges_json = serde_json::to_string(&badges)
-            .map_err(|err| format!("Could not encode badges: {err}"))?;
-        let now = now_ms() as i64;
-        match &self.backend {
-            SqlBackend::Sqlite(pool) => {
-                sqlx::query("UPDATE users SET custom_badges_json = ?, updated_at = ? WHERE id = ?")
-                    .bind(badges_json)
-                    .bind(now)
-                    .bind(user_id)
-                    .execute(pool)
-                    .await
-                    .map(|_| ())
-            }
-            SqlBackend::Postgres(pool) => {
-                sqlx::query("UPDATE users SET custom_badges_json = $1, updated_at = $2 WHERE id = $3")
-                    .bind(badges_json)
-                    .bind(now)
-                    .bind(user_id)
-                    .execute(pool)
-                    .await
-                    .map(|_| ())
-            }
-        }
-        .map_err(|err| format!("Database query failed: {err}"))?;
-        let updated = self
-            .user_by_id(user_id)
-            .await?
-            .ok_or("Account not found.")?;
-        Ok(self.public_user(updated))
-    }
-
-    pub async fn set_user_banned(&self, user_id: &str, banned: bool) -> AccountResult<()> {
+    pub async fn set_user_banned(&self, user_id: &str, banned: bool) -> ApiResult<()> {
         let value = if banned { 1i64 } else { 0i64 };
         let now = now_ms() as i64;
         match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query("UPDATE users SET banned = ?, updated_at = ? WHERE id = ?")
+                .bind(value)
+                .bind(now)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .map(|_| ()),
+            SqlBackend::Postgres(pool) => sqlx::query("UPDATE users SET banned = $1, updated_at = $2 WHERE id = $3")
+                .bind(value)
+                .bind(now)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .map(|_| ()),
+        }
+        .map_err(|err| ApiError::internal("Set user banned", err))
+    }
+
+    pub async fn set_user_badges(
+        &self,
+        user_id: &str,
+        badges: &[String],
+    ) -> ApiResult<PublicUser> {
+        let sanitized = sanitize_custom_badges(badges);
+        let badges_json = serde_json::to_string(&sanitized)
+            .map_err(|err| ApiError::internal("Badges encoding", err))?;
+        let now = now_ms() as i64;
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query("UPDATE users SET custom_badges_json = ?, updated_at = ? WHERE id = ?")
+                .bind(badges_json)
+                .bind(now)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .map(|_| ()),
+            SqlBackend::Postgres(pool) => sqlx::query("UPDATE users SET custom_badges_json = $1, updated_at = $2 WHERE id = $3")
+                .bind(badges_json)
+                .bind(now)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .map(|_| ()),
+        }
+        .map_err(|err| ApiError::internal("Set user badges", err))?;
+        let updated = self
+            .user_by_id(user_id)
+            .await?
+            .ok_or_else(|| ApiError::bad_request("Account not found."))?;
+        Ok(self.public_user(updated))
+    }
+
+    async fn user_by_id(&self, user_id: &str) -> ApiResult<Option<StoredUser>> {
+        let raw = match &self.backend {
             SqlBackend::Sqlite(pool) => {
-                sqlx::query("UPDATE users SET banned = ?, updated_at = ? WHERE id = ?")
-                    .bind(value)
-                    .bind(now)
-                    .bind(user_id)
-                    .execute(pool)
-                    .await
-                    .map(|_| ())
+                sqlx::query_as::<_, RawStoredUser>(
+                    "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) WHERE id = ?",
+                )
+                .bind(user_id)
+                .fetch_optional(pool)
+                .await
             }
             SqlBackend::Postgres(pool) => {
-                sqlx::query("UPDATE users SET banned = $1, updated_at = $2 WHERE id = $3")
-                    .bind(value)
-                    .bind(now)
-                    .bind(user_id)
-                    .execute(pool)
-                    .await
-                    .map(|_| ())
-            }
-        }
-        .map_err(|err| format!("Database query failed: {err}"))?;
-
-        if banned {
-            match &self.backend {
-                SqlBackend::Sqlite(pool) => sqlx::query("DELETE FROM sessions WHERE user_id = ?")
-                    .bind(user_id)
-                    .execute(pool)
-                    .await
-                    .map(|_| ()),
-                SqlBackend::Postgres(pool) => sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-                    .bind(user_id)
-                    .execute(pool)
-                    .await
-                    .map(|_| ()),
-            }
-            .map_err(|err| format!("Database query failed: {err}"))?;
-        }
-
-        Ok(())
-    }
-
-    fn is_admin(&self, user_id: &str) -> bool {
-        self.admin_ids.iter().any(|id| id == user_id)
-    }
-
-    fn user_badges(&self, user: &StoredUser) -> Vec<String> {
-        let mut badges = Vec::new();
-        if self.is_admin(&user.id) {
-            badges.push("admin".to_owned());
-        }
-        if user.user_rank > 0 && user.user_rank <= EARLY_USER_LIMIT {
-            badges.push("early".to_owned());
-        }
-        for badge in &user.custom_badges {
-            if !badges.iter().any(|existing| existing == badge) {
-                badges.push(badge.clone());
-            }
-        }
-        badges
-    }
-
-    fn public_user(&self, user: StoredUser) -> PublicUser {
-        let badges = self.user_badges(&user);
-        PublicUser {
-            id: user.id.clone(),
-            username: user.username,
-            profile: user.profile,
-            status: user.status,
-            disabled: user.disabled,
-            banned: user.banned,
-            admin: self.is_admin(&user.id),
-            badges,
-            created_at: user.created_at,
-        }
-    }
-
-    async fn create_session(&self, user_id: &str) -> AccountResult<String> {
-        let token = random_token();
-        let hash = token_hash(&token);
-        let now = now_ms();
-        let expires = now + SESSION_TTL_MS;
-        match &self.backend {
-            SqlBackend::Sqlite(pool) => sqlx::query("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)")
-                .bind(hash)
+                sqlx::query_as::<_, RawStoredUser>(
+                    "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) ranked_users WHERE id = $1",
+                )
                 .bind(user_id)
-                .bind(now as i64)
-                .bind(expires as i64)
-                .execute(pool)
+                .fetch_optional(pool)
                 .await
-                .map(|_| ()),
-            SqlBackend::Postgres(pool) => sqlx::query("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)")
-                .bind(hash)
-                .bind(user_id)
-                .bind(now as i64)
-                .bind(expires as i64)
-                .execute(pool)
-                .await
-                .map(|_| ()),
+            }
         }
-        .map_err(|err| format!("Database query failed: {err}"))?;
-        Ok(token)
+        .map_err(|err| ApiError::internal("User lookup by ID", err))?;
+
+        raw.map(|row| self.stored_from_raw(row)).transpose()
+    }
+
+    async fn user_by_username(&self, username: &str) -> ApiResult<Option<StoredUser>> {
+        let normalized = normalize_username(username);
+        let raw = match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query_as::<_, RawStoredUser>(
+                    "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) WHERE username = ?",
+                )
+                .bind(&normalized)
+                .fetch_optional(pool)
+                .await
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query_as::<_, RawStoredUser>(
+                    "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) ranked_users WHERE username = $1",
+                )
+                .bind(&normalized)
+                .fetch_optional(pool)
+                .await
+            }
+        }
+        .map_err(|err| ApiError::internal("User lookup by username", err))?;
+
+        raw.map(|row| self.stored_from_raw(row)).transpose()
     }
 
     async fn update_password_hash(
@@ -964,7 +936,7 @@ impl AccountDatabase {
         user_id: &str,
         password_hash: &str,
         now: u64,
-    ) -> AccountResult<()> {
+    ) -> ApiResult<()> {
         match &self.backend {
             SqlBackend::Sqlite(pool) => {
                 sqlx::query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
@@ -985,235 +957,223 @@ impl AccountDatabase {
                     .map(|_| ())
             }
         }
-        .map_err(|err| format!("Database query failed: {err}"))
+        .map_err(|err| ApiError::internal("Update password hash", err))
     }
 
-    async fn user_by_username(&self, username: &str) -> AccountResult<Option<StoredUser>> {
-        let row = match &self.backend {
-            SqlBackend::Sqlite(pool) => {
-                sqlx::query_as::<_, RawStoredUser>(USER_SELECT_BY_USERNAME_SQLITE)
-                    .bind(username)
-                    .fetch_optional(pool)
-                    .await
-            }
-            SqlBackend::Postgres(pool) => {
-                sqlx::query_as::<_, RawStoredUser>(USER_SELECT_BY_USERNAME_POSTGRES)
-                    .bind(username)
-                    .fetch_optional(pool)
-                    .await
-            }
-        }
-        .map_err(|err| format!("Database query failed: {err}"))?;
-        row.map(|row| self.stored_from_raw(row)).transpose()
-    }
-
-    async fn user_by_id(&self, user_id: &str) -> AccountResult<Option<StoredUser>> {
-        let row = match &self.backend {
-            SqlBackend::Sqlite(pool) => {
-                sqlx::query_as::<_, RawStoredUser>(USER_SELECT_BY_ID_SQLITE)
-                    .bind(user_id)
-                    .fetch_optional(pool)
-                    .await
-            }
-            SqlBackend::Postgres(pool) => {
-                sqlx::query_as::<_, RawStoredUser>(USER_SELECT_BY_ID_POSTGRES)
-                    .bind(user_id)
-                    .fetch_optional(pool)
-                    .await
-            }
-        }
-        .map_err(|err| format!("Database query failed: {err}"))?;
-        row.map(|row| self.stored_from_raw(row)).transpose()
-    }
-
-    fn stored_from_raw(&self, row: RawStoredUser) -> AccountResult<StoredUser> {
-        let profile = serde_json::from_str::<UserProfile>(&row.profile_json).unwrap_or_default();
-        let status = parse_status(&row.status);
-        let username_changes =
-            serde_json::from_str::<Vec<u64>>(&row.username_changes_json).unwrap_or_default();
-        let custom_badges = serde_json::from_str::<Vec<String>>(&row.custom_badges_json)
-            .map(|badges| sanitize_custom_badges(&badges).unwrap_or_default())
+    fn stored_from_raw(&self, raw: RawStoredUser) -> ApiResult<StoredUser> {
+        let profile = serde_json::from_str::<UserProfile>(&raw.profile_json)
+            .unwrap_or_default();
+        let username_changes = serde_json::from_str::<Vec<u64>>(&raw.username_changes_json)
+            .unwrap_or_default();
+        let custom_badges = serde_json::from_str::<Vec<String>>(&raw.custom_badges_json)
             .unwrap_or_default();
         Ok(StoredUser {
-            id: row.id,
-            username: row.username,
-            password_hash: row.password_hash,
-            recovery_hash: row.recovery_hash,
+            id: raw.id,
+            username: raw.username,
+            password_hash: raw.password_hash,
+            recovery_hash: raw.recovery_hash,
             profile,
-            status,
-            disabled: row.disabled != 0,
-            banned: row.banned != 0,
-            created_at: row.created_at.max(0) as u64,
-            user_rank: row.user_rank,
+            status: status_from_str(&raw.status),
+            disabled: raw.disabled != 0,
+            banned: raw.banned != 0,
+            created_at: raw.created_at as u64,
+            user_rank: raw.user_rank,
             username_changes,
             custom_badges,
         })
     }
+
+    fn is_admin(&self, user_id: &str) -> bool {
+        self.admin_ids.iter().any(|id| id == user_id)
+    }
+
+    fn user_badges(&self, user: &StoredUser) -> Vec<String> {
+        let mut badges = Vec::new();
+        if self.is_admin(&user.id) {
+            badges.push("admin".to_owned());
+        }
+        if user.user_rank > 0 && user.user_rank <= 200 {
+            badges.push("early".to_owned());
+        }
+        for badge in &user.custom_badges {
+            if !badges.contains(badge) {
+                badges.push(badge.clone());
+            }
+        }
+        badges
+    }
+
+    fn public_user(&self, user: StoredUser) -> PublicUser {
+        let badges = self.user_badges(&user);
+        let is_admin = self.is_admin(&user.id);
+        PublicUser {
+            id: user.id,
+            username: user.username,
+            profile: user.profile,
+            status: user.status,
+            disabled: user.disabled,
+            banned: user.banned,
+            admin: is_admin,
+            badges,
+            created_at: user.created_at,
+        }
+    }
 }
 
-async fn prepare_sqlite_path(url: &str) -> AccountResult<()> {
-    let Some(path) = url
+fn sanitize_custom_badges(badges: &[String]) -> Vec<String> {
+    let mut cleaned = Vec::new();
+    for badge in badges {
+        let trimmed = badge.trim().to_lowercase();
+        if trimmed.is_empty() || trimmed == "admin" || trimmed == "early" {
+            continue;
+        }
+        let sanitized: String = trimmed
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+            .take(MAX_USER_BADGE_LEN)
+            .collect();
+        if !sanitized.is_empty() && !cleaned.contains(&sanitized) {
+            cleaned.push(sanitized);
+            if cleaned.len() >= MAX_USER_BADGES {
+                break;
+            }
+        }
+    }
+    cleaned
+}
+
+#[derive(Debug)]
+pub struct RoomDatabase {
+    pool: SqlitePool,
+}
+
+impl RoomDatabase {
+    pub async fn connect(config: &DatabaseConfig) -> ApiResult<Self> {
+        prepare_sqlite_path(&config.url).await?;
+        let options = SqliteConnectOptions::from_str(&config.url)
+            .map_err(|err| ApiError::internal("Invalid SQLite room database URL", err))?
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options)
+            .await
+            .map_err(|err| ApiError::internal("Failed to connect room database", err))?;
+        let db = Self { pool };
+        db.migrate().await?;
+        Ok(db)
+    }
+
+    async fn migrate(&self) -> ApiResult<()> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS rooms (
+                room_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                icon_json TEXT,
+                members_json TEXT NOT NULL DEFAULT '[]',
+                updated_at BIGINT NOT NULL DEFAULT 0
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|err| ApiError::internal("Room DB migration", err))?;
+        Ok(())
+    }
+
+    pub async fn room_record(&self, room_id: &str) -> Option<RoomRecord> {
+        let row = sqlx::query(
+            "SELECT room_id, title, icon_json, members_json FROM rooms WHERE room_id = ?",
+        )
+        .bind(room_id)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()??;
+
+        let stored_room_id = row.try_get::<String, _>("room_id").ok()?;
+        let title = row
+            .try_get::<String, _>("title")
+            .unwrap_or_else(|_| stored_room_id.clone());
+        let icon = row
+            .try_get::<Option<String>, _>("icon_json")
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_str::<RoomIcon>(&value).ok());
+        let members = row
+            .try_get::<String, _>("members_json")
+            .ok()
+            .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+            .unwrap_or_default();
+
+        Some(RoomRecord {
+            room_id: stored_room_id,
+            title,
+            icon,
+            members,
+        })
+    }
+
+    pub async fn set_room_record(&self, room_id: &str, room: &RoomRecord) -> ApiResult<()> {
+        let icon_json = room
+            .icon
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|err| ApiError::internal("Icon json serialize", err))?;
+        let members_json = serde_json::to_string(&room.members)
+            .map_err(|err| ApiError::internal("Members json serialize", err))?;
+        sqlx::query(
+            "INSERT INTO rooms (room_id, title, icon_json, members_json, updated_at) VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT(room_id) DO UPDATE SET title = excluded.title, icon_json = excluded.icon_json, members_json = excluded.members_json, updated_at = excluded.updated_at",
+        )
+        .bind(room_id)
+        .bind(&room.title)
+        .bind(icon_json)
+        .bind(members_json)
+        .bind(now_ms() as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| ApiError::internal("Set room record", err))?;
+        Ok(())
+    }
+
+    pub async fn room_icon(&self, room_id: &str) -> Option<RoomIcon> {
+        self.room_record(room_id).await.and_then(|room| room.icon)
+    }
+
+    pub async fn room_icon_uses_file_id(&self, file_id: &str) -> ApiResult<bool> {
+        let pattern = format!("%\"id\":\"{}\"%", file_id.replace('%', "\\%").replace('_', "\\_"));
+        let found = sqlx::query("SELECT 1 FROM rooms WHERE icon_json LIKE ? LIMIT 1")
+            .bind(pattern)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|err| ApiError::internal("Room icon search", err))?
+            .is_some();
+        Ok(found)
+    }
+
+    pub async fn set_room_icon(&self, room_id: &str, icon: &RoomIcon) -> ApiResult<()> {
+        let mut room = self.room_record(room_id).await.unwrap_or(RoomRecord {
+            room_id: room_id.to_owned(),
+            title: room_id.to_owned(),
+            icon: None,
+            members: Vec::new(),
+        });
+        room.icon = Some(icon.clone());
+        self.set_room_record(room_id, &room).await
+    }
+}
+
+async fn prepare_sqlite_path(url: &str) -> ApiResult<()> {
+    let Some(raw_path) = url
         .strip_prefix("sqlite://")
         .or_else(|| url.strip_prefix("sqlite:"))
     else {
         return Ok(());
     };
-    if path == ":memory:" {
+    if raw_path == ":memory:" || raw_path.trim().is_empty() {
         return Ok(());
     }
-    if let Some(parent) = Path::new(path).parent() {
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|err| format!("Could not create SQLite directory: {err}"))?;
+    if let Some(parent) = Path::new(raw_path).parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).await.map_err(|err| ApiError::internal("Prepare sqlite directory", err))?;
     }
     Ok(())
 }
-
-fn sanitize_custom_badges(raw: &[String]) -> AccountResult<Vec<String>> {
-    let mut badges = Vec::new();
-    for value in raw {
-        let badge = value.trim().to_ascii_lowercase();
-        if badge.is_empty()
-            || matches!(badge.as_str(), "staff" | "admin" | "system")
-            || badges.iter().any(|existing| existing == &badge)
-        {
-            continue;
-        }
-        if badge.chars().count() > MAX_USER_BADGE_LEN {
-            return Err("Badge name is too long.".to_owned());
-        }
-        if !badge
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-        {
-            return Err("Badge name may only contain letters, numbers, '-' or '_'.".to_owned());
-        }
-        badges.push(badge);
-        if badges.len() > MAX_USER_BADGES {
-            return Err("Too many badges.".to_owned());
-        }
-    }
-    Ok(badges)
-}
-
-pub fn validate_username(raw: &str) -> AccountResult<String> {
-    let username = normalize_username(raw);
-    let len = username.chars().count();
-    if len < USERNAME_MIN || len > USERNAME_MAX {
-        return Err(format!(
-            "Username must be between {USERNAME_MIN} and {USERNAME_MAX} characters."
-        ));
-    }
-    if !username
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
-    {
-        return Err("Username may only contain letters, numbers, '-', '_' or '.'.".to_owned());
-    }
-    if RESERVED_USERNAMES.contains(&username.as_str()) {
-        return Err("Username is reserved.".to_owned());
-    }
-    Ok(username)
-}
-
-pub fn normalize_username(raw: &str) -> String {
-    raw.trim().to_ascii_lowercase()
-}
-
-pub fn username_hits_blocklist(username: &str, terms: &[String]) -> bool {
-    let candidate = normalize_username(username);
-    terms
-        .iter()
-        .map(|item| normalize_username(item))
-        .any(|blocked| !blocked.is_empty() && candidate.contains(&blocked))
-}
-
-pub fn normalize_recovery_phrase(raw: &str) -> String {
-    raw.split_whitespace()
-        .map(|part| part.trim().to_ascii_lowercase())
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn validate_password(password: &str) -> AccountResult<()> {
-    let len = password.chars().count();
-    if len < PASSWORD_MIN || len > PASSWORD_MAX {
-        return Err(format!(
-            "Password must be between {PASSWORD_MIN} and {PASSWORD_MAX} characters."
-        ));
-    }
-    Ok(())
-}
-
-fn generate_recovery_words() -> Vec<String> {
-    let words = Language::English.word_list();
-    let mut rng = thread_rng();
-    (0..RECOVERY_WORD_COUNT)
-        .map(|_| {
-            let idx = rng.gen_range(0..words.len());
-            words[idx].to_owned()
-        })
-        .collect()
-}
-
-fn hash_secret(secret: &str) -> AccountResult<String> {
-    let salt = SaltString::generate(&mut PasswordOsRng);
-    Argon2::default()
-        .hash_password(secret.as_bytes(), &salt)
-        .map(|hash| hash.to_string())
-        .map_err(|err| format!("Hashing failed: {err}"))
-}
-
-fn verify_secret(secret: &str, hash: &str) -> AccountResult<()> {
-    let parsed = PasswordHash::new(hash).map_err(|err| format!("Hash parse failed: {err}"))?;
-    Argon2::default()
-        .verify_password(secret.as_bytes(), &parsed)
-        .map_err(|err| format!("Verification failed: {err}"))
-}
-
-fn generate_snowflake_id() -> String {
-    let now = now_ms();
-    let mut rng = OsRng;
-    let random: u16 = rng.next_u32() as u16;
-    let value = (now << 12) | u64::from(random & 0x0fff);
-    value.to_string()
-}
-
-fn random_token() -> String {
-    let mut buf = [0u8; 32];
-    OsRng.fill_bytes(&mut buf);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
-}
-
-fn token_hash(token: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
-fn parse_status(raw: &str) -> UserPresenceStatus {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "invisible" => UserPresenceStatus::Invisible,
-        "dnd" => UserPresenceStatus::Dnd,
-        _ => UserPresenceStatus::Online,
-    }
-}
-
-fn status_to_str(status: UserPresenceStatus) -> &'static str {
-    match status {
-        UserPresenceStatus::Online => "online",
-        UserPresenceStatus::Invisible => "invisible",
-        UserPresenceStatus::Dnd => "dnd",
-    }
-}
-
-pub fn user_response(user: PublicUser, token: String) -> serde_json::Value {
-    json!({
-        "ok": true,
-        "token": token,
-        "user": user
-    })
-}
-
-pub type SharedAccounts = Arc<AccountDatabase>;
