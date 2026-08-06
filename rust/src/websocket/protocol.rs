@@ -8,14 +8,16 @@ use tracing::error;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
 use crate::{
-    models::{
-        Attachment, ChatMessageRecord, EncryptedPayload, MessageReaction, PlayerStatus, ProfileImage,
-        RoomIcon, RoomRecord, SocketPayload,
-        UserPresenceStatus, UserProfile,
+    core::{
+        models::{
+            now_ms, Attachment, ChatMessageRecord, EncryptedPayload, MessageReaction, PlayerStatus, ProfileImage,
+            RoomIcon, RoomRecord, SocketPayload, UserPresenceStatus, UserProfile,
+        },
+        presence::SharedState,
+        security::rate_limit_hit,
     },
-    state::SharedState,
     utils::{
-        now_ms, random_message_id, rate_limit_hit, request_id, sanitize_filename,
+        random_message_id, request_id, sanitize_filename,
         send_json, store_uploaded_bytes, with_request_id,
     },
 };
@@ -2529,7 +2531,7 @@ async fn request_public_profiles(state: &SharedState, session_id: &str, d: Value
                     if cache.len() > 10_000 {
                         cache.retain(|_, entry| entry.expires_at_ms > now);
                     }
-                    cache.insert(cache_key, crate::state::CachedPublicProfile {
+                    cache.insert(cache_key, crate::core::presence::CachedPublicProfile {
                         expires_at_ms: now + PUBLIC_PROFILE_CACHE_TTL_MS,
                         value: value.clone(),
                     });
@@ -2845,7 +2847,7 @@ async fn session_status(state: &SharedState, session_id: &str) -> Option<UserPre
     players.get(session_id).map(|player| player.status)
 }
 
-fn is_visible_to(player: &crate::state::PlayerSession, viewer_session_id: Option<&str>) -> bool {
+fn is_visible_to(player: &crate::core::presence::PlayerSession, viewer_session_id: Option<&str>) -> bool {
     !is_reserved_system_username(&player.username)
         && (player.status != UserPresenceStatus::Invisible || viewer_session_id == Some(player.id.as_str()))
 }
@@ -3009,7 +3011,7 @@ fn normalize_call_media(value: Option<&Value>, fallback_audio: bool) -> (bool, b
 pub async fn sync_room_record(
     state: &SharedState,
     room_id: &str,
-) -> crate::db::AppResult<RoomRecord> {
+) -> crate::core::result::ApiResult<RoomRecord> {
     let usernames = room_usernames(state, room_id, None).await;
     let previous = state.database.room_record(room_id).await;
     let mut room = previous.unwrap_or(RoomRecord {

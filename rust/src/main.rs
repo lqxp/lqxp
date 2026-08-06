@@ -1,10 +1,7 @@
-mod accounts;
-mod config;
-mod db;
+mod core;
 mod linkpreview;
-mod models;
 mod server;
-mod state;
+mod services;
 mod utils;
 mod websocket;
 
@@ -14,11 +11,12 @@ use tokio::{net::TcpListener, sync::RwLock};
 use tracing::info;
 
 use crate::{
-    accounts::AccountDatabase,
-    config::{init_tracing, load_blocklist_terms, load_config},
-    db::RoomDatabase,
-    server::build_router,
-    state::AppState,
+    core::{
+        config::{init_tracing, load_blocklist_terms, load_config},
+        database::{AccountDatabase, RoomDatabase},
+        presence::AppState,
+    },
+    server::routes::build_router,
 };
 
 #[tokio::main]
@@ -29,6 +27,7 @@ async fn main() {
     let blocklist_terms = load_blocklist_terms().await;
     std::fs::create_dir_all(&config.network.upload_dir)
         .expect("failed to create upload directory");
+
     let database = Arc::new(
         RoomDatabase::connect(&config.database)
             .await

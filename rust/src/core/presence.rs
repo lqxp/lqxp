@@ -2,16 +2,13 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-
 use axum::extract::ws::Message;
+use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
-use serde_json::Value;
-
-use crate::{
-    accounts::SharedAccounts,
+use crate::core::{
     config::Config,
-    db::RoomDatabase,
+    database::{AccountDatabase, RoomDatabase},
     models::{ChatMessageRecord, UserPresenceStatus, UserProfile},
 };
 
@@ -22,7 +19,7 @@ pub struct AppState {
     pub players: Arc<RwLock<HashMap<String, PlayerSession>>>,
     pub room_messages: Arc<RwLock<HashMap<String, Vec<ChatMessageRecord>>>>,
     pub database: Arc<RoomDatabase>,
-    pub accounts: SharedAccounts,
+    pub accounts: Arc<AccountDatabase>,
     pub rate_limits: Arc<Mutex<HashMap<String, RateLimitBucket>>>,
     pub public_profile_cache: Arc<Mutex<HashMap<String, CachedPublicProfile>>>,
 }
@@ -40,7 +37,7 @@ impl AppState {
                 .collect::<Vec<_>>()
         };
 
-        let payload = serde_json::json!({
+        let payload = json!({
             "op": 999,
             "d": { "reason": "account_banned" }
         })
