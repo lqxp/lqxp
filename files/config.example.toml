@@ -17,12 +17,43 @@ uploadPublicBase = "/app/uploads"
 [rtc]
 
 relayOnly = true
+
+# ── Multi-server TURN (recommended) ──────────────────────────────────
+# Define one [[rtc.servers]] block per relay.  The client can choose
+# which server to use per call from the Settings > Calls panel.
+# The legacy flat fields (turnUrls / turnUsername / turnCredential)
+# are still supported and are auto-promoted to a server with id "legacy".
+#
+# defaultTurnServer = "mon-serveur"   # id of the pre-selected server
+
+[[rtc.servers]]
+id = "mon-serveur"
+label = "My TURN server"
+hint = "Self-hosted relay on your infrastructure — no IP exposed."
 turnUrls = [
   "turn:turn.qxp.example.com:3478?transport=udp",
   "turns:turn.qxp.example.com:5349?transport=tcp",
 ]
 turnUsername = "qxp-turn"
 turnCredential = "change-me"
+
+# ── Google STUN (free, no credentials needed — STUN only, no relay) ─
+# [[rtc.servers]]
+# id = "google-stun"
+# label = "Google STUN"
+# hint = "Google public STUN — stable but your IP is exposed (no anonymous relay)."
+# turnUrls = [
+#   "stun:stun.l.google.com:19302",
+#   "stun:stun1.l.google.com:19302",
+# ]
+
+# ── Legacy flat config (still works) ─────────────────────────────────
+# turnUrls = [
+#   "turn:turn.qxp.example.com:3478?transport=udp",
+#   "turns:turn.qxp.example.com:5349?transport=tcp",
+# ]
+# turnUsername = "qxp-turn"
+# turnCredential = "change-me"
 
 [database]
 

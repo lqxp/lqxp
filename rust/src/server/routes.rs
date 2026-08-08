@@ -474,9 +474,34 @@ fn runtime_config_payload(origin: Option<&str>, state: &SharedState) -> serde_js
     let calls_enabled = true;
     let calls_unavailable_reason = String::new();
 
+    let servers: Vec<serde_json::Value> = rtc
+        .resolved_servers()
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "label": s.label,
+                "hint": s.hint,
+                "urls": s.urls,
+                "username": s.username,
+                "credential": s.credential
+            })
+        })
+        .collect();
+
+    let default_server = if !rtc.default_turn_server.is_empty() {
+        rtc.default_turn_server.clone()
+    } else if let Some(first) = rtc.resolved_servers().first() {
+        first.id.clone()
+    } else {
+        String::new()
+    };
+
     let mut payload = json!({
         "rtc": {
             "relayOnly": rtc.relay_only,
+            "servers": servers,
+            "defaultTurnServer": default_server,
             "turnUrls": rtc.turn_urls,
             "turnUsername": rtc.turn_username,
             "turnCredential": rtc.turn_credential,

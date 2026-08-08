@@ -79,15 +79,75 @@ impl Default for NetworkConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct TurnServer {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub hint: String,
+    #[serde(default, rename = "turnUrls")]
+    pub urls: Vec<String>,
+    #[serde(default, rename = "turnUsername")]
+    pub username: String,
+    #[serde(default, rename = "turnCredential")]
+    pub credential: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct RtcConfig {
     #[serde(default = "default_relay_only", rename = "relayOnly")]
     pub relay_only: bool,
+    // Legacy flat fields – auto-promoted into a single "default" server.
     #[serde(default, rename = "turnUrls")]
     pub turn_urls: Vec<String>,
     #[serde(default, rename = "turnUsername")]
     pub turn_username: String,
     #[serde(default, rename = "turnCredential")]
     pub turn_credential: String,
+    // New multi-server config.
+    #[serde(default, rename = "servers")]
+    pub servers: Vec<TurnServer>,
+    #[serde(default, rename = "defaultTurnServer")]
+    pub default_turn_server: String,
+}
+
+impl RtcConfig {
+    /// Returns the resolved list of TURN servers: explicit `[[rtc.servers]]`
+    /// entries first, then the legacy flat entry (if any) as a fallback.
+    pub fn resolved_servers(&self) -> Vec<TurnServer> {
+        let mut list: Vec<TurnServer> = self.servers.clone();
+
+        // Auto-promote legacy flat config into a single server entry.
+        if !self.turn_urls.is_empty() {
+            let already_has = list.iter().any(|s| s.urls == self.turn_urls);
+            if !already_has {
+                list.push(TurnServer {
+                    id: "legacy".into(),
+                    label: "Serveur TURN".into(),
+                    hint: String::new(),
+                    urls: self.turn_urls.clone(),
+                    username: self.turn_username.clone(),
+                    credential: self.turn_credential.clone(),
+                });
+            }
+        }
+
+        // Ensure every server has a non-empty id (derive from label otherwise).
+        let mut seen = std::collections::HashSet::new();
+        for (i, server) in list.iter_mut().enumerate() {
+            if server.id.is_empty() {
+                server.id = if server.label.is_empty() {
+                    format!("server-{}", i)
+                } else {
+                    server.label.to_lowercase().replace(' ', "-")
+                };
+            }
+            seen.insert(server.id.clone());
+        }
+
+        list
+    }
 }
 
 impl Default for RtcConfig {
@@ -97,6 +157,8 @@ impl Default for RtcConfig {
             turn_urls: Vec::new(),
             turn_username: String::new(),
             turn_credential: String::new(),
+            servers: Vec::new(),
+            default_turn_server: String::new(),
         }
     }
 }
