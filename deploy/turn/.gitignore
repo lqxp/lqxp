@@ -1,0 +1,4 @@
+*.pid
+turndb
+*.pem
+*.conf

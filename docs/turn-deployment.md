@@ -34,7 +34,7 @@ Run this from the checked-out repo:
 ./scripts/bootstrap-turn-prod.sh \
   --public-domain qxp.example.com \
   --turn-domain turn.qxp.example.com \
-  --external-ip 179.61.190.52 \
+  --external-ip 95.170.26.46 \
   --listen-ip 0.0.0.0
 ```
 
