@@ -1024,7 +1024,7 @@ fn sanitize_custom_badges(badges: &[String]) -> Vec<String> {
     let mut cleaned = Vec::new();
     for badge in badges {
         let trimmed = badge.trim().to_lowercase();
-        if trimmed.is_empty() || trimmed == "admin" || trimmed == "early" {
+        if trimmed.is_empty() || trimmed == "admin" {
             continue;
         }
         let sanitized: String = trimmed
