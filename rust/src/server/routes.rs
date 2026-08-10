@@ -1,5 +1,5 @@
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
 };
 
@@ -7,7 +7,7 @@ use axum::{
     extract::{
         ws::WebSocketUpgrade, ConnectInfo, DefaultBodyLimit, Multipart, Path as AxumPath, State,
     },
-    http::{header, HeaderMap, Method, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -77,36 +77,62 @@ fn cors_layer(state: &SharedState) -> CorsLayer {
 }
 
 fn allowed_cors_origins(state: &SharedState) -> AllowOrigin {
-    let mut origins = [
+    let configured_origins: Vec<HeaderValue> = [
         state.config.api.public_domain.trim(),
         state.config.api.domain.trim(),
     ]
     .into_iter()
-    .filter(|origin| !origin.is_empty())
-    .flat_map(|origin| {
-        if origin.starts_with("http://") || origin.starts_with("https://") {
-            vec![origin.to_owned()]
+    .filter(|o| !o.is_empty())
+    .flat_map(|o| {
+        if o.starts_with("http://") || o.starts_with("https://") {
+            vec![o.to_owned()]
         } else {
-            vec![format!("https://{origin}"), format!("http://{origin}")]
+            vec![format!("https://{o}"), format!("http://{o}")]
         }
     })
-    .filter_map(|origin| origin.parse().ok())
-    .collect::<Vec<_>>();
+    .filter_map(|o| o.parse().ok())
+    .collect();
 
-    origins.extend([
-        "tauri://localhost".parse().unwrap(),
-        "http://tauri.localhost".parse().unwrap(),
-        "https://tauri.localhost".parse().unwrap(),
-        "http://localhost:4173".parse().unwrap(),
-        "http://127.0.0.1:4173".parse().unwrap(),
-        "http://localhost:5173".parse().unwrap(),
-        "http://127.0.0.1:5173".parse().unwrap(),
-    ]);
+    AllowOrigin::predicate(move |origin: &HeaderValue, _parts: &axum::http::request::Parts| {
+        let s = origin.to_str().unwrap_or("");
 
-    origins.sort();
-    origins.dedup();
+        if configured_origins.iter().any(|o| o.as_bytes() == origin.as_bytes()) {
+            return true;
+        }
 
-    AllowOrigin::list(origins)
+        if s == "tauri://localhost"
+            || s == "http://tauri.localhost"
+            || s == "https://tauri.localhost"
+        {
+            return true;
+        }
+
+        if s.starts_with("http://localhost:")
+            || s.starts_with("http://127.0.0.1:")
+            || s.starts_with("http://[::1]:")
+        {
+            return true;
+        }
+
+        // Allow any HTTP origin from a private / loopback IP
+        if let Ok(parsed) = url::Url::parse(s) {
+            if parsed.scheme() == "http" {
+                if let Some(host) = parsed.host_str() {
+                    if host.eq_ignore_ascii_case("localhost") {
+                        return true;
+                    }
+                    if let Ok(ip) = host.parse::<IpAddr>() {
+                        return match ip {
+                            IpAddr::V4(v4) => v4.is_private() || v4.is_loopback(),
+                            IpAddr::V6(v6) => v6.is_loopback(),
+                        };
+                    }
+                }
+            }
+        }
+
+        false
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -543,9 +569,26 @@ fn public_origin(headers: &HeaderMap, configured_domain: &str) -> Option<String>
             .get("x-forwarded-proto")
             .and_then(|value| value.to_str().ok())
             .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("https");
-        return Some(format!("{forwarded_proto}://{host}"));
+            .filter(|value| !value.is_empty());
+
+        let proto = match forwarded_proto {
+            Some(p) => p,
+            None => {
+                let host_part = host.split(':').next().unwrap_or("");
+                let is_local = host_part.eq_ignore_ascii_case("localhost")
+                    || host_part == "127.0.0.1"
+                    || host_part == "[::1]";
+                let is_private = host_part
+                    .parse::<IpAddr>()
+                    .map(|ip| match ip {
+                        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback(),
+                        IpAddr::V6(v6) => v6.is_loopback(),
+                    })
+                    .unwrap_or(false);
+                if is_local || is_private { "http" } else { "https" }
+            }
+        };
+        return Some(format!("{proto}://{host}"));
     }
 
     let configured = configured_domain.trim();
