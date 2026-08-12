@@ -48,15 +48,6 @@ const MAX_PREVIEW_URL_LEN: usize = 2048;
 const MAX_REACTION_EMOJI_CHARS: usize = 32;
 const MIN_ROOM_ID_LEN: usize = 8;
 const MAX_ROOM_ID_LEN: usize = 64;
-// Voice call chunks are ~800ms of Opus at 64–128kbps → 6–13KB raw.
-// Cap generously at 512KB raw (~680KB base64) so a malicious peer can't push
-// large payloads per frame.
-const MAX_VOICE_CHUNK_BYTES: usize = 512 * 1024;
-const MAX_VOICE_CHUNK_B64_LEN: usize = ((MAX_VOICE_CHUNK_BYTES + 2) / 3) * 4 + 4;
-// Minimum spacing between voice-chunk broadcasts per session. Natural cadence
-// on the client is ~800ms per chunk, so 100ms floor allows bursts without
-// letting a spammer saturate the room.
-const MIN_VOICE_CHUNK_INTERVAL_MS: u64 = 100;
 const MIN_BETWEEN_MESSAGE_INTERVAL: u64 = 400;
 const PUBLIC_PROFILE_CACHE_TTL_MS: u64 = 5 * 60 * 1000;
 const PUBLIC_PROFILE_RATE_LIMIT_WINDOW_MS: u64 = 10_000;
@@ -130,7 +121,6 @@ pub async fn process_message(
         33 => update_room_title(&state, &session_id, payload.d).await,
         35 => request_public_profiles(&state, &session_id, payload.d).await,
         98 => update_voice_chat(&state, &session_id, payload.d).await,
-        99 => relay_voice_data(&state, &session_id, payload.d, payload.u).await,
         100 => update_mute_state(&state, &session_id, payload.d).await,
         110 => update_call_media_state(&state, &session_id, payload.d).await,
         111 => relay_call_signal(&state, &session_id, payload.d).await,
@@ -1684,107 +1674,6 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
         with_request_id(json!({ "op": 98, "d": { "ok": true } }), request_id(&d)),
     )
     .await;
-    false
-}
-
-async fn relay_voice_data(
-    state: &SharedState,
-    session_id: &str,
-    d: Value,
-    _u: Option<String>,
-) -> bool {
-    let Some(game_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
-        return respond_error(state, session_id, 99, "Missing gameId", request_id(&d)).await;
-    };
-
-    if game_id.is_empty() {
-        return respond_error(state, session_id, 99, "Missing gameId", request_id(&d)).await;
-    }
-
-    // Size-bound the chunk payload before doing anything else.
-    let chunk = d.get("chunk").and_then(Value::as_str).unwrap_or("");
-    if chunk.len() > MAX_VOICE_CHUNK_B64_LEN {
-        return respond_error(
-            state,
-            session_id,
-            99,
-            "Voice chunk too large",
-            request_id(&d),
-        )
-        .await;
-    }
-
-    let now = now_ms();
-
-    // Membership + voice-enabled check + per-session rate limit, all in one write.
-    let voice_context = {
-        let mut players = state.players.write().await;
-        if let Some(player) = players.get_mut(session_id) {
-            if !player.rooms.contains(game_id) {
-                Err("Not a member of this room")
-            } else if let Some(last) = player.last_voice_chunk_timestamp {
-                if now.saturating_sub(last) < MIN_VOICE_CHUNK_INTERVAL_MS {
-                    Err("Voice chunk rate limited")
-                } else {
-                    player.last_voice_chunk_timestamp = Some(now);
-                    Ok(player.username.clone())
-                }
-            } else {
-                player.last_voice_chunk_timestamp = Some(now);
-                Ok(player.username.clone())
-            }
-        } else {
-            Err("You need to be identified before")
-        }
-    };
-
-    let username = match voice_context {
-        Ok(name) => name,
-        Err(message) => return respond_error(state, session_id, 99, message, request_id(&d)).await,
-    };
-
-    // Build a fresh payload from validated fields only — never re-emit the raw
-    // `d` blob (prevents a peer from slipping extra keys into the broadcast).
-    let mime_type = d
-        .get("mimeType")
-        .and_then(Value::as_str)
-        .unwrap_or("audio/webm")
-        .chars()
-        .take(MAX_MIMETYPE_LEN)
-        .collect::<String>();
-
-    let targets = {
-        let players = state.players.read().await;
-        players
-            .values()
-            .filter(|player| {
-                player.id != session_id
-                    && player.rooms.contains(game_id)
-                    && player.is_voice_chat
-                    && !player.muted_users.contains(&username)
-            })
-            .map(|player| player.tx.clone())
-            .collect::<Vec<_>>()
-    };
-
-    if targets.is_empty() {
-        return false;
-    }
-
-    let payload = json!({
-        "op": 99,
-        "d": {
-            "gameId": game_id,
-            "chunk": chunk,
-            "mimeType": mime_type
-        },
-        "u": username
-    });
-    let encoded = payload.to_string();
-    for target in targets {
-        let _ = target.send(Message::Text(encoded.clone().into()));
-    }
-
     false
 }
 

@@ -124,7 +124,6 @@ async fn register_connection(
             platform: "web".to_owned(),
             version: "unknown".to_owned(),
             last_message_timestamp: None,
-            last_voice_chunk_timestamp: None,
             is_mobile: None,
             is_secure: None,
             muted_users: HashSet::new(),
