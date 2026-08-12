@@ -191,6 +191,4 @@ pub struct SocketPayload {
     pub op: u16,
     #[serde(default)]
     pub d: serde_json::Value,
-    #[serde(default)]
-    pub u: Option<String>,
 }
