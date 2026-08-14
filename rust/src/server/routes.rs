@@ -12,7 +12,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::fs;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -137,7 +137,14 @@ fn allowed_cors_origins(state: &SharedState) -> AllowOrigin {
 
 #[derive(Debug, Deserialize)]
 struct ChallengeQuery {
-    action: Option<String>,
+    target: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChallengeResponse {
+    vdf: crate::core::vdf::VdfChallenge,
+    quota_token: crate::core::rln::EpochQuotaToken,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,9 +152,10 @@ struct ChallengeQuery {
 struct AuthRegisterRequest {
     username: String,
     password: String,
-    pow_challenge: Option<String>,
-    pow_signature: Option<String>,
-    pow_nonce: Option<u64>,
+    vdf_challenge: Option<crate::core::vdf::VdfChallenge>,
+    vdf_proof: Option<crate::core::vdf::VdfProof>,
+    quota_token: Option<crate::core::rln::EpochQuotaToken>,
+    nullifier: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,9 +163,10 @@ struct AuthRegisterRequest {
 struct AuthLoginRequest {
     username: String,
     password: String,
-    pow_challenge: Option<String>,
-    pow_signature: Option<String>,
-    pow_nonce: Option<u64>,
+    vdf_challenge: Option<crate::core::vdf::VdfChallenge>,
+    vdf_proof: Option<crate::core::vdf::VdfProof>,
+    quota_token: Option<crate::core::rln::EpochQuotaToken>,
+    nullifier: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -202,24 +211,35 @@ struct BadgesRequest {
 async fn auth_challenge_handler(
     Query(query): Query<ChallengeQuery>,
 ) -> ApiResult<impl IntoResponse> {
-    let action = query.action.as_deref().unwrap_or("register");
-    let challenge = crate::core::pow::generate_challenge(action, None);
-    Ok(Json(challenge))
+    let target = query.target.as_deref();
+    let vdf = crate::core::vdf::generate_vdf_challenge(target, None);
+    let quota_token = crate::core::rln::generate_quota_token();
+
+    Ok(Json(ChallengeResponse {
+        vdf,
+        quota_token,
+    }))
 }
 
 async fn auth_register_handler(
     State(state): State<SharedState>,
     Json(body): Json<AuthRegisterRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    let (challenge, signature, nonce) = match (body.pow_challenge, body.pow_signature, body.pow_nonce) {
-        (Some(c), Some(s), Some(n)) => (c, s, n),
+    // 1. Verify RLN Rate-Limiting Nullifier if present
+    if let (Some(token), Some(nullifier)) = (&body.quota_token, &body.nullifier) {
+        crate::core::rln::verify_and_consume_nullifier(token, nullifier, "register").await?;
+    }
+
+    // 2. Verify VDF (Verifiable Delay Function) proof
+    let (vdf_c, vdf_p) = match (&body.vdf_challenge, &body.vdf_proof) {
+        (Some(c), Some(p)) => (c, p),
         _ => {
             return Err(ApiError::bad_request(
-                "Missing proof-of-work challenge. Please request /api/auth/challenge first.",
+                "Missing Verifiable Delay Function (VDF) proof. Please request /api/auth/challenge first.",
             ))
         }
     };
-    crate::core::pow::verify_pow(&challenge, &signature, nonce, "register").await?;
+    crate::core::vdf::verify_vdf(vdf_c, vdf_p, Some(&body.username))?;
 
     auth::register(&state, &body.username, &body.password)
         .await
@@ -230,8 +250,12 @@ async fn auth_login_handler(
     State(state): State<SharedState>,
     Json(body): Json<AuthLoginRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    if let (Some(c), Some(s), Some(n)) = (body.pow_challenge, body.pow_signature, body.pow_nonce) {
-        crate::core::pow::verify_pow(&c, &s, n, "login").await?;
+    if let (Some(token), Some(nullifier)) = (&body.quota_token, &body.nullifier) {
+        crate::core::rln::verify_and_consume_nullifier(token, nullifier, "login").await?;
+    }
+
+    if let (Some(vdf_c), Some(vdf_p)) = (&body.vdf_challenge, &body.vdf_proof) {
+        crate::core::vdf::verify_vdf(vdf_c, vdf_p, Some(&body.username))?;
     }
 
     auth::login(&state, &body.username, &body.password)

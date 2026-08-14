@@ -50,9 +50,9 @@ const MIN_ROOM_ID_LEN: usize = 8;
 const MAX_ROOM_ID_LEN: usize = 64;
 const MIN_BETWEEN_MESSAGE_INTERVAL: u64 = 400;
 const PUBLIC_PROFILE_CACHE_TTL_MS: u64 = 5 * 60 * 1000;
-const PUBLIC_PROFILE_RATE_LIMIT_WINDOW_MS: u64 = 10_000;
-const PUBLIC_PROFILE_RATE_LIMIT_MAX: u32 = 12;
-const PUBLIC_PROFILE_MAX_LOOKUPS: usize = 32;
+const PUBLIC_PROFILE_RATE_LIMIT_WINDOW_MS: u64 = 15_000;
+const PUBLIC_PROFILE_RATE_LIMIT_MAX: u32 = 4;
+const PUBLIC_PROFILE_MAX_LOOKUPS: usize = 8;
 const SYSTEM_USERNAME: &str = "system";
 
 fn is_reserved_system_username(username: &str) -> bool {

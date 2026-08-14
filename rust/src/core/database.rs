@@ -322,7 +322,8 @@ impl AccountDatabase {
         let username = validate_username(username)?;
         validate_password(password)?;
         if self.user_by_username(&username).await?.is_some() {
-            return Err(ApiError::bad_request("Username is already taken."));
+            let _ = verify_secret_constant_time(password, None);
+            return Err(ApiError::bad_request("Registration request could not be processed."));
         }
 
         let id = generate_snowflake_id();
@@ -371,7 +372,7 @@ impl AccountDatabase {
             }
         };
         if result.is_err() {
-            return Err(ApiError::bad_request("Username is already taken."));
+            return Err(ApiError::bad_request("Registration request could not be processed."));
         }
 
         let user = self
