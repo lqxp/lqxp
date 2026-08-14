@@ -1,11 +1,11 @@
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::IpAddr,
     path::{Path, PathBuf},
 };
 
 use axum::{
     extract::{
-        ws::WebSocketUpgrade, ConnectInfo, DefaultBodyLimit, Multipart, Path as AxumPath, State,
+        ws::WebSocketUpgrade, DefaultBodyLimit, Multipart, Path as AxumPath, Query, State,
     },
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
@@ -22,7 +22,6 @@ use crate::{
         database::AuthenticatedUser,
         presence::SharedState,
         result::{ApiError, ApiResult},
-        security::rate_limit_hit,
     },
     services::{admin, auth, messaging, room, user},
     websocket::handle_socket,
@@ -34,6 +33,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/app/", get(webchat_page))
         .route("/app/uploads/*path", get(upload_asset))
         .route("/app/*path", get(app_asset))
+        .route("/api/auth/challenge", get(auth_challenge_handler))
         .route("/api/auth/me", get(auth_me_handler))
         .route("/api/auth/register", post(auth_register_handler))
         .route("/api/auth/login", post(auth_login_handler))
@@ -136,15 +136,28 @@ fn allowed_cors_origins(state: &SharedState) -> AllowOrigin {
 }
 
 #[derive(Debug, Deserialize)]
-struct AuthRegisterRequest {
-    username: String,
-    password: String,
+struct ChallengeQuery {
+    action: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthRegisterRequest {
+    username: String,
+    password: String,
+    pow_challenge: Option<String>,
+    pow_signature: Option<String>,
+    pow_nonce: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AuthLoginRequest {
     username: String,
     password: String,
+    pow_challenge: Option<String>,
+    pow_signature: Option<String>,
+    pow_nonce: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,10 +199,28 @@ struct BadgesRequest {
     badges: Vec<String>,
 }
 
+async fn auth_challenge_handler(
+    Query(query): Query<ChallengeQuery>,
+) -> ApiResult<impl IntoResponse> {
+    let action = query.action.as_deref().unwrap_or("register");
+    let challenge = crate::core::pow::generate_challenge(action, None);
+    Ok(Json(challenge))
+}
+
 async fn auth_register_handler(
     State(state): State<SharedState>,
     Json(body): Json<AuthRegisterRequest>,
 ) -> ApiResult<impl IntoResponse> {
+    let (challenge, signature, nonce) = match (body.pow_challenge, body.pow_signature, body.pow_nonce) {
+        (Some(c), Some(s), Some(n)) => (c, s, n),
+        _ => {
+            return Err(ApiError::bad_request(
+                "Missing proof-of-work challenge. Please request /api/auth/challenge first.",
+            ))
+        }
+    };
+    crate::core::pow::verify_pow(&challenge, &signature, nonce, "register").await?;
+
     auth::register(&state, &body.username, &body.password)
         .await
         .map(Json)
@@ -197,13 +228,10 @@ async fn auth_register_handler(
 
 async fn auth_login_handler(
     State(state): State<SharedState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     Json(body): Json<AuthLoginRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    let client_ip = client_ip(&headers, addr);
-    if rate_limit_hit(&state, format!("login:ip:{client_ip}"), 10, 15 * 60_000).await {
-        return Err(ApiError::too_many_requests("Too many login attempts."));
+    if let (Some(c), Some(s), Some(n)) = (body.pow_challenge, body.pow_signature, body.pow_nonce) {
+        crate::core::pow::verify_pow(&c, &s, n, "login").await?;
     }
 
     auth::login(&state, &body.username, &body.password)
@@ -446,6 +474,8 @@ async fn serve_file(path: &Path) -> Response {
             Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", mime.as_ref())
+                .header("x-content-type-options", "nosniff")
+                .header("content-security-policy", "sandbox; default-src 'none'")
                 .body(axum::body::Body::from(bytes))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
@@ -620,19 +650,9 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn client_ip(_headers: &HeaderMap, addr: SocketAddr) -> String {
-    addr.ip().to_string()
-}
-
 async fn ws_upgrade_handler(
     State(state): State<SharedState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let client_ip = client_ip(&headers, addr);
-    if rate_limit_hit(&state, format!("ws-connect:ip:{client_ip}"), 30, 60_000).await {
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
-    }
     ws.on_upgrade(move |socket| handle_socket(state, socket))
 }
