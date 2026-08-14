@@ -90,7 +90,7 @@ pub fn compute_nullifier(ticket: &str, epoch: u64, action: &str) -> String {
     h.update(b"qxprotocol_rln_nullifier:");
     h.update(ticket.as_bytes());
     h.update(b":");
-    h.update(&epoch.to_be_bytes());
+    h.update(epoch.to_be_bytes());
     h.update(b":");
     h.update(action.as_bytes());
     format!("{:x}", h.finalize())
@@ -104,7 +104,7 @@ pub async fn verify_and_consume_nullifier(
     let now = now_ms();
     let curr_epoch = current_epoch();
 
-    if token.epoch > curr_epoch || curr_epoch.saturating_sub(token.epoch) > 4 {
+    if token.epoch > curr_epoch + 1 || curr_epoch.saturating_sub(token.epoch) > 4 {
         return Err(ApiError::bad_request(
             "Anonymous quota token expired. Please obtain a fresh token.",
         ));

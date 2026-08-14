@@ -225,6 +225,14 @@ async fn auth_register_handler(
     State(state): State<SharedState>,
     Json(body): Json<AuthRegisterRequest>,
 ) -> ApiResult<impl IntoResponse> {
+    let clean_user = crate::core::security::normalize_username(&body.username);
+    let rate_key = format!("register:user:{}", clean_user);
+    if crate::core::security::rate_limit_hit(&state, rate_key, 3, 30_000).await {
+        return Err(ApiError::too_many_requests(
+            "Too many registration attempts for this username. Please wait 30 seconds.",
+        ));
+    }
+
     // 1. Verify RLN Rate-Limiting Nullifier if present
     if let (Some(token), Some(nullifier)) = (&body.quota_token, &body.nullifier) {
         crate::core::rln::verify_and_consume_nullifier(token, nullifier, "register").await?;
@@ -250,6 +258,21 @@ async fn auth_login_handler(
     State(state): State<SharedState>,
     Json(body): Json<AuthLoginRequest>,
 ) -> ApiResult<impl IntoResponse> {
+    let clean_user = crate::core::security::normalize_username(&body.username);
+    let fail_key = format!("login:fail:user:{}", clean_user);
+
+    {
+        let buckets = state.rate_limits.lock().await;
+        if let Some(bucket) = buckets.get(&fail_key) {
+            let now = crate::core::models::now_ms();
+            if now.saturating_sub(bucket.window_start_ms) <= 30_000 && bucket.count >= 5 && body.vdf_proof.is_none() {
+                return Err(ApiError::too_many_requests(
+                    "Too many failed login attempts for this account. Please solve the security challenge to proceed.",
+                ));
+            }
+        }
+    }
+
     if let (Some(token), Some(nullifier)) = (&body.quota_token, &body.nullifier) {
         crate::core::rln::verify_and_consume_nullifier(token, nullifier, "login").await?;
     }
@@ -258,15 +281,33 @@ async fn auth_login_handler(
         crate::core::vdf::verify_vdf(vdf_c, vdf_p, Some(&body.username))?;
     }
 
-    auth::login(&state, &body.username, &body.password)
-        .await
-        .map(Json)
+    match auth::login(&state, &body.username, &body.password).await {
+        Ok(res) => {
+            // Successful login: reset failure counter for this account
+            let mut buckets = state.rate_limits.lock().await;
+            buckets.remove(&fail_key);
+            Ok(Json(res))
+        }
+        Err(err) => {
+            // Failed login: increment failure counter
+            let _ = crate::core::security::rate_limit_hit(&state, &fail_key, 100, 30_000).await;
+            Err(err)
+        }
+    }
 }
 
 async fn auth_recover_handler(
     State(state): State<SharedState>,
     Json(body): Json<AuthRecoverRequest>,
 ) -> ApiResult<impl IntoResponse> {
+    let clean_user = crate::core::security::normalize_username(&body.username);
+    let rate_key = format!("recover:user:{}", clean_user);
+    if crate::core::security::rate_limit_hit(&state, rate_key, 3, 30_000).await {
+        return Err(ApiError::too_many_requests(
+            "Too many recovery attempts for this account. Please wait 30 seconds.",
+        ));
+    }
+
     auth::recover(
         &state,
         &body.username,

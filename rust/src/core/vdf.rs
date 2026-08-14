@@ -34,6 +34,7 @@ pub struct VdfChallenge {
     pub target_hash: String,
     pub salt: String,
     pub signature: String,
+    pub issued_at: u64,
     pub expires_at: u64,
 }
 
@@ -109,11 +110,11 @@ pub fn hash_to_prime(x: &BigUint, y: &BigUint) -> BigUint {
     loop {
         let mut h = Sha256::new();
         h.update(b"qxprotocol_vdf_prime_l:");
-        h.update(&x.to_bytes_be());
+        h.update(x.to_bytes_be());
         h.update(b":");
-        h.update(&y.to_bytes_be());
+        h.update(y.to_bytes_be());
         h.update(b":");
-        h.update(&counter.to_be_bytes());
+        h.update(counter.to_be_bytes());
         let digest = h.finalize();
 
         // 128-bit odd candidate
@@ -198,6 +199,7 @@ pub fn generate_vdf_challenge(target: Option<&str>, iterations_override: Option<
         target_hash,
         salt,
         signature,
+        issued_at: now,
         expires_at,
     }
 }
@@ -214,7 +216,7 @@ pub fn verify_vdf(
 
     let content_to_verify = format!(
         "{}:{}:{}:{}:{}",
-        challenge.expires_at - VDF_TTL_MS,
+        challenge.issued_at,
         challenge.t,
         challenge.target_hash,
         challenge.salt,

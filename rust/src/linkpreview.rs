@@ -230,7 +230,7 @@ fn parse_og(html: &str, base: &Url) -> Option<LinkPreview> {
                 preview.description = truncate(&content, 500);
             }
             "og:image" | "twitter:image" | "twitter:image:src" if preview.image.is_empty() => {
-                if let Some(resolved) = base.join(&content).ok() {
+                if let Ok(resolved) = base.join(&content) {
                     if matches!(resolved.scheme(), "http" | "https") {
                         preview.image = truncate(resolved.as_str(), 600);
                     }
@@ -315,9 +315,7 @@ pub async fn fetch_preview(raw_url: &str) -> Option<LinkPreview> {
             }
         }
         let final_url = resp.url().clone();
-        if validate_and_pin_url(final_url.as_str()).is_none() {
-            return None;
-        }
+        validate_and_pin_url(final_url.as_str())?;
 
         let mut bytes_read = 0usize;
         let mut buf: Vec<u8> = Vec::with_capacity(16 * 1024);

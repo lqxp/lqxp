@@ -24,16 +24,16 @@ use crate::{
 
 const MAX_ROOM_MESSAGES: usize = 150;
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
-const MAX_ATTACHMENT_B64_LEN: usize = ((MAX_ATTACHMENT_BYTES + 2) / 3) * 4 + 4;
+const MAX_ATTACHMENT_B64_LEN: usize = MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 + 4;
 const MAX_FILENAME_LEN: usize = 128;
 const MAX_MIMETYPE_LEN: usize = 96;
 const MAX_MESSAGE_CHARS: usize = 2000;
 const MAX_PROFILE_AVATAR_BYTES: usize = 10 * 1024 * 1024;
-const MAX_PROFILE_AVATAR_B64_LEN: usize = ((MAX_PROFILE_AVATAR_BYTES + 2) / 3) * 4 + 4;
+const MAX_PROFILE_AVATAR_B64_LEN: usize = MAX_PROFILE_AVATAR_BYTES.div_ceil(3) * 4 + 4;
 const MAX_ROOM_ICON_UPLOAD_BYTES: usize = 5 * 1024 * 1024;
-const MAX_ROOM_ICON_UPLOAD_B64_LEN: usize = ((MAX_ROOM_ICON_UPLOAD_BYTES + 2) / 3) * 4 + 4;
+const MAX_ROOM_ICON_UPLOAD_B64_LEN: usize = MAX_ROOM_ICON_UPLOAD_BYTES.div_ceil(3) * 4 + 4;
 const MAX_PROFILE_BANNER_BYTES: usize = 15 * 1024 * 1024;
-const MAX_PROFILE_BANNER_B64_LEN: usize = ((MAX_PROFILE_BANNER_BYTES + 2) / 3) * 4 + 4;
+const MAX_PROFILE_BANNER_B64_LEN: usize = MAX_PROFILE_BANNER_BYTES.div_ceil(3) * 4 + 4;
 const MAX_PROFILE_DESCRIPTION_CHARS: usize = 512;
 const MAX_PROFILE_PRONOUNS_CHARS: usize = 24;
 const MAX_ENCRYPTED_ALG_LEN: usize = 32;
@@ -1886,7 +1886,7 @@ async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> b
     }
 
     let _ = target_tx.send(Message::Text(
-        json!({ "op": 111, "d": clean }).to_string().into(),
+        json!({ "op": 111, "d": clean }).to_string(),
     ));
     false
 }
@@ -2002,7 +2002,7 @@ async fn admin_broadcast(state: &SharedState, session_id: &str, d: Value) -> boo
     });
     let encoded = payload.to_string();
     for recipient in recipients {
-        let _ = recipient.send(Message::Text(encoded.clone().into()));
+        let _ = recipient.send(Message::Text(encoded.clone()));
     }
 
     respond_to_sender(
@@ -2964,7 +2964,7 @@ pub async fn broadcast_to_room(state: &SharedState, game_id: &str, payload: Valu
 
     let encoded = payload.to_string();
     for recipient in recipients {
-        let _ = recipient.send(Message::Text(encoded.clone().into()));
+        let _ = recipient.send(Message::Text(encoded.clone()));
     }
 }
 

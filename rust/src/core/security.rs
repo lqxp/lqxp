@@ -103,7 +103,7 @@ pub fn normalize_recovery_phrase(words: &str) -> String {
 pub fn validate_username(username: &str) -> ApiResult<String> {
     let trimmed = username.trim();
     let char_count = trimmed.chars().count();
-    if char_count < USERNAME_MIN || char_count > USERNAME_MAX {
+    if !(USERNAME_MIN..=USERNAME_MAX).contains(&char_count) {
         return Err(ApiError::bad_request(format!(
             "Username must be between {USERNAME_MIN} and {USERNAME_MAX} characters."
         )));
@@ -132,7 +132,7 @@ pub fn validate_username(username: &str) -> ApiResult<String> {
 
 pub fn validate_password(password: &str) -> ApiResult<()> {
     let char_count = password.chars().count();
-    if char_count < PASSWORD_MIN || char_count > PASSWORD_MAX {
+    if !(PASSWORD_MIN..=PASSWORD_MAX).contains(&char_count) {
         return Err(ApiError::bad_request(format!(
             "Password must be between {PASSWORD_MIN} and {PASSWORD_MAX} characters."
         )));

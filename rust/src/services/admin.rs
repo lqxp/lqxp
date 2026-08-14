@@ -178,8 +178,7 @@ async fn disconnect_user_sessions(state: &SharedState, user_id: &str) {
     for (session_id, tx) in sessions {
         let _ = tx.send(axum::extract::ws::Message::Text(
             json!({ "op": 0, "d": { "error": "Account deleted." } })
-                .to_string()
-                .into(),
+                .to_string(),
         ));
         let _ = tx.send(axum::extract::ws::Message::Close(None));
         crate::websocket::disconnect_player(state, &session_id).await;
@@ -210,8 +209,7 @@ async fn broadcast_badge_update(state: &SharedState, user: &PublicUser) {
                     "badges": user.badges
                 }
             })
-            .to_string()
-            .into(),
+            .to_string(),
         ));
     }
 
@@ -239,8 +237,7 @@ async fn broadcast_badge_update(state: &SharedState, user: &PublicUser) {
                         "players": players
                     }
                 })
-                .to_string()
-                .into(),
+                .to_string(),
             ));
         }
     }

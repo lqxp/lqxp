@@ -187,7 +187,7 @@ pub async fn change_username(
         };
 
         for tx in room_txs {
-            let _ = tx.send(axum::extract::ws::Message::Text(payload.to_string().into()));
+            let _ = tx.send(axum::extract::ws::Message::Text(payload.to_string()));
         }
     }
 

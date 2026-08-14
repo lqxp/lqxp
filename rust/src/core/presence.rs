@@ -43,7 +43,7 @@ impl AppState {
         })
         .to_string();
         for tx in recipients {
-            let _ = tx.send(Message::Text(payload.clone().into()));
+            let _ = tx.send(Message::Text(payload.clone()));
         }
     }
 }
