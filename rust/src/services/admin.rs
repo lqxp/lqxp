@@ -110,6 +110,10 @@ pub async fn set_user_disabled(
         .accounts
         .set_user_disabled(target_user_id, disabled)
         .await?;
+    if disabled {
+        let _ = state.accounts.invalidate_user_sessions(target_user_id).await;
+        state.evict_user(target_user_id, "account_disabled").await;
+    }
     Ok(json!({ "ok": true }))
 }
 
@@ -127,7 +131,8 @@ pub async fn set_user_banned(
     }
     state.accounts.set_user_banned(target_user_id, banned).await?;
     if banned {
-        state.evict_banned_user(target_user_id).await;
+        let _ = state.accounts.invalidate_user_sessions(target_user_id).await;
+        state.evict_user(target_user_id, "account_banned").await;
     }
     Ok(json!({ "ok": true }))
 }

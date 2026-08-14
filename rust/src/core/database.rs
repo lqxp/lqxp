@@ -775,18 +775,15 @@ impl AccountDatabase {
         username: &str,
     ) -> ApiResult<PublicUser> {
         let username = validate_username(username)?;
-        if let Some(existing) = self.user_by_username(&username).await? {
-            if existing.id != user_id {
-                return Err(ApiError::bad_request("Username is already taken."));
-            }
-        }
         let mut user = self
             .user_by_id(user_id)
             .await?
             .ok_or_else(|| ApiError::bad_request("Account not found."))?;
+
         if user.username == username {
             return Ok(self.public_user(user));
         }
+
         let now = now_ms();
         let window_start = now.saturating_sub(7 * 24 * 60 * 60 * 1000);
         user.username_changes.retain(|stamp| *stamp >= window_start);
@@ -795,6 +792,14 @@ impl AccountDatabase {
                 "Username can only be changed once per week.",
             ));
         }
+
+        if let Some(existing) = self.user_by_username(&username).await? {
+            if existing.id != user_id {
+                let _ = verify_secret_constant_time("dummy_check_prevent_timing", None);
+                return Err(ApiError::bad_request("Username is not available."));
+            }
+        }
+
         user.username_changes.push(now);
         let changes_json = serde_json::to_string(&user.username_changes)
             .map_err(|err| ApiError::internal("Username changes encoding", err))?;

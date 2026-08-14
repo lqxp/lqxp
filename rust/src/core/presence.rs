@@ -27,23 +27,25 @@ pub struct AppState {
 pub type SharedState = Arc<AppState>;
 
 impl AppState {
-    pub async fn evict_banned_user(&self, user_id: &str) {
-        let recipients = {
+    pub async fn evict_user(self: &Arc<Self>, user_id: &str, reason: &str) {
+        let sessions: Vec<(String, mpsc::UnboundedSender<Message>)> = {
             let players = self.players.read().await;
             players
                 .values()
                 .filter(|player| player.user_id == user_id)
-                .map(|player| player.tx.clone())
-                .collect::<Vec<_>>()
+                .map(|player| (player.id.clone(), player.tx.clone()))
+                .collect()
         };
 
         let payload = json!({
             "op": 999,
-            "d": { "reason": "account_banned" }
+            "d": { "reason": reason }
         })
         .to_string();
-        for tx in recipients {
+        for (session_id, tx) in sessions {
             let _ = tx.send(Message::Text(payload.clone()));
+            let _ = tx.send(Message::Close(None));
+            crate::websocket::disconnect_player(self, &session_id).await;
         }
     }
 }

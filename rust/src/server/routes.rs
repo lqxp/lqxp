@@ -351,6 +351,13 @@ async fn auth_username_handler(
     Json(body): Json<UsernameRequest>,
 ) -> ApiResult<impl IntoResponse> {
     let user = authenticated_user(&state, &headers).await?;
+    let rate_key = format!("username_change:user:{}", user.id);
+    if crate::core::security::rate_limit_hit(&state, rate_key, 3, 10 * 60 * 1000).await {
+        return Err(ApiError::too_many_requests(
+            "Too many username change requests. Please wait a few minutes.",
+        ));
+    }
+
     auth::change_username(&state, &user, &body.username)
         .await
         .map(Json)
@@ -445,11 +452,37 @@ async fn admin_user_badges_handler(
         .map(Json)
 }
 
+struct CachedRelease {
+    expires_at: std::time::Instant,
+    status: StatusCode,
+    body: axum::body::Bytes,
+}
+
+static RELEASE_CACHE: tokio::sync::Mutex<Option<CachedRelease>> = tokio::sync::Mutex::const_new(None);
+static RELEASE_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
 async fn latest_release_handler() -> Response {
-    let client = reqwest::Client::builder()
-        .user_agent("QxProtocol-ReleaseProxy/0.1 (+https://github.com/lqxp)")
-        .build()
-        .expect("failed to build reqwest client");
+    let now = std::time::Instant::now();
+    {
+        let cache = RELEASE_CACHE.lock().await;
+        if let Some(cached) = cache.as_ref() {
+            if cached.expires_at > now {
+                return Response::builder()
+                    .status(cached.status)
+                    .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+                    .body(axum::body::Body::from(cached.body.clone()))
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            }
+        }
+    }
+
+    let client = RELEASE_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent("QxProtocol-ReleaseProxy/0.1 (+https://github.com/lqxp)")
+            .timeout(std::time::Duration::from_secs(6))
+            .build()
+            .expect("failed to build reqwest client")
+    });
 
     let response = match client
         .get("https://api.github.com/repos/lqxp/app/releases/latest")
@@ -466,6 +499,15 @@ async fn latest_release_handler() -> Response {
         Ok(body) => body,
         Err(_) => return ApiError::new(StatusCode::BAD_GATEWAY, "Failed to read release response.").into_response(),
     };
+
+    if status.is_success() {
+        let mut cache = RELEASE_CACHE.lock().await;
+        *cache = Some(CachedRelease {
+            expires_at: now + std::time::Duration::from_secs(15 * 60),
+            status,
+            body: body.clone(),
+        });
+    }
 
     Response::builder()
         .status(status)

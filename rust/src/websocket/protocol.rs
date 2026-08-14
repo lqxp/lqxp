@@ -23,6 +23,8 @@ use crate::{
 };
 
 const MAX_ROOM_MESSAGES: usize = 150;
+const MAX_ROOMS_PER_PLAYER: usize = 100;
+const MAX_MUTED_USERS_PER_PLAYER: usize = 200;
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_B64_LEN: usize = MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 + 4;
 const MAX_FILENAME_LEN: usize = 128;
@@ -276,6 +278,8 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
         if let Some(player) = players.get_mut(session_id) {
             if player.username.is_empty() {
                 Err("You need to be identified before")
+            } else if !player.rooms.contains(game_id) && player.rooms.len() >= MAX_ROOMS_PER_PLAYER {
+                Err("Maximum room limit reached (100 rooms max)")
             } else {
                 let already_in = !player.rooms.insert(game_id.to_owned());
                 Ok((already_in, player.username.clone()))
@@ -486,6 +490,10 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
 }
 
 async fn update_client_settings(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("settings:session:{}", session_id), 10, 10_000).await {
+        return respond_error(state, session_id, 8, "Settings update rate limit exceeded", req_id).await;
+    }
     let delete_messages_on_leave = d
         .get("deleteMessagesOnLeave")
         .and_then(Value::as_bool)
@@ -752,18 +760,22 @@ pub async fn delete_user_messages_in_room_and_broadcast(
 }
 
 async fn report_kill(state: &SharedState, session_id: &str, d: Value) -> bool {
-    let killer = d.get("killer").and_then(Value::as_str);
-    let killed = d.get("killed").and_then(Value::as_str);
-    if killer.is_none() || killed.is_none() {
-        return respond_error(state, session_id, 5, "Malformed request", request_id(&d)).await;
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("report_kill:session:{}", session_id), 10, 10_000).await {
+        return respond_error(state, session_id, 5, "Kill report rate limit exceeded", req_id).await;
+    }
+    let killer = d.get("killer").and_then(Value::as_str).map(|s| s.trim().chars().take(64).collect::<String>());
+    let killed = d.get("killed").and_then(Value::as_str).map(|s| s.trim().chars().take(64).collect::<String>());
+    if killer.as_deref().unwrap_or("").is_empty() || killed.as_deref().unwrap_or("").is_empty() {
+        return respond_error(state, session_id, 5, "Malformed request", req_id).await;
     }
 
     let Some(game_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
-        return respond_error(state, session_id, 5, "Missing gameId", request_id(&d)).await;
+        return respond_error(state, session_id, 5, "Missing gameId", req_id).await;
     };
 
     if game_id.is_empty() {
-        return respond_error(state, session_id, 5, "Missing gameId", request_id(&d)).await;
+        return respond_error(state, session_id, 5, "Missing gameId", req_id).await;
     }
 
     let is_member = {
@@ -780,7 +792,7 @@ async fn report_kill(state: &SharedState, session_id: &str, d: Value) -> bool {
             session_id,
             5,
             "Not a member of this room",
-            request_id(&d),
+            req_id,
         )
         .await;
     }
@@ -1019,15 +1031,19 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
 }
 
 async fn send_room_history(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("room_history:session:{}", session_id), 10, 10_000).await {
+        return respond_error(state, session_id, 18, "History request rate limit exceeded", req_id).await;
+    }
     let requested_room = d.get("gameId").and_then(Value::as_str);
     let room_id = match resolve_room_for_session(state, session_id, requested_room).await {
         Ok(room_id) => room_id,
         Err(message) => {
-            return respond_error(state, session_id, 18, &message, request_id(&d)).await
+            return respond_error(state, session_id, 18, &message, req_id).await
         }
     };
 
-    dispatch_room_history(state, session_id, &room_id, request_id(&d)).await;
+    dispatch_room_history(state, session_id, &room_id, req_id).await;
     false
 }
 
@@ -1053,7 +1069,7 @@ async fn request_link_preview(state: &SharedState, session_id: &str, d: Value) -
         return respond_error(state, session_id, 28, "Invalid url", request_id(&d)).await;
     };
 
-    {
+    let user_id = {
         let players = state.players.read().await;
         let Some(player) = players.get(session_id) else {
             return respond_error(
@@ -1085,6 +1101,17 @@ async fn request_link_preview(state: &SharedState, session_id: &str, d: Value) -
             )
             .await;
         }
+        player.user_id.clone()
+    };
+
+    let rate_key = if user_id.is_empty() {
+        format!("link_preview:session:{}", session_id)
+    } else {
+        format!("link_preview:user:{}", user_id)
+    };
+
+    if rate_limit_hit(state.as_ref(), rate_key, 10, 30_000).await {
+        return respond_error(state, session_id, 28, "Rate limit exceeded", request_id(&d)).await;
     }
 
     let requested_edited_at = {
@@ -1193,7 +1220,7 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
         return respond_error(state, session_id, 19, "Invalid reaction", request_id(&d)).await;
     };
 
-    let username = {
+    let (username, user_rooms) = {
         let players = state.players.read().await;
         if let Some(player) = players.get(session_id) {
             if player.username.is_empty() {
@@ -1206,7 +1233,7 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
                 )
                 .await;
             }
-            player.username.clone()
+            (player.username.clone(), player.rooms.clone())
         } else {
             return respond_error(
                 state,
@@ -1230,6 +1257,17 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
                     .await
             }
         };
+
+    if !user_rooms.contains(&room_id) {
+        return respond_error(
+            state,
+            session_id,
+            19,
+            "Not a member of this room",
+            request_id(&d),
+        )
+        .await;
+    }
 
     broadcast_to_room(
         state,
@@ -1580,6 +1618,10 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
 }
 
 async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("voice_chat:session:{}", session_id), 10, 5_000).await {
+        return respond_error(state, session_id, 98, "Voice chat rate limit exceeded", req_id).await;
+    }
     let is_voice_chat = d
         .get("isVoiceChat")
         .and_then(Value::as_bool)
@@ -1597,7 +1639,7 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
             session_id,
             98,
             "Calls are disabled by the server",
-            request_id(&d),
+            req_id,
         )
         .await;
     }
@@ -1645,7 +1687,7 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
 
     let (username, status, client_id, platform, rooms, media_json) = match voice_result {
         Ok(values) => values,
-        Err(message) => return respond_error(state, session_id, 98, message, request_id(&d)).await,
+        Err(message) => return respond_error(state, session_id, 98, message, req_id).await,
     };
 
     for game_id in &rooms {
@@ -1671,13 +1713,17 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
     respond_to_sender(
         state,
         session_id,
-        with_request_id(json!({ "op": 98, "d": { "ok": true } }), request_id(&d)),
+        with_request_id(json!({ "op": 98, "d": { "ok": true } }), req_id),
     )
     .await;
     false
 }
 
 async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("call_media:session:{}", session_id), 10, 5_000).await {
+        return respond_error(state, session_id, 110, "Media state rate limit exceeded", req_id).await;
+    }
     let is_voice_chat = d
         .get("isVoiceChat")
         .and_then(Value::as_bool)
@@ -1695,7 +1741,7 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
             session_id,
             110,
             "Calls are disabled by the server",
-            request_id(&d),
+            req_id,
         )
         .await;
     }
@@ -1751,7 +1797,7 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
     let (username, status, client_id, platform, rooms, media_json) = match update_result {
         Ok(values) => values,
         Err(message) => {
-            return respond_error(state, session_id, 110, message, request_id(&d)).await
+            return respond_error(state, session_id, 110, message, req_id).await
         }
     };
 
@@ -1778,7 +1824,7 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
     respond_to_sender(
         state,
         session_id,
-        with_request_id(json!({ "op": 110, "d": { "ok": true } }), request_id(&d)),
+        with_request_id(json!({ "op": 110, "d": { "ok": true } }), req_id),
     )
     .await;
 
@@ -1786,6 +1832,10 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
 }
 
 async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("call_signal:session:{}", session_id), 40, 3_000).await {
+        return respond_error(state, session_id, 111, "Signaling rate limit exceeded", req_id).await;
+    }
     if !state
         .accounts
         .feature_flags()
@@ -1798,19 +1848,19 @@ async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> b
             session_id,
             111,
             "Calls are disabled by the server",
-            request_id(&d),
+            req_id,
         )
         .await;
     }
     let Some(game_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
-        return respond_error(state, session_id, 111, "Missing gameId", request_id(&d)).await;
+        return respond_error(state, session_id, 111, "Missing gameId", req_id).await;
     };
     if let Err(message) = validate_room_id(game_id) {
-        return respond_error(state, session_id, 111, message, request_id(&d)).await;
+        return respond_error(state, session_id, 111, message, req_id).await;
     }
 
     let Some(to_user) = d.get("to").and_then(Value::as_str).map(str::trim) else {
-        return respond_error(state, session_id, 111, "Missing target", request_id(&d)).await;
+        return respond_error(state, session_id, 111, "Missing target", req_id).await;
     };
     let to_client_id = sanitize_client_id(d.get("toClientId").and_then(Value::as_str));
     let signal_type = d
@@ -1824,7 +1874,7 @@ async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> b
             session_id,
             111,
             "Invalid signal type",
-            request_id(&d),
+            req_id,
         )
         .await;
     }
@@ -1899,19 +1949,35 @@ async fn update_mute_state(state: &SharedState, session_id: &str, d: Value) -> b
         return respond_error(state, session_id, 100, "Malformed request", request_id(&d)).await;
     };
 
-    let did_update = {
+    let (did_update, too_many) = {
         let mut players = state.players.write().await;
         if let Some(player) = players.get_mut(session_id) {
             if is_muted {
-                player.muted_users.insert(username.to_owned());
+                if player.muted_users.len() >= MAX_MUTED_USERS_PER_PLAYER && !player.muted_users.contains(username) {
+                    (false, true)
+                } else {
+                    player.muted_users.insert(username.to_owned());
+                    (true, false)
+                }
             } else {
                 player.muted_users.remove(username);
+                (true, false)
             }
-            true
         } else {
-            false
+            (false, false)
         }
     };
+
+    if too_many {
+        return respond_error(
+            state,
+            session_id,
+            100,
+            "Too many muted users (200 max)",
+            request_id(&d),
+        )
+        .await;
+    }
 
     if !did_update {
         return respond_error(
@@ -2025,6 +2091,9 @@ async fn admin_broadcast(state: &SharedState, session_id: &str, d: Value) -> boo
 
 async fn update_typing_state(state: &SharedState, session_id: &str, d: Value) -> bool {
     let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("typing:session:{}", session_id), 10, 5_000).await {
+        return false;
+    }
     let room_id =
         match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
             .await
@@ -2072,6 +2141,19 @@ async fn update_typing_state(state: &SharedState, session_id: &str, d: Value) ->
 
 async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bool {
     let req_id = request_id(&d);
+    let user_id = {
+        let players = state.players.read().await;
+        players.get(session_id).map(|p| p.user_id.clone()).unwrap_or_default()
+    };
+    let rate_key = if user_id.is_empty() {
+        format!("room_icon:session:{}", session_id)
+    } else {
+        format!("room_icon:user:{}", user_id)
+    };
+    if rate_limit_hit(state.as_ref(), rate_key, 3, 60_000).await {
+        return respond_error(state, session_id, 32, "Rate limit exceeded. Please wait a minute.", req_id).await;
+    }
+
     let room_id =
         match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
             .await
@@ -2158,14 +2240,17 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
     let stored = match store_uploaded_bytes(state.as_ref(), extension, &decoded, mime_type).await {
         Ok(stored) => stored,
         Err(_) => {
-            return respond_error(state, session_id, 32, "Failed to store room icon", req_id).await
+            return respond_error(state, session_id, 32, "Failed to save icon", req_id).await;
         }
     };
+
     let icon = RoomIcon { file: stored };
+
     if let Err(err) = state.database.set_room_icon(&room_id, &icon).await {
         error!("Failed to persist room icon for {}: {}", room_id, err);
-        return respond_error(state, session_id, 32, "Failed to persist room icon", req_id).await;
+        return respond_error(state, session_id, 32, "Failed to persist icon", req_id).await;
     }
+
     if let Err(err) = sync_room_record(state, &room_id).await {
         error!("Failed to sync room {} after icon upload: {}", room_id, err);
     }
@@ -2205,6 +2290,18 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
 
 async fn update_room_title(state: &SharedState, session_id: &str, d: Value) -> bool {
     let req_id = request_id(&d);
+    let user_id = {
+        let players = state.players.read().await;
+        players.get(session_id).map(|p| p.user_id.clone()).unwrap_or_default()
+    };
+    let rate_key = if user_id.is_empty() {
+        format!("room_title:session:{}", session_id)
+    } else {
+        format!("room_title:user:{}", user_id)
+    };
+    if rate_limit_hit(state.as_ref(), rate_key, 5, 30_000).await {
+        return respond_error(state, session_id, 33, "Rate limit exceeded. Please wait.", req_id).await;
+    }
     let room_id =
         match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
             .await
@@ -2274,10 +2371,14 @@ async fn update_room_title(state: &SharedState, session_id: &str, d: Value) -> b
 }
 
 async fn stats_query(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("stats_query:session:{}", session_id), 10, 5_000).await {
+        return respond_error(state, session_id, 105, "Stats query rate limit exceeded", req_id).await;
+    }
     let game_id = match d.get("gameId").and_then(Value::as_str) {
         Some(game_id) => match resolve_room_for_session(state, session_id, Some(game_id)).await {
             Ok(room_id) => Some(room_id),
-            Err(message) => return respond_error(state, session_id, 105, &message, request_id(&d)).await,
+            Err(message) => return respond_error(state, session_id, 105, &message, req_id).await,
         },
         None => {
             let players = state.players.read().await;
@@ -2327,20 +2428,24 @@ async fn stats_query(state: &SharedState, session_id: &str, d: Value) -> bool {
 async fn request_public_profiles(state: &SharedState, session_id: &str, d: Value) -> bool {
     let req_id = request_id(&d);
 
-    let rate_key = format!("public-profile:{}", session_id);
-    if rate_limit_hit(state.as_ref(), rate_key, PUBLIC_PROFILE_RATE_LIMIT_MAX, PUBLIC_PROFILE_RATE_LIMIT_WINDOW_MS).await {
-        return respond_error(state, session_id, 35, "Rate limit exceeded", req_id).await;
-    }
-
-    let authenticated = {
+    let user_id_caller = {
         let players = state.players.read().await;
         players
             .get(session_id)
-            .map(|player| !player.username.trim().is_empty())
-            .unwrap_or(false)
+            .filter(|player| !player.user_id.trim().is_empty())
+            .map(|player| player.user_id.clone())
     };
-    if !authenticated {
-        return respond_error(state, session_id, 35, "You need to be identified before", req_id).await;
+
+    let user_id_caller = match user_id_caller {
+        Some(id) => id,
+        None => {
+            return respond_error(state, session_id, 35, "You need to be identified before", req_id).await;
+        }
+    };
+
+    let rate_key = format!("public-profile:user:{}", user_id_caller);
+    if rate_limit_hit(state.as_ref(), rate_key, PUBLIC_PROFILE_RATE_LIMIT_MAX, PUBLIC_PROFILE_RATE_LIMIT_WINDOW_MS).await {
+        return respond_error(state, session_id, 35, "Rate limit exceeded", req_id).await;
     }
 
     let mut lookups = Vec::new();
