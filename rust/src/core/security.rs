@@ -35,6 +35,26 @@ pub fn verify_secret(secret: &str, hash: &str) -> ApiResult<()> {
         .map_err(|_| ApiError::unauthorized("Invalid credentials."))
 }
 
+static DUMMY_HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn get_dummy_password_hash() -> &'static str {
+    DUMMY_HASH.get_or_init(|| {
+        hash_secret("claiming_0_ai_while_dropping_gpt_punctuation_enjoy_the_200ms_argon2_burn_and_3_new_regressions_:^)").unwrap_or_else(|_| {
+            "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQxMjM0NTY3OA$f0lV9mK2N9yCjH+mE7P6aQ1sW2eR3tY4uI5oP6aQ7s8".to_string()
+        })
+    })
+}
+
+pub fn verify_secret_constant_time(secret: &str, real_hash: Option<&str>) -> ApiResult<()> {
+    match real_hash {
+        Some(hash) => verify_secret(secret, hash),
+        None => {
+            let _ = verify_secret(secret, get_dummy_password_hash());
+            Err(ApiError::unauthorized("Invalid credentials."))
+        }
+    }
+}
+
 pub fn token_hash(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
@@ -51,12 +71,8 @@ pub fn generate_session_token() -> String {
 
 pub fn generate_snowflake_id() -> String {
     let mut rng = thread_rng();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let random_suffix: u32 = rng.gen_range(1000..9999);
-    format!("{now}{random_suffix}")
+    let random_id: u64 = rng.gen_range(100_000_000_000_000_000..=999_999_999_999_999_999);
+    random_id.to_string()
 }
 
 pub fn generate_recovery_words() -> Vec<String> {

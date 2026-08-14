@@ -15,7 +15,7 @@ use crate::core::{
     security::{
         generate_recovery_words, generate_session_token, generate_snowflake_id, hash_secret,
         normalize_recovery_phrase, normalize_username, token_hash, validate_password,
-        validate_username, verify_secret,
+        validate_username, verify_secret, verify_secret_constant_time,
     },
 };
 
@@ -388,17 +388,25 @@ impl AccountDatabase {
         password: &str,
     ) -> ApiResult<(PublicUser, String)> {
         let username = normalize_username(username);
-        let user = self
-            .user_by_username(&username)
-            .await?
-            .ok_or_else(|| ApiError::unauthorized("Invalid username or password."))?;
-        if user.banned {
-            return Err(ApiError::forbidden("Account is banned."));
-        }
-        if user.disabled {
-            return Err(ApiError::forbidden("Account is disabled."));
-        }
-        verify_secret(password, &user.password_hash)?;
+        let user_opt = self.user_by_username(&username).await?;
+
+        let user = match user_opt {
+            Some(user) => {
+                verify_secret(password, &user.password_hash)?;
+                if user.banned {
+                    return Err(ApiError::forbidden("Account is banned."));
+                }
+                if user.disabled {
+                    return Err(ApiError::forbidden("Account is disabled."));
+                }
+                user
+            }
+            None => {
+                let _ = verify_secret_constant_time(password, None);
+                return Err(ApiError::unauthorized("Invalid credentials."));
+            }
+        };
+
         let token = self.create_session(&user.id).await?;
         Ok((self.public_user(user), token))
     }
@@ -411,27 +419,56 @@ impl AccountDatabase {
     ) -> ApiResult<(PublicUser, String)> {
         validate_password(new_password)?;
         let username = normalize_username(username);
-        let user = self
-            .user_by_username(&username)
-            .await?
-            .ok_or_else(|| ApiError::bad_request("Invalid recovery credentials."))?;
-        if user.banned {
-            return Err(ApiError::forbidden("Account is banned."));
-        }
-        verify_secret(
-            &normalize_recovery_phrase(recovery_words),
-            &user.recovery_hash,
-        )?;
+        let user_opt = self.user_by_username(&username).await?;
+
+        let user = match user_opt {
+            Some(user) => {
+                verify_secret(
+                    &normalize_recovery_phrase(recovery_words),
+                    &user.recovery_hash,
+                )?;
+                if user.banned {
+                    return Err(ApiError::forbidden("Account is banned."));
+                }
+                user
+            }
+            None => {
+                let _ = verify_secret_constant_time(&normalize_recovery_phrase(recovery_words), None);
+                return Err(ApiError::bad_request("Invalid recovery credentials."));
+            }
+        };
+
         let password_hash = hash_secret(new_password)?;
         let now = now_ms();
         self.update_password_hash(&user.id, &password_hash, now)
             .await?;
+        self.invalidate_user_sessions(&user.id).await?;
         let token = self.create_session(&user.id).await?;
         let updated = self
             .user_by_id(&user.id)
             .await?
             .ok_or_else(|| ApiError::bad_request("Account not found."))?;
         Ok((self.public_user(updated), token))
+    }
+
+    pub async fn invalidate_user_sessions(&self, user_id: &str) -> ApiResult<()> {
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+        }
+        .map_err(|err| ApiError::internal("Session invalidation", err))
     }
 
     pub async fn create_session(&self, user_id: &str) -> ApiResult<String> {

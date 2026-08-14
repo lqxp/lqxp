@@ -1,11 +1,11 @@
 use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
 use regex::Regex;
-use reqwest::{redirect, Client};
+use reqwest::redirect;
 use tokio::sync::Mutex;
 use tracing::debug;
 use url::Url;
@@ -15,11 +15,12 @@ use crate::core::models::LinkPreview;
 const MAX_HTML_BYTES: usize = 256 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(4);
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const NEUTRAL_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
 fn url_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        // Conservative URL matcher — matches http(s)://host[/path...] up to whitespace.
         Regex::new(r#"https?://[^\s<>"'`\\]+"#).unwrap()
     })
 }
@@ -27,7 +28,6 @@ fn url_regex() -> &'static Regex {
 fn og_meta_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        // Match <meta ... property|name="...og:..." content="..."/> in any attribute order.
         Regex::new(r#"(?is)<meta\b[^>]*>"#).unwrap()
     })
 }
@@ -77,7 +77,10 @@ fn is_public_ipv4(ip: &Ipv4Addr) -> bool {
     if o[0] == 198 && (o[1] == 18 || o[1] == 19) {
         return false;
     }
-    // 169.254.x (link-local handled above) but also 0.x is unspecified
+    // cloud metadata 169.254.169.254
+    if o[0] == 169 && o[1] == 254 {
+        return false;
+    }
     true
 }
 
@@ -94,7 +97,7 @@ fn is_public_ipv6(ip: &Ipv6Addr) -> bool {
     if (seg[0] & 0xffc0) == 0xfe80 {
         return false;
     }
-    // IPv4-mapped ::ffff:0:0/96 → check the embedded v4
+    // IPv4-mapped ::ffff:0:0/96
     if seg[0] == 0 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0 && seg[4] == 0 && seg[5] == 0xffff {
         let v4 = Ipv4Addr::new(
             (seg[6] >> 8) as u8,
@@ -107,39 +110,33 @@ fn is_public_ipv6(ip: &Ipv6Addr) -> bool {
     true
 }
 
-fn validate_url(raw: &str) -> Option<Url> {
+fn validate_and_pin_url(raw: &str) -> Option<(Url, SocketAddr)> {
     let parsed = Url::parse(raw).ok()?;
     match parsed.scheme() {
         "http" | "https" => (),
         _ => return None,
     }
     let host = parsed.host_str()?;
-    if host.is_empty() {
-        return None;
-    }
-    if host.eq_ignore_ascii_case("localhost") {
-        return None;
-    }
-    if host.len() > 253 {
+    if host.is_empty() || host.eq_ignore_ascii_case("localhost") || host.len() > 253 {
         return None;
     }
 
-    // Resolve all addresses and require every one to be public. If DNS
-    // resolves to a mix of public/private, reject conservatively.
-    let port = parsed.port_or_known_default().unwrap_or(0);
+    let port = parsed.port_or_known_default().unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
     let target = format!("{}:{}", host, port);
-    let addrs = target.to_socket_addrs().ok()?;
-    let mut any = false;
-    for addr in addrs {
-        any = true;
+    let addrs: Vec<SocketAddr> = target.to_socket_addrs().ok()?.collect();
+    if addrs.is_empty() {
+        return None;
+    }
+
+    // Require all resolved IPs to be public
+    for addr in &addrs {
         if !is_public_ip(&addr.ip()) {
             return None;
         }
     }
-    if !any {
-        return None;
-    }
-    Some(parsed)
+
+    let pinned_addr = addrs[0];
+    Some((parsed, pinned_addr))
 }
 
 struct Cache {
@@ -170,41 +167,13 @@ impl Cache {
     }
 }
 
-static CLIENT: OnceLock<Client> = OnceLock::new();
 static CACHE: OnceLock<Arc<Mutex<Cache>>> = OnceLock::new();
-
-fn client() -> &'static Client {
-    CLIENT.get_or_init(|| {
-        Client::builder()
-            .timeout(TIMEOUT)
-            .connect_timeout(Duration::from_secs(2))
-            .redirect(redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= 3 {
-                    return attempt.stop();
-                }
-                if let Some(next) = attempt.url().host_str() {
-                    if next.eq_ignore_ascii_case("localhost") {
-                        return attempt.stop();
-                    }
-                }
-                // Re-run SSRF validation on the redirect target.
-                match validate_url(attempt.url().as_str()) {
-                    Some(_) => attempt.follow(),
-                    None => attempt.stop(),
-                }
-            }))
-            .user_agent("QxProtocol-LinkPreview/0.1 (+https://github.com/lqxp)")
-            .build()
-            .expect("failed to build reqwest client")
-    })
-}
 
 fn cache() -> &'static Arc<Mutex<Cache>> {
     CACHE.get_or_init(|| Arc::new(Mutex::new(Cache::new())))
 }
 
 fn decode_html_entities(s: &str) -> String {
-    // Minimal decoder — Discord/Twitter titles commonly contain &amp; &quot; &#39; etc.
     s.replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
@@ -216,7 +185,6 @@ fn decode_html_entities(s: &str) -> String {
 }
 
 fn extract_attr(tag: &str, attr: &str) -> Option<String> {
-    // Case-insensitive attribute match: `attr="..."` or `attr='...'`
     let lower = tag.to_ascii_lowercase();
     let needle = format!("{}=", attr);
     let mut start = lower.find(&needle)?;
@@ -299,7 +267,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
 }
 
 pub async fn fetch_preview(raw_url: &str) -> Option<LinkPreview> {
-    let parsed = validate_url(raw_url)?;
+    let (parsed, pinned_addr) = validate_and_pin_url(raw_url)?;
     let cache_key = parsed.to_string();
 
     {
@@ -309,7 +277,27 @@ pub async fn fetch_preview(raw_url: &str) -> Option<LinkPreview> {
         }
     }
 
-    let client = client();
+    let host = parsed.host_str()?.to_owned();
+    let client = match reqwest::Client::builder()
+        .timeout(TIMEOUT)
+        .connect_timeout(Duration::from_secs(2))
+        .resolve(&host, pinned_addr) // pinned dns to prevent dns rebinding
+        .redirect(redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 3 {
+                return attempt.stop();
+            }
+            match validate_and_pin_url(attempt.url().as_str()) {
+                Some(_) => attempt.follow(),
+                None => attempt.stop(),
+            }
+        }))
+        .user_agent(NEUTRAL_USER_AGENT)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+
     let result = async {
         let mut resp = client.get(parsed.as_str()).send().await.ok()?;
         if !resp.status().is_success() {
@@ -327,7 +315,7 @@ pub async fn fetch_preview(raw_url: &str) -> Option<LinkPreview> {
             }
         }
         let final_url = resp.url().clone();
-        if validate_url(final_url.as_str()).is_none() {
+        if validate_and_pin_url(final_url.as_str()).is_none() {
             return None;
         }
 
