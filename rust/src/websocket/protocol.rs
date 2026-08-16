@@ -1210,14 +1210,19 @@ async fn request_link_preview(state: &SharedState, session_id: &str, d: Value) -
 }
 
 async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("reaction:session:{session_id}"), 15, 5_000).await {
+        return respond_error(state, session_id, 19, "Rate limit exceeded", req_id).await;
+    }
+
     let Some(message_id) = d.get("messageId").and_then(Value::as_str).map(str::trim) else {
-        return respond_error(state, session_id, 19, "Missing messageId", request_id(&d)).await;
+        return respond_error(state, session_id, 19, "Missing messageId", req_id).await;
     };
     let Some(raw_emoji) = d.get("reaction").and_then(Value::as_str) else {
-        return respond_error(state, session_id, 19, "Missing reaction", request_id(&d)).await;
+        return respond_error(state, session_id, 19, "Missing reaction", req_id).await;
     };
     let Some(emoji) = sanitize_reaction_emoji(raw_emoji) else {
-        return respond_error(state, session_id, 19, "Invalid reaction", request_id(&d)).await;
+        return respond_error(state, session_id, 19, "Invalid reaction", req_id).await;
     };
 
     let (username, user_rooms) = {
@@ -1229,7 +1234,7 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
                     session_id,
                     19,
                     "You need to be identified before",
-                    request_id(&d),
+                    req_id,
                 )
                 .await;
             }
@@ -1240,7 +1245,7 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
                 session_id,
                 19,
                 "You need to be identified before",
-                request_id(&d),
+                req_id,
             )
             .await;
         }
@@ -1253,7 +1258,7 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
         {
             Some(result) => result,
             None => {
-                return respond_error(state, session_id, 19, "Unknown messageId", request_id(&d))
+                return respond_error(state, session_id, 19, "Unknown messageId", req_id)
                     .await
             }
         };
@@ -1264,7 +1269,7 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
             session_id,
             19,
             "Not a member of this room",
-            request_id(&d),
+            req_id,
         )
         .await;
     }
@@ -1288,7 +1293,7 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
         session_id,
         with_request_id(
             json!({ "op": 19, "d": { "ok": true, "messageId": message_id } }),
-            request_id(&d),
+            req_id,
         ),
     )
     .await;
@@ -1296,11 +1301,16 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
 }
 
 async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("delete_message:session:{session_id}"), 10, 10_000).await {
+        return respond_error(state, session_id, 21, "Rate limit exceeded", req_id).await;
+    }
+
     let Some(message_id) = d.get("messageId").and_then(Value::as_str).map(str::trim) else {
-        return respond_error(state, session_id, 21, "Missing messageId", request_id(&d)).await;
+        return respond_error(state, session_id, 21, "Missing messageId", req_id).await;
     };
     if message_id.is_empty() {
-        return respond_error(state, session_id, 21, "Missing messageId", request_id(&d)).await;
+        return respond_error(state, session_id, 21, "Missing messageId", req_id).await;
     }
 
     let room_hint = d.get("gameId").and_then(Value::as_str).map(str::trim);
@@ -1317,7 +1327,7 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                     session_id,
                     21,
                     "You need to be identified before",
-                    request_id(&d),
+                    req_id,
                 )
                 .await;
             }
@@ -1348,7 +1358,7 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                             session_id,
                             21,
                             "Only the author can delete this message",
-                            request_id(&d),
+                            req_id,
                         )
                         .await;
                     }
@@ -1370,7 +1380,7 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
     let (room_id, already_deleted) = match result {
         Some(v) => v,
         None => {
-            return respond_error(state, session_id, 21, "Unknown messageId", request_id(&d)).await
+            return respond_error(state, session_id, 21, "Unknown messageId", req_id).await
         }
     };
 
@@ -1403,7 +1413,7 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                     "messageId": message_id
                 }
             }),
-            request_id(&d),
+            req_id,
         ),
     )
     .await;
@@ -1411,20 +1421,25 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
 }
 
 async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("edit_message:session:{session_id}"), 10, 10_000).await {
+        return respond_error(state, session_id, 29, "Rate limit exceeded", req_id).await;
+    }
+
     let Some(message_id) = d.get("messageId").and_then(Value::as_str).map(str::trim) else {
-        return respond_error(state, session_id, 29, "Missing messageId", request_id(&d)).await;
+        return respond_error(state, session_id, 29, "Missing messageId", req_id).await;
     };
     if message_id.is_empty() {
-        return respond_error(state, session_id, 29, "Missing messageId", request_id(&d)).await;
+        return respond_error(state, session_id, 29, "Missing messageId", req_id).await;
     }
 
     let encrypted = match parse_encrypted_payload(d.get("encrypted")) {
         Ok(value) => value,
-        Err(message) => return respond_error(state, session_id, 29, message, request_id(&d)).await,
+        Err(message) => return respond_error(state, session_id, 29, message, req_id).await,
     };
 
     let Some(room_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
-        return respond_error(state, session_id, 29, "Missing gameId", request_id(&d)).await;
+        return respond_error(state, session_id, 29, "Missing gameId", req_id).await;
     };
     if encrypted
         .as_ref()

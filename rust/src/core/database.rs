@@ -640,6 +640,53 @@ impl AccountDatabase {
         }
     }
 
+    pub async fn purge_accounts(
+        &self,
+        created_after_ms: Option<u64>,
+        created_before_ms: Option<u64>,
+        min_username_len: Option<usize>,
+        max_username_len: Option<usize>,
+        username_contains: Option<&str>,
+        exclude_admin: bool,
+    ) -> ApiResult<usize> {
+        let users = self.list_users().await?;
+        let mut count = 0usize;
+        for user in users {
+            if exclude_admin && user.admin {
+                continue;
+            }
+            if let Some(after) = created_after_ms {
+                if user.created_at < after {
+                    continue;
+                }
+            }
+            if let Some(before) = created_before_ms {
+                if user.created_at > before {
+                    continue;
+                }
+            }
+            let char_len = user.username.chars().count();
+            if let Some(min_len) = min_username_len {
+                if char_len < min_len {
+                    continue;
+                }
+            }
+            if let Some(max_len) = max_username_len {
+                if char_len > max_len {
+                    continue;
+                }
+            }
+            if let Some(pat) = username_contains {
+                if !pat.is_empty() && !user.username.to_lowercase().contains(&pat.to_lowercase()) {
+                    continue;
+                }
+            }
+            let _ = self.delete_user_account(&user.id).await;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     pub async fn me(&self, token: &str) -> ApiResult<Option<(PublicUser, String)>> {
         let Some(user) = self.authenticate_token(token).await? else {
             return Ok(None);

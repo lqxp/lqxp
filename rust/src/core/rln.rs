@@ -69,14 +69,15 @@ pub fn current_epoch() -> u64 {
     now_ms() / EPOCH_WINDOW_MS
 }
 
+static EPOCH_SLOT_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub const MAX_SLOTS_PER_EPOCH: u32 = 5;
+
 pub fn generate_quota_token() -> EpochQuotaToken {
     let epoch = current_epoch();
-    let mut ticket_bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut ticket_bytes);
-    let ticket = format!("{:x}", u128::from_le_bytes(ticket_bytes));
-
-    let data = format!("{epoch}:{ticket}");
-    let signature = sign_ticket(&data);
+    let slot = EPOCH_SLOT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % MAX_SLOTS_PER_EPOCH;
+    let data = format!("{epoch}:{slot}");
+    let ticket = sign_ticket(&data);
+    let signature = sign_ticket(&format!("{epoch}:{ticket}"));
 
     EpochQuotaToken {
         epoch,
