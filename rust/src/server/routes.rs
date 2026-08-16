@@ -318,7 +318,7 @@ async fn auth_login_handler(
     }
 
     if let (Some(vdf_c), Some(vdf_p)) = (&body.vdf_challenge, &body.vdf_proof) {
-        crate::core::vdf::verify_vdf(vdf_c, vdf_p, Some(&body.username))?;
+        crate::core::vdf::verify_and_consume_vdf(vdf_c, vdf_p, Some(&body.username)).await?;
     }
 
     if let Some(ct) = &body.pqc_ciphertext {

@@ -265,13 +265,17 @@ async fn identify_player(state: &SharedState, session_id: &str, d: Value) -> boo
 }
 
 async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("join:session:{}", session_id), 25, 10_000).await {
+        return respond_error(state, session_id, 3, "Join rate limit exceeded", req_id).await;
+    }
     let Some(game_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
-        return respond_error(state, session_id, 3, "Malformed request", request_id(&d)).await;
+        return respond_error(state, session_id, 3, "Malformed request", req_id).await;
     };
     let silent_join = d.get("silentJoin").and_then(Value::as_bool).unwrap_or(false);
 
     if let Err(message) = validate_room_id(game_id) {
-        return respond_error(state, session_id, 3, message, request_id(&d)).await;
+        return respond_error(state, session_id, 3, message, req_id).await;
     }
 
     let join_result = {
@@ -387,6 +391,9 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
 
 async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
     let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("leave:session:{}", session_id), 25, 10_000).await {
+        return respond_error(state, session_id, 4, "Leave rate limit exceeded", req_id).await;
+    }
 
     let Some(game_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
         return respond_error(state, session_id, 4, "Missing gameId", req_id).await;
@@ -769,7 +776,10 @@ async fn report_kill(state: &SharedState, session_id: &str, d: Value) -> bool {
     }
     let killer = d.get("killer").and_then(Value::as_str).map(|s| s.trim().chars().take(64).collect::<String>());
     let killed = d.get("killed").and_then(Value::as_str).map(|s| s.trim().chars().take(64).collect::<String>());
-    if killer.as_deref().unwrap_or("").is_empty() || killed.as_deref().unwrap_or("").is_empty() {
+    let (Some(killer_str), Some(killed_str)) = (killer, killed) else {
+        return respond_error(state, session_id, 5, "Malformed request", req_id).await;
+    };
+    if killer_str.is_empty() || killed_str.is_empty() {
         return respond_error(state, session_id, 5, "Malformed request", req_id).await;
     }
 
@@ -807,8 +817,8 @@ async fn report_kill(state: &SharedState, session_id: &str, d: Value) -> bool {
             "op": 5,
             "d": {
                 "gameId": game_id,
-                "killer": killer.unwrap(),
-                "killed": killed.unwrap(),
+                "killer": killer_str,
+                "killed": killed_str,
                 "timestamp": now_ms()
             }
         }),
