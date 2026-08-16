@@ -28,18 +28,15 @@ pub struct PlayerStatus {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub enum UserPresenceStatus {
+    #[default]
     Online,
     Invisible,
     #[serde(rename = "dnd")]
     Dnd,
 }
 
-impl Default for UserPresenceStatus {
-    fn default() -> Self {
-        Self::Online
-    }
-}
 
 pub fn status_to_str(status: UserPresenceStatus) -> &'static str {
     match status {

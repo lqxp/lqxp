@@ -110,6 +110,10 @@ pub async fn set_user_disabled(
         .accounts
         .set_user_disabled(target_user_id, disabled)
         .await?;
+    if disabled {
+        let _ = state.accounts.invalidate_user_sessions(target_user_id).await;
+        state.evict_user(target_user_id, "account_disabled").await;
+    }
     Ok(json!({ "ok": true }))
 }
 
@@ -127,7 +131,8 @@ pub async fn set_user_banned(
     }
     state.accounts.set_user_banned(target_user_id, banned).await?;
     if banned {
-        state.evict_banned_user(target_user_id).await;
+        let _ = state.accounts.invalidate_user_sessions(target_user_id).await;
+        state.evict_user(target_user_id, "account_banned").await;
     }
     Ok(json!({ "ok": true }))
 }
@@ -145,6 +150,7 @@ pub async fn delete_user_account(
     }
     state.accounts.delete_user_account(target_user_id).await?;
     disconnect_user_sessions(state, target_user_id).await;
+    state.invalidate_public_profile_cache(Some(target_user_id), None).await;
     Ok(json!({ "ok": true }))
 }
 
@@ -162,7 +168,34 @@ pub async fn set_user_badges(
         .set_user_badges(target_user_id, badges)
         .await?;
     broadcast_badge_update(state, &updated_user).await;
+    state.invalidate_public_profile_cache(Some(target_user_id), Some(&updated_user.username)).await;
     Ok(json!({ "ok": true, "user": updated_user }))
+}
+
+pub async fn purge_accounts(
+    state: &SharedState,
+    admin: &AuthenticatedUser,
+    created_after_ms: Option<u64>,
+    created_before_ms: Option<u64>,
+    min_username_len: Option<usize>,
+    max_username_len: Option<usize>,
+    username_contains: Option<&str>,
+) -> ApiResult<serde_json::Value> {
+    if !admin.admin {
+        return Err(ApiError::forbidden("Admin only."));
+    }
+    let count = state
+        .accounts
+        .purge_accounts(
+            created_after_ms,
+            created_before_ms,
+            min_username_len,
+            max_username_len,
+            username_contains,
+            true,
+        )
+        .await?;
+    Ok(json!({ "ok": true, "purgedCount": count }))
 }
 
 async fn disconnect_user_sessions(state: &SharedState, user_id: &str) {
@@ -178,8 +211,7 @@ async fn disconnect_user_sessions(state: &SharedState, user_id: &str) {
     for (session_id, tx) in sessions {
         let _ = tx.send(axum::extract::ws::Message::Text(
             json!({ "op": 0, "d": { "error": "Account deleted." } })
-                .to_string()
-                .into(),
+                .to_string(),
         ));
         let _ = tx.send(axum::extract::ws::Message::Close(None));
         crate::websocket::disconnect_player(state, &session_id).await;
@@ -210,8 +242,7 @@ async fn broadcast_badge_update(state: &SharedState, user: &PublicUser) {
                     "badges": user.badges
                 }
             })
-            .to_string()
-            .into(),
+            .to_string(),
         ));
     }
 
@@ -239,8 +270,7 @@ async fn broadcast_badge_update(state: &SharedState, user: &PublicUser) {
                         "players": players
                     }
                 })
-                .to_string()
-                .into(),
+                .to_string(),
             ));
         }
     }

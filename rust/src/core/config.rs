@@ -4,6 +4,7 @@ use tokio::fs;
 use tracing::{error, warn};
 
 #[derive(Debug, Clone, Deserialize)]
+#[derive(Default)]
 pub struct Config {
     #[serde(default)]
     pub api: ApiConfig,
@@ -17,17 +18,6 @@ pub struct Config {
     pub security: SecurityConfig,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            api: ApiConfig::default(),
-            network: NetworkConfig::default(),
-            rtc: RtcConfig::default(),
-            database: DatabaseConfig::default(),
-            security: SecurityConfig::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiConfig {

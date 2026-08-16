@@ -59,6 +59,10 @@ fn is_public_ipv4(ip: &Ipv4Addr) -> bool {
         return false;
     }
     let o = ip.octets();
+    // current network 0.0.0.0/8
+    if o[0] == 0 {
+        return false;
+    }
     // private ranges
     if o[0] == 10 {
         return false;
@@ -95,6 +99,10 @@ fn is_public_ipv6(ip: &Ipv6Addr) -> bool {
     }
     // Link-local fe80::/10
     if (seg[0] & 0xffc0) == 0xfe80 {
+        return false;
+    }
+    // Deprecated site-local fec0::/10
+    if (seg[0] & 0xffc0) == 0xfec0 {
         return false;
     }
     // IPv4-mapped ::ffff:0:0/96
@@ -230,7 +238,7 @@ fn parse_og(html: &str, base: &Url) -> Option<LinkPreview> {
                 preview.description = truncate(&content, 500);
             }
             "og:image" | "twitter:image" | "twitter:image:src" if preview.image.is_empty() => {
-                if let Some(resolved) = base.join(&content).ok() {
+                if let Ok(resolved) = base.join(&content) {
                     if matches!(resolved.scheme(), "http" | "https") {
                         preview.image = truncate(resolved.as_str(), 600);
                     }
@@ -315,9 +323,7 @@ pub async fn fetch_preview(raw_url: &str) -> Option<LinkPreview> {
             }
         }
         let final_url = resp.url().clone();
-        if validate_and_pin_url(final_url.as_str()).is_none() {
-            return None;
-        }
+        validate_and_pin_url(final_url.as_str())?;
 
         let mut bytes_read = 0usize;
         let mut buf: Vec<u8> = Vec::with_capacity(16 * 1024);

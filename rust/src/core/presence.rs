@@ -27,30 +27,50 @@ pub struct AppState {
 pub type SharedState = Arc<AppState>;
 
 impl AppState {
-    pub async fn evict_banned_user(&self, user_id: &str) {
-        let recipients = {
+    pub async fn evict_user(self: &Arc<Self>, user_id: &str, reason: &str) {
+        let sessions: Vec<(String, mpsc::UnboundedSender<Message>)> = {
             let players = self.players.read().await;
             players
                 .values()
                 .filter(|player| player.user_id == user_id)
-                .map(|player| player.tx.clone())
-                .collect::<Vec<_>>()
+                .map(|player| (player.id.clone(), player.tx.clone()))
+                .collect()
         };
 
         let payload = json!({
             "op": 999,
-            "d": { "reason": "account_banned" }
+            "d": { "reason": reason }
         })
         .to_string();
-        for tx in recipients {
-            let _ = tx.send(Message::Text(payload.clone().into()));
+        for (session_id, tx) in sessions {
+            let _ = tx.send(Message::Text(payload.clone()));
+            let _ = tx.send(Message::Close(None));
+            crate::websocket::disconnect_player(self, &session_id).await;
         }
+    }
+
+    pub async fn invalidate_public_profile_cache(&self, user_id: Option<&str>, username: Option<&str>) {
+        let mut cache = self.public_profile_cache.lock().await;
+        cache.retain(|key, _| {
+            if let Some(id) = user_id {
+                if key == &format!("id:{}", id.trim()) {
+                    return false;
+                }
+            }
+            if let Some(name) = username {
+                if key == &format!("username:{}", name.trim().to_ascii_lowercase()) {
+                    return false;
+                }
+            }
+            true
+        });
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct RateLimitBucket {
     pub window_start_ms: u64,
+    pub window_ms: u64,
     pub count: u32,
 }
 

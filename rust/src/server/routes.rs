@@ -12,7 +12,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::fs;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -61,6 +61,7 @@ pub fn build_router(state: SharedState) -> Router {
             "/api/admin/users/:user_id/badges",
             post(admin_user_badges_handler),
         )
+        .route("/api/admin/users/purge", post(admin_users_purge_handler))
         .route("/api/release", get(latest_release_handler))
         .route("/ws", get(ws_upgrade_handler))
         .route("/*path", get(public_asset_handler))
@@ -137,7 +138,15 @@ fn allowed_cors_origins(state: &SharedState) -> AllowOrigin {
 
 #[derive(Debug, Deserialize)]
 struct ChallengeQuery {
-    action: Option<String>,
+    target: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChallengeResponse {
+    vdf: crate::core::vdf::VdfChallenge,
+    quota_token: crate::core::rln::EpochQuotaToken,
+    pqc_key: crate::core::pqc::PqcPublicKey,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,9 +154,11 @@ struct ChallengeQuery {
 struct AuthRegisterRequest {
     username: String,
     password: String,
-    pow_challenge: Option<String>,
-    pow_signature: Option<String>,
-    pow_nonce: Option<u64>,
+    vdf_challenge: Option<crate::core::vdf::VdfChallenge>,
+    vdf_proof: Option<crate::core::vdf::VdfProof>,
+    quota_token: Option<crate::core::rln::EpochQuotaToken>,
+    nullifier: Option<String>,
+    pqc_ciphertext: Option<crate::core::pqc::PqcCiphertext>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,9 +166,11 @@ struct AuthRegisterRequest {
 struct AuthLoginRequest {
     username: String,
     password: String,
-    pow_challenge: Option<String>,
-    pow_signature: Option<String>,
-    pow_nonce: Option<u64>,
+    vdf_challenge: Option<crate::core::vdf::VdfChallenge>,
+    vdf_proof: Option<crate::core::vdf::VdfProof>,
+    quota_token: Option<crate::core::rln::EpochQuotaToken>,
+    nullifier: Option<String>,
+    pqc_ciphertext: Option<crate::core::pqc::PqcCiphertext>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,27 +212,82 @@ struct BadgesRequest {
     badges: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PurgeUsersRequest {
+    created_after_ms: Option<u64>,
+    created_before_ms: Option<u64>,
+    min_username_len: Option<usize>,
+    max_username_len: Option<usize>,
+    username_contains: Option<String>,
+}
+
 async fn auth_challenge_handler(
+    State(state): State<SharedState>,
     Query(query): Query<ChallengeQuery>,
 ) -> ApiResult<impl IntoResponse> {
-    let action = query.action.as_deref().unwrap_or("register");
-    let challenge = crate::core::pow::generate_challenge(action, None);
-    Ok(Json(challenge))
+    if crate::core::security::rate_limit_hit(&state, "auth:challenge:global".to_string(), 60, 10_000).await {
+        return Err(ApiError::too_many_requests(
+            "Security challenge rate limit exceeded. Please wait a few seconds.",
+        ));
+    }
+
+    let target = query.target.as_deref();
+    let vdf = crate::core::vdf::generate_vdf_challenge(target, None);
+    let quota_token = crate::core::rln::generate_quota_token();
+    let pqc_key = crate::core::pqc::issue_pqc_challenge().await;
+
+    Ok(Json(ChallengeResponse {
+        vdf,
+        quota_token,
+        pqc_key,
+    }))
 }
 
 async fn auth_register_handler(
     State(state): State<SharedState>,
     Json(body): Json<AuthRegisterRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    let (challenge, signature, nonce) = match (body.pow_challenge, body.pow_signature, body.pow_nonce) {
-        (Some(c), Some(s), Some(n)) => (c, s, n),
+    let clean_user = crate::core::security::normalize_username(&body.username);
+
+    // Global registration rate limit: prevent automated mass account creation burst
+    if crate::core::security::rate_limit_hit(&state, "register:global".to_string(), 10, 15_000).await {
+        return Err(ApiError::too_many_requests(
+            "Server registration capacity reached. Please wait 15 seconds.",
+        ));
+    }
+
+    // Per-username rate limit
+    let rate_key = format!("register:user:{}", clean_user);
+    if crate::core::security::rate_limit_hit(&state, rate_key, 3, 30_000).await {
+        return Err(ApiError::too_many_requests(
+            "Too many registration attempts for this username. Please wait 30 seconds.",
+        ));
+    }
+
+    // 1. Mandatory RLN (Rate Limiting Nullifier) verification and single-use consumption
+    let quota_token = body.quota_token.as_ref().ok_or_else(|| {
+        ApiError::bad_request("Missing anonymous quota token. Please request /api/auth/challenge first.")
+    })?;
+    let nullifier = body.nullifier.as_deref().ok_or_else(|| {
+        ApiError::bad_request("Missing rate-limiting nullifier.")
+    })?;
+    crate::core::rln::verify_and_consume_nullifier(quota_token, nullifier, "register").await?;
+
+    // 2. Mandatory VDF proof verification and single-use challenge consumption (anti-replay)
+    let (vdf_c, vdf_p) = match (&body.vdf_challenge, &body.vdf_proof) {
+        (Some(c), Some(p)) => (c, p),
         _ => {
             return Err(ApiError::bad_request(
-                "Missing proof-of-work challenge. Please request /api/auth/challenge first.",
+                "Missing Verifiable Delay Function (VDF) proof. Please request /api/auth/challenge first.",
             ))
         }
     };
-    crate::core::pow::verify_pow(&challenge, &signature, nonce, "register").await?;
+    crate::core::vdf::verify_and_consume_vdf(vdf_c, vdf_p, Some(&body.username)).await?;
+
+    let pqc_ct = body.pqc_ciphertext.as_ref().ok_or_else(|| {
+        ApiError::bad_request("Missing Post-Quantum KEM ciphertext. Please request /api/auth/challenge first.")
+    })?;
+    let _pqc_shared_secret = crate::core::pqc::verify_and_decapsulate_pqc(pqc_ct).await?;
 
     auth::register(&state, &body.username, &body.password)
         .await
@@ -230,19 +298,60 @@ async fn auth_login_handler(
     State(state): State<SharedState>,
     Json(body): Json<AuthLoginRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    if let (Some(c), Some(s), Some(n)) = (body.pow_challenge, body.pow_signature, body.pow_nonce) {
-        crate::core::pow::verify_pow(&c, &s, n, "login").await?;
+    let clean_user = crate::core::security::normalize_username(&body.username);
+    let fail_key = format!("login:fail:user:{}", clean_user);
+
+    {
+        let buckets = state.rate_limits.lock().await;
+        if let Some(bucket) = buckets.get(&fail_key) {
+            let now = crate::core::models::now_ms();
+            if now.saturating_sub(bucket.window_start_ms) <= 30_000 && bucket.count >= 5 && body.vdf_proof.is_none() {
+                return Err(ApiError::too_many_requests(
+                    "Too many failed login attempts for this account. Please solve the security challenge to proceed.",
+                ));
+            }
+        }
     }
 
-    auth::login(&state, &body.username, &body.password)
-        .await
-        .map(Json)
+    if let (Some(token), Some(nullifier)) = (&body.quota_token, &body.nullifier) {
+        crate::core::rln::verify_and_consume_nullifier(token, nullifier, "login").await?;
+    }
+
+    if let (Some(vdf_c), Some(vdf_p)) = (&body.vdf_challenge, &body.vdf_proof) {
+        crate::core::vdf::verify_vdf(vdf_c, vdf_p, Some(&body.username))?;
+    }
+
+    if let Some(ct) = &body.pqc_ciphertext {
+        let _pqc_shared_secret = crate::core::pqc::verify_and_decapsulate_pqc(ct).await?;
+    }
+
+    match auth::login(&state, &body.username, &body.password).await {
+        Ok(res) => {
+            // Successful login: reset failure counter for this account
+            let mut buckets = state.rate_limits.lock().await;
+            buckets.remove(&fail_key);
+            Ok(Json(res))
+        }
+        Err(err) => {
+            // Failed login: increment failure counter
+            let _ = crate::core::security::rate_limit_hit(&state, &fail_key, 100, 30_000).await;
+            Err(err)
+        }
+    }
 }
 
 async fn auth_recover_handler(
     State(state): State<SharedState>,
     Json(body): Json<AuthRecoverRequest>,
 ) -> ApiResult<impl IntoResponse> {
+    let clean_user = crate::core::security::normalize_username(&body.username);
+    let rate_key = format!("recover:user:{}", clean_user);
+    if crate::core::security::rate_limit_hit(&state, rate_key, 3, 30_000).await {
+        return Err(ApiError::too_many_requests(
+            "Too many recovery attempts for this account. Please wait 30 seconds.",
+        ));
+    }
+
     auth::recover(
         &state,
         &body.username,
@@ -286,6 +395,13 @@ async fn auth_username_handler(
     Json(body): Json<UsernameRequest>,
 ) -> ApiResult<impl IntoResponse> {
     let user = authenticated_user(&state, &headers).await?;
+    let rate_key = format!("username_change:user:{}", user.id);
+    if crate::core::security::rate_limit_hit(&state, rate_key, 3, 10 * 60 * 1000).await {
+        return Err(ApiError::too_many_requests(
+            "Too many username change requests. Please wait a few minutes.",
+        ));
+    }
+
     auth::change_username(&state, &user, &body.username)
         .await
         .map(Json)
@@ -297,6 +413,12 @@ async fn profile_image_upload_handler(
     multipart: Multipart,
 ) -> ApiResult<impl IntoResponse> {
     let user = authenticated_user(&state, &headers).await?;
+    let rate_key = format!("profile_image:user:{}", user.id);
+    if crate::core::security::rate_limit_hit(&state, rate_key, 5, 60_000).await {
+        return Err(ApiError::too_many_requests(
+            "Too many profile image uploads. Please wait a minute.",
+        ));
+    }
     user::upload_profile_image(&state, &user, multipart)
         .await
         .map(Json)
@@ -309,6 +431,12 @@ async fn room_icon_upload_handler(
     multipart: Multipart,
 ) -> ApiResult<impl IntoResponse> {
     let user = authenticated_user(&state, &headers).await?;
+    let rate_key = format!("room_icon:user:{}", user.id);
+    if crate::core::security::rate_limit_hit(&state, rate_key, 5, 60_000).await {
+        return Err(ApiError::too_many_requests(
+            "Too many room icon uploads. Please wait a minute.",
+        ));
+    }
     room::upload_room_icon(&state, &user, &room_id, multipart)
         .await
         .map(Json)
@@ -380,11 +508,56 @@ async fn admin_user_badges_handler(
         .map(Json)
 }
 
+async fn admin_users_purge_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<PurgeUsersRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let admin = authenticated_user(&state, &headers).await?;
+    admin::purge_accounts(
+        &state,
+        &admin,
+        body.created_after_ms,
+        body.created_before_ms,
+        body.min_username_len,
+        body.max_username_len,
+        body.username_contains.as_deref(),
+    )
+    .await
+    .map(Json)
+}
+
+struct CachedRelease {
+    expires_at: std::time::Instant,
+    status: StatusCode,
+    body: axum::body::Bytes,
+}
+
+static RELEASE_CACHE: tokio::sync::Mutex<Option<CachedRelease>> = tokio::sync::Mutex::const_new(None);
+static RELEASE_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
 async fn latest_release_handler() -> Response {
-    let client = reqwest::Client::builder()
-        .user_agent("QxProtocol-ReleaseProxy/0.1 (+https://github.com/lqxp)")
-        .build()
-        .expect("failed to build reqwest client");
+    let now = std::time::Instant::now();
+    {
+        let cache = RELEASE_CACHE.lock().await;
+        if let Some(cached) = cache.as_ref() {
+            if cached.expires_at > now {
+                return Response::builder()
+                    .status(cached.status)
+                    .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+                    .body(axum::body::Body::from(cached.body.clone()))
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            }
+        }
+    }
+
+    let client = RELEASE_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent("QxProtocol-ReleaseProxy/0.1 (+https://github.com/lqxp)")
+            .timeout(std::time::Duration::from_secs(6))
+            .build()
+            .expect("failed to build reqwest client")
+    });
 
     let response = match client
         .get("https://api.github.com/repos/lqxp/app/releases/latest")
@@ -401,6 +574,15 @@ async fn latest_release_handler() -> Response {
         Ok(body) => body,
         Err(_) => return ApiError::new(StatusCode::BAD_GATEWAY, "Failed to read release response.").into_response(),
     };
+
+    if status.is_success() {
+        let mut cache = RELEASE_CACHE.lock().await;
+        *cache = Some(CachedRelease {
+            expires_at: now + std::time::Duration::from_secs(15 * 60),
+            status,
+            body: body.clone(),
+        });
+    }
 
     Response::builder()
         .status(status)

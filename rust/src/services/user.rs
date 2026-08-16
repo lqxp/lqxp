@@ -95,7 +95,18 @@ pub async fn upload_profile_image(
         (profile, sessions)
     };
 
+    let previous_file_id = match kind {
+        "avatar" => user.profile.avatar.as_ref().map(|img| img.file.id.clone()),
+        "banner" => user.profile.banner.as_ref().map(|img| img.file.id.clone()),
+        _ => None,
+    };
+    if let Some(old_id) = previous_file_id {
+        let old_path = std::path::Path::new(&state.config.network.upload_dir).join(&old_id);
+        let _ = tokio::fs::remove_file(old_path).await;
+    }
+
     state.accounts.update_profile(&user.id, &profile).await?;
+    state.invalidate_public_profile_cache(Some(&user.id), Some(&user.username)).await;
 
     broadcast_profile_update(state, sessions, profile.clone()).await;
 
