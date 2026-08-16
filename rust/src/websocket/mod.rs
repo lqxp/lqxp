@@ -118,6 +118,7 @@ async fn register_connection(
             tx,
             rooms: HashSet::new(),
             is_voice_chat: false,
+            call_room: None,
             call_camera: false,
             call_screen: false,
             client_id: String::new(),

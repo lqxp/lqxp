@@ -536,6 +536,7 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
                     player.is_voice_chat = false;
                     player.call_camera = false;
                     player.call_screen = false;
+                    player.call_room = None;
                 }
             }
             Ok((
@@ -1602,6 +1603,12 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
         .await;
     }
     let media = normalize_call_media(d.get("media"), is_voice_chat);
+    let call_room = d
+        .get("gameId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
     let voice_result = {
         let mut players = state.players.write().await;
         let duplicate_voice_session = if is_voice_chat {
@@ -1621,6 +1628,32 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
                 Err("Invisible users cannot join voice chat")
             } else if duplicate_voice_session {
                 Err("This account is already connected to a call")
+            } else if let Some(room) = call_room.as_deref() {
+                if !player.rooms.contains(room) {
+                    Err("Not a member of this room")
+                } else {
+                    player.is_voice_chat = is_voice_chat;
+                    player.call_camera = media.1;
+                    player.call_screen = media.2;
+                    player.call_room = Some(room.to_owned());
+                    if !is_voice_chat {
+                        player.call_camera = false;
+                        player.call_screen = false;
+                        player.call_room = None;
+                    }
+                    Ok((
+                        player.username.clone(),
+                        player.status,
+                        player.client_id.clone(),
+                        player.platform.clone(),
+                        vec![room.to_owned()],
+                        call_media_json(
+                            player.is_voice_chat,
+                            player.call_camera,
+                            player.call_screen,
+                        ),
+                    ))
+                }
             } else {
                 player.is_voice_chat = is_voice_chat;
                 player.call_camera = media.1;
@@ -1629,13 +1662,18 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
                     player.call_camera = false;
                     player.call_screen = false;
                 }
+                player.call_room = None;
                 Ok((
                     player.username.clone(),
                     player.status,
                     player.client_id.clone(),
                     player.platform.clone(),
                     player.rooms.iter().cloned().collect::<Vec<_>>(),
-                    call_media_json(player.is_voice_chat, player.call_camera, player.call_screen),
+                    call_media_json(
+                        player.is_voice_chat,
+                        player.call_camera,
+                        player.call_screen,
+                    ),
                 ))
             }
         } else {
@@ -1700,6 +1738,12 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
         .await;
     }
     let (audio, camera, screen) = normalize_call_media(d.get("media"), is_voice_chat);
+    let call_room = d
+        .get("gameId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
 
     let update_result = {
         let mut players = state.players.write().await;
@@ -1722,6 +1766,32 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
                 Err("Invisible users cannot join calls")
             } else if duplicate_voice_session {
                 Err("This account is already connected to a call")
+            } else if let Some(room) = call_room.as_deref() {
+                if !player.rooms.contains(room) {
+                    Err("Not a member of this room")
+                } else {
+                    player.is_voice_chat = is_voice_chat;
+                    player.call_camera = camera;
+                    player.call_screen = screen;
+                    player.call_room = Some(room.to_owned());
+                    if !is_voice_chat {
+                        player.call_camera = false;
+                        player.call_screen = false;
+                        player.call_room = None;
+                    }
+                    Ok((
+                        player.username.clone(),
+                        player.status,
+                        player.client_id.clone(),
+                        player.platform.clone(),
+                        vec![room.to_owned()],
+                        call_media_json(
+                            audio && is_voice_chat,
+                            player.call_camera,
+                            player.call_screen,
+                        ),
+                    ))
+                }
             } else {
                 player.is_voice_chat = is_voice_chat;
                 player.call_camera = camera;
@@ -1730,6 +1800,7 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
                     player.call_camera = false;
                     player.call_screen = false;
                 }
+                player.call_room = None;
                 Ok((
                     player.username.clone(),
                     player.status,
@@ -1841,14 +1912,14 @@ async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> b
             )
             .await;
         };
-        if !sender.rooms.contains(game_id) || !sender.is_voice_chat {
+        if !sender.rooms.contains(game_id) || !sender.is_call_in_room(game_id) {
             return respond_error(state, session_id, 111, "Not in this call", request_id(&d)).await;
         }
 
         let target = players.values().find(|player| {
             player.username == to_user
                 && player.rooms.contains(game_id)
-                && player.is_voice_chat
+                && player.is_call_in_room(game_id)
                 && (to_client_id.is_empty() || player.client_id == to_client_id)
         });
         let Some(target) = target else {
@@ -2848,7 +2919,7 @@ pub async fn room_voice_usernames(
         .values()
         .filter(|player| {
             player.rooms.contains(game_id)
-                && player.is_voice_chat
+                && player.is_call_in_room(game_id)
                 && is_visible_to(player, viewer_session_id)
         })
         .map(|player| player.username.clone())
@@ -2865,7 +2936,7 @@ pub async fn room_call_players(
         .values()
         .filter(|player| {
             player.rooms.contains(game_id)
-                && player.is_voice_chat
+                && player.is_call_in_room(game_id)
                 && is_visible_to(player, viewer_session_id)
         })
         .map(|player| {

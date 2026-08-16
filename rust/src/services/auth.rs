@@ -139,13 +139,13 @@ pub async fn change_username(
 
             let voice_players = room_players
                 .iter()
-                .filter(|player| player.is_voice_chat)
+                .filter(|player| player.is_call_in_room(&room_id))
                 .map(|player| player.username.clone())
                 .collect::<Vec<_>>();
 
             let call_players = room_players
                 .iter()
-                .filter(|player| player.is_voice_chat)
+                .filter(|player| player.is_call_in_room(&room_id))
                 .map(|player| {
                     json!({
                         "username": player.username,
