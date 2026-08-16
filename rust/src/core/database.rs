@@ -640,6 +640,53 @@ impl AccountDatabase {
         }
     }
 
+    pub async fn purge_accounts(
+        &self,
+        created_after_ms: Option<u64>,
+        created_before_ms: Option<u64>,
+        min_username_len: Option<usize>,
+        max_username_len: Option<usize>,
+        username_contains: Option<&str>,
+        exclude_admin: bool,
+    ) -> ApiResult<usize> {
+        let users = self.list_users().await?;
+        let mut count = 0usize;
+        for user in users {
+            if exclude_admin && user.admin {
+                continue;
+            }
+            if let Some(after) = created_after_ms {
+                if user.created_at < after {
+                    continue;
+                }
+            }
+            if let Some(before) = created_before_ms {
+                if user.created_at > before {
+                    continue;
+                }
+            }
+            let char_len = user.username.chars().count();
+            if let Some(min_len) = min_username_len {
+                if char_len < min_len {
+                    continue;
+                }
+            }
+            if let Some(max_len) = max_username_len {
+                if char_len > max_len {
+                    continue;
+                }
+            }
+            if let Some(pat) = username_contains {
+                if !pat.is_empty() && !user.username.to_lowercase().contains(&pat.to_lowercase()) {
+                    continue;
+                }
+            }
+            let _ = self.delete_user_account(&user.id).await;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     pub async fn me(&self, token: &str) -> ApiResult<Option<(PublicUser, String)>> {
         let Some(user) = self.authenticate_token(token).await? else {
             return Ok(None);
@@ -775,18 +822,15 @@ impl AccountDatabase {
         username: &str,
     ) -> ApiResult<PublicUser> {
         let username = validate_username(username)?;
-        if let Some(existing) = self.user_by_username(&username).await? {
-            if existing.id != user_id {
-                return Err(ApiError::bad_request("Username is already taken."));
-            }
-        }
         let mut user = self
             .user_by_id(user_id)
             .await?
             .ok_or_else(|| ApiError::bad_request("Account not found."))?;
+
         if user.username == username {
             return Ok(self.public_user(user));
         }
+
         let now = now_ms();
         let window_start = now.saturating_sub(7 * 24 * 60 * 60 * 1000);
         user.username_changes.retain(|stamp| *stamp >= window_start);
@@ -795,6 +839,14 @@ impl AccountDatabase {
                 "Username can only be changed once per week.",
             ));
         }
+
+        if let Some(existing) = self.user_by_username(&username).await? {
+            if existing.id != user_id {
+                let _ = verify_secret_constant_time("dummy_check_prevent_timing", None);
+                return Err(ApiError::bad_request("Username is not available."));
+            }
+        }
+
         user.username_changes.push(now);
         let changes_json = serde_json::to_string(&user.username_changes)
             .map_err(|err| ApiError::internal("Username changes encoding", err))?;

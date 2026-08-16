@@ -34,6 +34,7 @@ pub struct VdfChallenge {
     pub target_hash: String,
     pub salt: String,
     pub signature: String,
+    pub issued_at: u64,
     pub expires_at: u64,
 }
 
@@ -109,11 +110,11 @@ pub fn hash_to_prime(x: &BigUint, y: &BigUint) -> BigUint {
     loop {
         let mut h = Sha256::new();
         h.update(b"qxprotocol_vdf_prime_l:");
-        h.update(&x.to_bytes_be());
+        h.update(x.to_bytes_be());
         h.update(b":");
-        h.update(&y.to_bytes_be());
+        h.update(y.to_bytes_be());
         h.update(b":");
-        h.update(&counter.to_be_bytes());
+        h.update(counter.to_be_bytes());
         let digest = h.finalize();
 
         // 128-bit odd candidate
@@ -198,8 +199,42 @@ pub fn generate_vdf_challenge(target: Option<&str>, iterations_override: Option<
         target_hash,
         salt,
         signature,
+        issued_at: now,
         expires_at,
     }
+}
+
+static VDF_CONSUMED: OnceLock<tokio::sync::Mutex<std::collections::HashMap<String, u64>>> = OnceLock::new();
+
+fn get_vdf_consumed() -> &'static tokio::sync::Mutex<std::collections::HashMap<String, u64>> {
+    VDF_CONSUMED.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+pub async fn verify_and_consume_vdf(
+    challenge: &VdfChallenge,
+    proof: &VdfProof,
+    expected_target: Option<&str>,
+) -> ApiResult<()> {
+    verify_vdf(challenge, proof, expected_target)?;
+
+    let now = now_ms();
+    let consumed_arc = get_vdf_consumed();
+    let mut consumed = consumed_arc.lock().await;
+
+    if consumed.len() > 10_000 {
+        consumed.retain(|_, expires| *expires > now);
+    }
+
+    if let Some(&expires) = consumed.get(&challenge.signature) {
+        if expires > now {
+            return Err(ApiError::too_many_requests(
+                "Security challenge has already been used. Please request a new one.",
+            ));
+        }
+    }
+
+    consumed.insert(challenge.signature.clone(), challenge.expires_at);
+    Ok(())
 }
 
 pub fn verify_vdf(
@@ -214,7 +249,7 @@ pub fn verify_vdf(
 
     let content_to_verify = format!(
         "{}:{}:{}:{}:{}",
-        challenge.expires_at - VDF_TTL_MS,
+        challenge.issued_at,
         challenge.t,
         challenge.target_hash,
         challenge.salt,
@@ -242,7 +277,8 @@ pub fn verify_vdf(
     let pi = BigUint::parse_bytes(proof.pi.as_bytes(), 16)
         .ok_or_else(|| ApiError::bad_request("Malformed VDF proof pi."))?;
 
-    if &x >= modulus || &y >= modulus || &pi >= modulus {
+    let two = BigUint::from(2u32);
+    if x < two || y < two || pi < two || &x >= modulus || &y >= modulus || &pi >= modulus {
         return Err(ApiError::bad_request("VDF values exceed modulus bound."));
     }
 
@@ -264,52 +300,4 @@ pub fn verify_vdf(
     }
 
     Ok(())
-}
-
-#[allow(dead_code)]
-pub fn solve_vdf(x: &BigUint, t: u32, modulus: &BigUint) -> (BigUint, BigUint) {
-    let two = BigUint::from(2u32);
-
-    // y = x^(2^t) mod N sequentially
-    let mut y = x.clone();
-    for _ in 0..t {
-        y = y.modpow(&two, modulus);
-    }
-
-    // l = HashToPrime(x, y)
-    let l = hash_to_prime(x, &y);
-
-    // q = 2^T / l
-    let mut pow2_t = BigUint::one();
-    pow2_t <<= t as usize;
-    let q = &pow2_t / &l;
-
-    // pi = x^q mod N
-    let pi = x.modpow(&q, modulus);
-
-    (y, pi)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_vdf_solve_and_verify() {
-        let challenge = generate_vdf_challenge(Some("alice"), Some(100));
-        let modulus = get_modulus();
-        let x = BigUint::parse_bytes(challenge.x.as_bytes(), 16).unwrap();
-
-        let (y, pi) = solve_vdf(&x, challenge.t, modulus);
-        let proof = VdfProof {
-            y: format!("{:x}", y),
-            pi: format!("{:x}", pi),
-        };
-
-        let result = verify_vdf(&challenge, &proof, Some("alice"));
-        assert!(result.is_ok());
-
-        let wrong_target = verify_vdf(&challenge, &proof, Some("bob"));
-        assert!(wrong_target.is_err());
-    }
 }

@@ -74,7 +74,21 @@ pub async fn logout(state: &SharedState, token: &str) -> ApiResult<()> {
 }
 
 pub async fn delete_account(state: &SharedState, token: &str, password: &str) -> ApiResult<()> {
-    state.accounts.delete_account(token, password).await
+    let Some(user) = state.accounts.authenticate_token(token).await? else {
+        return Err(ApiError::unauthorized("Not authenticated."));
+    };
+    state.accounts.delete_account(token, password).await?;
+    state.evict_user(&user.id, "Account deleted").await;
+    state.invalidate_public_profile_cache(Some(&user.id), Some(&user.username)).await;
+    if let Some(avatar) = user.profile.avatar {
+        let path = std::path::Path::new(&state.config.network.upload_dir).join(&avatar.file.id);
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    if let Some(banner) = user.profile.banner {
+        let path = std::path::Path::new(&state.config.network.upload_dir).join(&banner.file.id);
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    Ok(())
 }
 
 pub async fn change_username(
@@ -187,9 +201,12 @@ pub async fn change_username(
         };
 
         for tx in room_txs {
-            let _ = tx.send(axum::extract::ws::Message::Text(payload.to_string().into()));
+            let _ = tx.send(axum::extract::ws::Message::Text(payload.to_string()));
         }
     }
+
+    state.invalidate_public_profile_cache(Some(&user.id), Some(&user.username)).await;
+    state.invalidate_public_profile_cache(Some(&user.id), Some(&updated_user.username)).await;
 
     Ok(json!({ "ok": true, "user": updated_user }))
 }

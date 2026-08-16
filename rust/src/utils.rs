@@ -9,7 +9,7 @@ pub use crate::{
 };
 
 pub fn send_json(tx: &mpsc::UnboundedSender<Message>, payload: Value) {
-    let _ = tx.send(Message::Text(payload.to_string().into()));
+    let _ = tx.send(Message::Text(payload.to_string()));
 }
 
 pub fn request_id(value: &Value) -> Option<String> {

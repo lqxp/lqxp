@@ -103,7 +103,7 @@ pub fn normalize_recovery_phrase(words: &str) -> String {
 pub fn validate_username(username: &str) -> ApiResult<String> {
     let trimmed = username.trim();
     let char_count = trimmed.chars().count();
-    if char_count < USERNAME_MIN || char_count > USERNAME_MAX {
+    if !(USERNAME_MIN..=USERNAME_MAX).contains(&char_count) {
         return Err(ApiError::bad_request(format!(
             "Username must be between {USERNAME_MIN} and {USERNAME_MAX} characters."
         )));
@@ -132,7 +132,7 @@ pub fn validate_username(username: &str) -> ApiResult<String> {
 
 pub fn validate_password(password: &str) -> ApiResult<()> {
     let char_count = password.chars().count();
-    if char_count < PASSWORD_MIN || char_count > PASSWORD_MAX {
+    if !(PASSWORD_MIN..=PASSWORD_MAX).contains(&char_count) {
         return Err(ApiError::bad_request(format!(
             "Password must be between {PASSWORD_MIN} and {PASSWORD_MAX} characters."
         )));
@@ -176,17 +176,19 @@ pub async fn rate_limit_hit(
     let now = crate::core::models::now_ms();
     let key = key.into();
     let mut buckets = state.rate_limits.lock().await;
-    if buckets.len() > 10_000 {
-        buckets.retain(|_, bucket| now.saturating_sub(bucket.window_start_ms) <= window_ms * 2);
+    if buckets.len() > 5_000 {
+        buckets.retain(|_, bucket| now.saturating_sub(bucket.window_start_ms) <= bucket.window_ms);
     }
     let bucket = buckets
         .entry(key)
         .or_insert(crate::core::presence::RateLimitBucket {
             window_start_ms: now,
+            window_ms,
             count: 0,
         });
     if now.saturating_sub(bucket.window_start_ms) > window_ms {
         bucket.window_start_ms = now;
+        bucket.window_ms = window_ms;
         bucket.count = 0;
     }
     bucket.count = bucket.count.saturating_add(1);
