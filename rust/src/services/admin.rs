@@ -149,7 +149,9 @@ pub async fn delete_user_account(
         return Err(ApiError::bad_request("You cannot delete your own account."));
     }
     state.accounts.delete_user_account(target_user_id).await?;
-    disconnect_user_sessions(state, target_user_id).await;
+    state
+        .disconnect_user_sessions(target_user_id, "Account deleted.")
+        .await;
     state.invalidate_public_profile_cache(Some(target_user_id), None).await;
     Ok(json!({ "ok": true }))
 }
@@ -196,26 +198,6 @@ pub async fn purge_accounts(
         )
         .await?;
     Ok(json!({ "ok": true, "purgedCount": count }))
-}
-
-async fn disconnect_user_sessions(state: &SharedState, user_id: &str) {
-    let sessions: Vec<(String, tokio::sync::mpsc::UnboundedSender<axum::extract::ws::Message>)> = {
-        let players = state.players.read().await;
-        players
-            .values()
-            .filter(|player| player.user_id == user_id)
-            .map(|player| (player.id.clone(), player.tx.clone()))
-            .collect()
-    };
-
-    for (session_id, tx) in sessions {
-        let _ = tx.send(axum::extract::ws::Message::Text(
-            json!({ "op": 0, "d": { "error": "Account deleted." } })
-                .to_string(),
-        ));
-        let _ = tx.send(axum::extract::ws::Message::Close(None));
-        crate::websocket::disconnect_player(state, &session_id).await;
-    }
 }
 
 async fn broadcast_badge_update(state: &SharedState, user: &PublicUser) {

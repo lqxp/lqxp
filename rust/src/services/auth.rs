@@ -78,7 +78,9 @@ pub async fn delete_account(state: &SharedState, token: &str, password: &str) ->
         return Err(ApiError::unauthorized("Not authenticated."));
     };
     state.accounts.delete_account(token, password).await?;
-    state.evict_user(&user.id, "Account deleted").await;
+    state
+        .disconnect_user_sessions(&user.id, "Account deleted.")
+        .await;
     state.invalidate_public_profile_cache(Some(&user.id), Some(&user.username)).await;
     if let Some(avatar) = user.profile.avatar {
         let path = std::path::Path::new(&state.config.network.upload_dir).join(&avatar.file.id);

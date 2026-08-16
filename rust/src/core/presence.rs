@@ -49,6 +49,28 @@ impl AppState {
         }
     }
 
+    pub async fn disconnect_user_sessions(self: &Arc<Self>, user_id: &str, reason: &str) {
+        let sessions: Vec<(String, mpsc::UnboundedSender<Message>)> = {
+            let players = self.players.read().await;
+            players
+                .values()
+                .filter(|player| player.user_id == user_id)
+                .map(|player| (player.id.clone(), player.tx.clone()))
+                .collect()
+        };
+
+        let payload = json!({
+            "op": 0,
+            "d": { "error": reason }
+        })
+        .to_string();
+        for (session_id, tx) in sessions {
+            let _ = tx.send(Message::Text(payload.clone()));
+            let _ = tx.send(Message::Close(None));
+            crate::websocket::disconnect_player(self, &session_id).await;
+        }
+    }
+
     pub async fn invalidate_public_profile_cache(&self, user_id: Option<&str>, username: Option<&str>) {
         let mut cache = self.public_profile_cache.lock().await;
         cache.retain(|key, _| {
