@@ -742,14 +742,14 @@ impl AccountDatabase {
     }
 
     pub async fn profile_uses_file_id(&self, file_id: &str) -> ApiResult<bool> {
-        let pattern = format!("%\"id\":\"{}\"%", file_id.replace('%', "\\%").replace('_', "\\_"));
+        let pattern = format!("%\"id\":\"{}\"%", file_id.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
         let found = match &self.backend {
-            SqlBackend::Sqlite(pool) => sqlx::query("SELECT 1 FROM users WHERE profile_json LIKE ? LIMIT 1")
+            SqlBackend::Sqlite(pool) => sqlx::query("SELECT 1 FROM users WHERE profile_json LIKE ? ESCAPE '\\' LIMIT 1")
                 .bind(&pattern)
                 .fetch_optional(pool)
                 .await
                 .map(|row| row.is_some()),
-            SqlBackend::Postgres(pool) => sqlx::query("SELECT 1 FROM users WHERE profile_json LIKE $1 LIMIT 1")
+            SqlBackend::Postgres(pool) => sqlx::query("SELECT 1 FROM users WHERE profile_json LIKE $1 ESCAPE '\\' LIMIT 1")
                 .bind(&pattern)
                 .fetch_optional(pool)
                 .await
@@ -1230,8 +1230,8 @@ impl RoomDatabase {
     }
 
     pub async fn room_icon_uses_file_id(&self, file_id: &str) -> ApiResult<bool> {
-        let pattern = format!("%\"id\":\"{}\"%", file_id.replace('%', "\\%").replace('_', "\\_"));
-        let found = sqlx::query("SELECT 1 FROM rooms WHERE icon_json LIKE ? LIMIT 1")
+        let pattern = format!("%\"id\":\"{}\"%", file_id.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+        let found = sqlx::query("SELECT 1 FROM rooms WHERE icon_json LIKE ? ESCAPE '\\' LIMIT 1")
             .bind(pattern)
             .fetch_optional(&self.pool)
             .await
