@@ -152,6 +152,7 @@ pub async fn change_username(
                         "clientId": player.client_id,
                         "platform": player.platform,
                         "isVoiceChat": player.is_voice_chat,
+                        "deafened": player.call_deafened,
                         "media": {
                             "audio": player.is_voice_chat,
                             "camera": player.call_camera,

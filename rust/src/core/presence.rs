@@ -73,6 +73,7 @@ pub struct PlayerSession {
     pub call_room: Option<String>,
     pub call_camera: bool,
     pub call_screen: bool,
+    pub call_deafened: bool,
     pub client_id: String,
     pub platform: String,
     pub version: String,

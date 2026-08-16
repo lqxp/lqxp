@@ -124,6 +124,7 @@ pub async fn process_message(
         100 => update_mute_state(&state, &session_id, payload.d).await,
         110 => update_call_media_state(&state, &session_id, payload.d).await,
         111 => relay_call_signal(&state, &session_id, payload.d).await,
+        112 => update_call_deafened_state(&state, &session_id, payload.d).await,
         101 => admin_status(&state, &session_id, payload.d).await,
         104 => admin_broadcast(&state, &session_id, payload.d).await,
         105 => stats_query(&state, &session_id, payload.d).await,
@@ -537,6 +538,7 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
                     player.call_camera = false;
                     player.call_screen = false;
                     player.call_room = None;
+                    player.call_deafened = false;
                 }
             }
             Ok((
@@ -1640,6 +1642,7 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
                         player.call_camera = false;
                         player.call_screen = false;
                         player.call_room = None;
+                        player.call_deafened = false;
                     }
                     Ok((
                         player.username.clone(),
@@ -1661,6 +1664,7 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
                 if !is_voice_chat {
                     player.call_camera = false;
                     player.call_screen = false;
+                    player.call_deafened = false;
                 }
                 player.call_room = None;
                 Ok((
@@ -1778,6 +1782,7 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
                         player.call_camera = false;
                         player.call_screen = false;
                         player.call_room = None;
+                        player.call_deafened = false;
                     }
                     Ok((
                         player.username.clone(),
@@ -1799,6 +1804,7 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
                 if !is_voice_chat {
                     player.call_camera = false;
                     player.call_screen = false;
+                    player.call_deafened = false;
                 }
                 player.call_room = None;
                 Ok((
@@ -1959,6 +1965,75 @@ async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> b
     let _ = target_tx.send(Message::Text(
         json!({ "op": 111, "d": clean }).to_string().into(),
     ));
+    false
+}
+
+async fn update_call_deafened_state(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let is_deafened = d
+        .get("isDeafened")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let Some(game_id) = d.get("gameId").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()) else {
+        return respond_error(state, session_id, 112, "Missing gameId", request_id(&d)).await;
+    };
+    if let Err(message) = validate_room_id(game_id) {
+        return respond_error(state, session_id, 112, message, request_id(&d)).await;
+    }
+
+    let update_result = {
+        let mut players = state.players.write().await;
+        if let Some(player) = players.get_mut(session_id) {
+            if player.username.is_empty() {
+                Err("You need to be identified before")
+            } else if !player.rooms.contains(game_id) {
+                Err("Not a member of this room")
+            } else if !player.is_call_in_room(game_id) {
+                Err("Not in this call")
+            } else {
+                player.call_deafened = is_deafened;
+                Ok((
+                    player.username.clone(),
+                    player.status,
+                    player.client_id.clone(),
+                    player.platform.clone(),
+                ))
+            }
+        } else {
+            Err("You need to be identified before")
+        }
+    };
+
+    let (username, status, client_id, platform) = match update_result {
+        Ok(values) => values,
+        Err(message) => {
+            return respond_error(state, session_id, 112, message, request_id(&d)).await
+        }
+    };
+
+    broadcast_to_room(
+        state,
+        game_id,
+        json!({
+            "op": 112,
+            "d": {
+                "gameId": game_id,
+                "user": username,
+                "status": status,
+                "isDeafened": is_deafened,
+                "clientId": client_id,
+                "platform": platform
+            }
+        }),
+    )
+    .await;
+
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({ "op": 112, "d": { "ok": true } }), request_id(&d)),
+    )
+    .await;
+
     false
 }
 
@@ -2946,6 +3021,7 @@ pub async fn room_call_players(
                 "clientId": player.client_id,
                 "platform": player.platform,
                 "media": call_media_json(player.is_voice_chat, player.call_camera, player.call_screen),
+                "deafened": player.call_deafened,
                 "status": player.status
             })
         })

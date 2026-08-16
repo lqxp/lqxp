@@ -121,6 +121,7 @@ async fn register_connection(
             call_room: None,
             call_camera: false,
             call_screen: false,
+            call_deafened: false,
             client_id: String::new(),
             platform: "web".to_owned(),
             version: "unknown".to_owned(),
