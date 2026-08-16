@@ -38,7 +38,7 @@ pub async fn admin_overview(
                     })
                 });
                 entry["onlineCount"] = json!(entry["onlineCount"].as_u64().unwrap_or(0) + 1);
-                if player.is_voice_chat {
+                if player.is_call_in_room(room_id) {
                     entry["voiceCount"] = json!(entry["voiceCount"].as_u64().unwrap_or(0) + 1);
                 }
             }

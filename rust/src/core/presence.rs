@@ -90,8 +90,10 @@ pub struct PlayerSession {
     pub tx: mpsc::UnboundedSender<Message>,
     pub rooms: HashSet<String>,
     pub is_voice_chat: bool,
+    pub call_room: Option<String>,
     pub call_camera: bool,
     pub call_screen: bool,
+    pub call_deafened: bool,
     pub client_id: String,
     pub platform: String,
     pub version: String,
@@ -102,4 +104,17 @@ pub struct PlayerSession {
     pub delete_messages_on_leave: bool,
     pub profile: UserProfile,
     pub status: UserPresenceStatus,
+}
+
+impl PlayerSession {
+    /// Whether this session is currently in a call that is happening in
+    /// `game_id`. A legacy session without a known call room (None) is treated
+    /// as "in call" everywhere for backward compatibility.
+    pub fn is_call_in_room(&self, game_id: &str) -> bool {
+        self.is_voice_chat
+            && self
+                .call_room
+                .as_deref()
+                .map_or(true, |room| room == game_id)
+    }
 }
