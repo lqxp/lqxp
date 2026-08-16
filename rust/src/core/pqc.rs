@@ -199,10 +199,11 @@ pub fn generate_pqc_keypair() -> (PqcPublicKey, PqcSecretKey) {
     let t = a_mul_s.add(&e);
 
     let now = now_ms();
+    let rho_hex = rho.iter().map(|b| format!("{:02x}", b)).collect::<String>();
     let pk = PqcPublicKey {
         key_id,
         t_hex: poly_to_hex(&t),
-        rho_hex: format!("{:x}", sha2::Sha256::digest(rho)),
+        rho_hex,
     };
     let sk = PqcSecretKey {
         s,

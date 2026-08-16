@@ -59,6 +59,10 @@ fn is_public_ipv4(ip: &Ipv4Addr) -> bool {
         return false;
     }
     let o = ip.octets();
+    // current network 0.0.0.0/8
+    if o[0] == 0 {
+        return false;
+    }
     // private ranges
     if o[0] == 10 {
         return false;
@@ -95,6 +99,10 @@ fn is_public_ipv6(ip: &Ipv6Addr) -> bool {
     }
     // Link-local fe80::/10
     if (seg[0] & 0xffc0) == 0xfe80 {
+        return false;
+    }
+    // Deprecated site-local fec0::/10
+    if (seg[0] & 0xffc0) == 0xfec0 {
         return false;
     }
     // IPv4-mapped ::ffff:0:0/96
