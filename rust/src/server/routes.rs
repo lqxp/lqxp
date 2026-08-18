@@ -34,6 +34,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/app/uploads/*path", get(upload_asset))
         .route("/app/*path", get(app_asset))
         .route("/api/auth/challenge", get(auth_challenge_handler))
+        .route("/api/auth/cap/challenge", get(cap_challenge_handler))
+        .route("/api/auth/cap/redeem", post(cap_redeem_handler))
         .route("/api/auth/me", get(auth_me_handler))
         .route("/api/auth/register", post(auth_register_handler))
         .route("/api/auth/login", post(auth_login_handler))
@@ -141,6 +143,12 @@ struct ChallengeQuery {
     target: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CapChallengeQuery {
+    scope: Option<String>,
+    target: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ChallengeResponse {
@@ -154,6 +162,7 @@ struct ChallengeResponse {
 struct AuthRegisterRequest {
     username: String,
     password: String,
+    cap_token: Option<String>,
     vdf_challenge: Option<crate::core::vdf::VdfChallenge>,
     vdf_proof: Option<crate::core::vdf::VdfProof>,
     quota_token: Option<crate::core::rln::EpochQuotaToken>,
@@ -166,6 +175,7 @@ struct AuthRegisterRequest {
 struct AuthLoginRequest {
     username: String,
     password: String,
+    cap_token: Option<String>,
     vdf_challenge: Option<crate::core::vdf::VdfChallenge>,
     vdf_proof: Option<crate::core::vdf::VdfProof>,
     quota_token: Option<crate::core::rln::EpochQuotaToken>,
@@ -179,6 +189,7 @@ struct AuthRecoverRequest {
     username: String,
     recovery_words: String,
     new_password: String,
+    cap_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,6 +230,37 @@ struct PurgeUsersRequest {
     min_username_len: Option<usize>,
     max_username_len: Option<usize>,
     username_contains: Option<String>,
+}
+
+async fn cap_challenge_handler(
+    State(state): State<SharedState>,
+    Query(query): Query<CapChallengeQuery>,
+) -> ApiResult<impl IntoResponse> {
+    if crate::core::security::rate_limit_hit(&state, "auth:cap:challenge:global".to_string(), 60, 10_000).await {
+        return Err(ApiError::too_many_requests(
+            "CAPTCHA challenge rate limit exceeded. Please wait a few seconds.",
+        ));
+    }
+
+    let scope = query.scope.as_deref().unwrap_or("register");
+    let target = query.target.as_deref();
+    let challenge = crate::core::cap::generate_cap_challenge(scope, target).await;
+
+    Ok(Json(challenge))
+}
+
+async fn cap_redeem_handler(
+    State(state): State<SharedState>,
+    Json(body): Json<crate::core::cap::CapRedeemRequest>,
+) -> ApiResult<impl IntoResponse> {
+    if crate::core::security::rate_limit_hit(&state, "auth:cap:redeem:global".to_string(), 60, 10_000).await {
+        return Err(ApiError::too_many_requests(
+            "CAPTCHA redeem rate limit exceeded. Please wait a few seconds.",
+        ));
+    }
+
+    let res = crate::core::cap::redeem_cap_challenge(body).await?;
+    Ok(Json(res))
 }
 
 async fn auth_challenge_handler(
@@ -264,30 +306,34 @@ async fn auth_register_handler(
         ));
     }
 
-    // 1. Mandatory RLN (Rate Limiting Nullifier) verification and single-use consumption
-    let quota_token = body.quota_token.as_ref().ok_or_else(|| {
-        ApiError::bad_request("Missing anonymous quota token. Please request /api/auth/challenge first.")
-    })?;
-    let nullifier = body.nullifier.as_deref().ok_or_else(|| {
-        ApiError::bad_request("Missing rate-limiting nullifier.")
-    })?;
-    crate::core::rln::verify_and_consume_nullifier(quota_token, nullifier, "register").await?;
+    // 1. Validate Cap token if provided
+    if let Some(token) = &body.cap_token {
+        crate::core::cap::verify_and_consume_cap_token(token, "register").await?;
+    } else {
+        // Fallback to legacy challenge verification
+        let quota_token = body.quota_token.as_ref().ok_or_else(|| {
+            ApiError::bad_request("Missing CAPTCHA or quota token. Please solve the security challenge.")
+        })?;
+        let nullifier = body.nullifier.as_deref().ok_or_else(|| {
+            ApiError::bad_request("Missing rate-limiting nullifier.")
+        })?;
+        crate::core::rln::verify_and_consume_nullifier(quota_token, nullifier, "register").await?;
 
-    // 2. Mandatory VDF proof verification and single-use challenge consumption (anti-replay)
-    let (vdf_c, vdf_p) = match (&body.vdf_challenge, &body.vdf_proof) {
-        (Some(c), Some(p)) => (c, p),
-        _ => {
-            return Err(ApiError::bad_request(
-                "Missing Verifiable Delay Function (VDF) proof. Please request /api/auth/challenge first.",
-            ))
-        }
-    };
-    crate::core::vdf::verify_and_consume_vdf(vdf_c, vdf_p, Some(&body.username)).await?;
+        let (vdf_c, vdf_p) = match (&body.vdf_challenge, &body.vdf_proof) {
+            (Some(c), Some(p)) => (c, p),
+            _ => {
+                return Err(ApiError::bad_request(
+                    "Missing Verifiable Delay Function (VDF) proof. Please solve the security challenge.",
+                ))
+            }
+        };
+        crate::core::vdf::verify_and_consume_vdf(vdf_c, vdf_p, Some(&body.username)).await?;
 
-    let pqc_ct = body.pqc_ciphertext.as_ref().ok_or_else(|| {
-        ApiError::bad_request("Missing Post-Quantum KEM ciphertext. Please request /api/auth/challenge first.")
-    })?;
-    let _pqc_shared_secret = crate::core::pqc::verify_and_decapsulate_pqc(pqc_ct).await?;
+        let pqc_ct = body.pqc_ciphertext.as_ref().ok_or_else(|| {
+            ApiError::bad_request("Missing Post-Quantum KEM ciphertext. Please solve the security challenge.")
+        })?;
+        let _pqc_shared_secret = crate::core::pqc::verify_and_decapsulate_pqc(pqc_ct).await?;
+    }
 
     auth::register(&state, &body.username, &body.password)
         .await
@@ -305,7 +351,7 @@ async fn auth_login_handler(
         let buckets = state.rate_limits.lock().await;
         if let Some(bucket) = buckets.get(&fail_key) {
             let now = crate::core::models::now_ms();
-            if now.saturating_sub(bucket.window_start_ms) <= 30_000 && bucket.count >= 5 && body.vdf_proof.is_none() {
+            if now.saturating_sub(bucket.window_start_ms) <= 30_000 && bucket.count >= 5 && body.cap_token.is_none() && body.vdf_proof.is_none() {
                 return Err(ApiError::too_many_requests(
                     "Too many failed login attempts for this account. Please solve the security challenge to proceed.",
                 ));
@@ -313,16 +359,30 @@ async fn auth_login_handler(
         }
     }
 
-    if let (Some(token), Some(nullifier)) = (&body.quota_token, &body.nullifier) {
-        crate::core::rln::verify_and_consume_nullifier(token, nullifier, "login").await?;
-    }
+    if let Some(token) = &body.cap_token {
+        crate::core::cap::verify_and_consume_cap_token(token, "login").await?;
+    } else {
+        let quota_token = body.quota_token.as_ref().ok_or_else(|| {
+            ApiError::bad_request("Missing CAPTCHA or quota token. Please solve the security verification.")
+        })?;
+        let nullifier = body.nullifier.as_deref().ok_or_else(|| {
+            ApiError::bad_request("Missing rate-limiting nullifier.")
+        })?;
+        crate::core::rln::verify_and_consume_nullifier(quota_token, nullifier, "login").await?;
 
-    if let (Some(vdf_c), Some(vdf_p)) = (&body.vdf_challenge, &body.vdf_proof) {
+        let (vdf_c, vdf_p) = match (&body.vdf_challenge, &body.vdf_proof) {
+            (Some(c), Some(p)) => (c, p),
+            _ => {
+                return Err(ApiError::bad_request(
+                    "Missing Verifiable Delay Function (VDF) proof. Please solve the security verification.",
+                ))
+            }
+        };
         crate::core::vdf::verify_and_consume_vdf(vdf_c, vdf_p, Some(&body.username)).await?;
-    }
 
-    if let Some(ct) = &body.pqc_ciphertext {
-        let _pqc_shared_secret = crate::core::pqc::verify_and_decapsulate_pqc(ct).await?;
+        if let Some(ct) = &body.pqc_ciphertext {
+            let _pqc_shared_secret = crate::core::pqc::verify_and_decapsulate_pqc(ct).await?;
+        }
     }
 
     match auth::login(&state, &body.username, &body.password).await {
@@ -350,6 +410,10 @@ async fn auth_recover_handler(
         return Err(ApiError::too_many_requests(
             "Too many recovery attempts for this account. Please wait 30 seconds.",
         ));
+    }
+
+    if let Some(token) = &body.cap_token {
+        crate::core::cap::verify_and_consume_cap_token(token, "recover").await?;
     }
 
     auth::recover(

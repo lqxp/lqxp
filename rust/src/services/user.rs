@@ -126,12 +126,99 @@ fn file_extension<'a>(file_name: &'a str, mime_type: &str) -> &'a str {
         })
 }
 
+pub fn strip_image_metadata(bytes: &[u8], mime_type: &str) -> Vec<u8> {
+    match mime_type {
+        "image/png" | "image/apng" => {
+            if bytes.len() < 8 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                return bytes.to_vec();
+            }
+            let mut out = Vec::with_capacity(bytes.len());
+            out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+            let mut offset = 8;
+            while offset + 12 <= bytes.len() {
+                let length = u32::from_be_bytes([
+                    bytes[offset],
+                    bytes[offset + 1],
+                    bytes[offset + 2],
+                    bytes[offset + 3],
+                ]) as usize;
+                let chunk_type = &bytes[offset + 4..offset + 8];
+                let total_chunk_len = 12 + length;
+                if offset + total_chunk_len > bytes.len() {
+                    break;
+                }
+
+                let is_metadata = matches!(
+                    chunk_type,
+                    b"eXIf" | b"tEXt" | b"zTXt" | b"iTXt" | b"tIME" | b"pHYs" | b"iCCP"
+                );
+                if !is_metadata {
+                    out.extend_from_slice(&bytes[offset..offset + total_chunk_len]);
+                }
+                if chunk_type == b"IEND" {
+                    return out;
+                }
+                offset += total_chunk_len;
+            }
+            out
+        }
+        "image/jpeg" | "image/jpg" => {
+            if bytes.len() < 4 || !bytes.starts_with(&[0xff, 0xd8]) {
+                return bytes.to_vec();
+            }
+            let mut out = Vec::with_capacity(bytes.len());
+            out.extend_from_slice(&[0xff, 0xd8]);
+            let mut i = 2;
+            while i < bytes.len() {
+                if bytes[i] != 0xff {
+                    out.extend_from_slice(&bytes[i..]);
+                    break;
+                }
+                while i < bytes.len() && bytes[i] == 0xff {
+                    i += 1;
+                }
+                if i >= bytes.len() {
+                    break;
+                }
+                let marker = bytes[i];
+                i += 1;
+                if marker == 0xd9 {
+                    out.extend_from_slice(&[0xff, 0xd9]);
+                    break;
+                }
+                if marker == 0xda {
+                    out.extend_from_slice(&[0xff, 0xda]);
+                    out.extend_from_slice(&bytes[i..]);
+                    break;
+                }
+                if i + 2 > bytes.len() {
+                    break;
+                }
+                let len = u16::from_be_bytes([bytes[i], bytes[i + 1]]) as usize;
+                if len < 2 || i + len > bytes.len() {
+                    break;
+                }
+                
+                let is_metadata = matches!(marker, 0xe1 | 0xe2 | 0xed | 0xfe);
+                if !is_metadata {
+                    out.extend_from_slice(&[0xff, marker]);
+                    out.extend_from_slice(&bytes[i..i + len]);
+                }
+                i += len;
+            }
+            out
+        }
+        _ => bytes.to_vec(),
+    }
+}
+
 pub async fn store_uploaded_bytes(
     state: &crate::core::presence::AppState,
     extension: &str,
     bytes: &[u8],
     mime_type: &str,
 ) -> ApiResult<crate::core::models::StoredFile> {
+    let clean_bytes = strip_image_metadata(bytes, mime_type);
     let file_id = if extension.trim().is_empty() {
         uuid::Uuid::new_v4().simple().to_string()
     } else {
@@ -142,12 +229,12 @@ pub async fn store_uploaded_bytes(
         )
     };
     let path = std::path::Path::new(&state.config.network.upload_dir).join(&file_id);
-    std::fs::write(&path, bytes)
+    std::fs::write(&path, &clean_bytes)
         .map_err(|err| ApiError::internal("Failed to store file", err))?;
     Ok(crate::core::models::StoredFile {
         id: file_id.clone(),
         url: public_file_url(state, &file_id),
-        size: bytes.len() as u64,
+        size: clean_bytes.len() as u64,
         mime_type: mime_type.to_owned(),
     })
 }
