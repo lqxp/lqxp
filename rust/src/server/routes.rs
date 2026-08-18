@@ -162,6 +162,7 @@ struct ChallengeResponse {
 struct AuthRegisterRequest {
     username: String,
     password: String,
+    #[serde(alias = "cap_token")]
     cap_token: Option<String>,
     vdf_challenge: Option<crate::core::vdf::VdfChallenge>,
     vdf_proof: Option<crate::core::vdf::VdfProof>,
@@ -175,6 +176,7 @@ struct AuthRegisterRequest {
 struct AuthLoginRequest {
     username: String,
     password: String,
+    #[serde(alias = "cap_token")]
     cap_token: Option<String>,
     vdf_challenge: Option<crate::core::vdf::VdfChallenge>,
     vdf_proof: Option<crate::core::vdf::VdfProof>,
@@ -189,6 +191,7 @@ struct AuthRecoverRequest {
     username: String,
     recovery_words: String,
     new_password: String,
+    #[serde(alias = "cap_token")]
     cap_token: Option<String>,
 }
 
