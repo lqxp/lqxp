@@ -7,3 +7,4 @@ pub mod rln;
 pub mod security;
 pub mod vdf;
 pub mod pqc;
+pub mod cap;

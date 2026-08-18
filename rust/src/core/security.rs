@@ -6,7 +6,7 @@ use argon2::{
     Argon2,
 };
 use bip39::Language;
-use rand::{distributions::Alphanumeric, rngs::OsRng, thread_rng, Rng, RngCore};
+use rand::{distributions::Alphanumeric, rngs::OsRng, Rng, RngCore};
 use sha2::{Digest, Sha256};
 
 use crate::core::result::{ApiError, ApiResult};
@@ -16,7 +16,6 @@ const USERNAME_MAX: usize = 32;
 const RESERVED_USERNAMES: &[&str] = &["system"];
 const PASSWORD_MIN: usize = 8;
 const PASSWORD_MAX: usize = 128;
-const RECOVERY_WORD_COUNT: usize = 16;
 
 pub fn hash_secret(secret: &str) -> ApiResult<String> {
     let salt = SaltString::generate(&mut PasswordOsRng);
@@ -62,28 +61,25 @@ pub fn token_hash(token: &str) -> String {
 }
 
 pub fn generate_session_token() -> String {
-    let mut rng = thread_rng();
-    std::iter::repeat_with(|| rng.sample(Alphanumeric))
+    std::iter::repeat_with(|| OsRng.sample(Alphanumeric))
         .map(char::from)
         .take(64)
         .collect()
 }
 
 pub fn generate_snowflake_id() -> String {
-    let mut rng = thread_rng();
-    let random_id: u64 = rng.gen_range(100_000_000_000_000_000..=999_999_999_999_999_999);
+    let random_id: u64 = OsRng.gen_range(100_000_000_000_000_000..=999_999_999_999_999_999);
     random_id.to_string()
 }
 
 pub fn generate_recovery_words() -> Vec<String> {
-    let mut entropy = [0u8; 20];
+    let mut entropy = [0u8; 16];
     OsRng.fill_bytes(&mut entropy);
     let mnemonic = bip39::Mnemonic::from_entropy_in(Language::English, &entropy)
         .expect("valid entropy for BIP39 mnemonic");
     mnemonic
         .to_string()
         .split_whitespace()
-        .take(RECOVERY_WORD_COUNT)
         .map(str::to_owned)
         .collect()
 }
