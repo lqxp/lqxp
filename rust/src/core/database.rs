@@ -1134,25 +1134,48 @@ fn sanitize_custom_badges(badges: &[String]) -> Vec<String> {
 
 #[derive(Debug)]
 pub struct RoomDatabase {
-    pool: SqlitePool,
+    backend: SqlBackend,
 }
 
 impl RoomDatabase {
     pub async fn connect(config: &DatabaseConfig) -> ApiResult<Self> {
-        prepare_sqlite_path(&config.url).await?;
-        let options = SqliteConnectOptions::from_str(&config.url)
-            .map_err(|err| ApiError::internal("Invalid SQLite room database URL", err))?
-            .create_if_missing(true);
-        let pool = SqlitePool::connect_with(options)
-            .await
-            .map_err(|err| ApiError::internal("Failed to connect room database", err))?;
-        let db = Self { pool };
+        let kind = config.kind.trim().to_ascii_lowercase();
+        let backend = if kind == "postgres" || kind == "postgresql" {
+            SqlBackend::Postgres(
+                PgPoolOptions::new()
+                    .max_connections(5)
+                    .connect(&config.url)
+                    .await
+                    .map_err(|err| ApiError::internal("PostgreSQL connection", err))?,
+            )
+        } else {
+            prepare_sqlite_path(&config.url).await?;
+            let options = SqliteConnectOptions::from_str(&config.url)
+                .map_err(|err| ApiError::internal("Invalid SQLite room database URL", err))?
+                .create_if_missing(true);
+            SqlBackend::Sqlite(
+                SqlitePoolOptions::new()
+                    .max_connections(5)
+                    .connect_with(options)
+                    .await
+                    .map_err(|err| ApiError::internal("Failed to connect room database", err))?,
+            )
+        };
+        let db = Self { backend };
         db.migrate().await?;
         Ok(db)
     }
 
+    async fn execute(&self, sql: &str) -> ApiResult<()> {
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query(sql).execute(pool).await.map(|_| ()),
+            SqlBackend::Postgres(pool) => sqlx::query(sql).execute(pool).await.map(|_| ()),
+        }
+        .map_err(|err| ApiError::internal("Room DB execution", err))
+    }
+
     async fn migrate(&self) -> ApiResult<()> {
-        sqlx::query(
+        self.execute(
             r#"
             CREATE TABLE IF NOT EXISTS rooms (
                 room_id TEXT PRIMARY KEY,
@@ -1163,33 +1186,49 @@ impl RoomDatabase {
             )
             "#,
         )
-        .execute(&self.pool)
         .await
-        .map_err(|err| ApiError::internal("Room DB migration", err))?;
-        Ok(())
+        .map_err(|err| ApiError::internal("Room DB migration", err))
     }
 
     pub async fn room_record(&self, room_id: &str) -> Option<RoomRecord> {
-        let row = sqlx::query(
-            "SELECT room_id, title, icon_json, members_json FROM rooms WHERE room_id = ?",
-        )
-        .bind(room_id)
-        .fetch_optional(&self.pool)
-        .await
-        .ok()??;
+        let fields = match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                let row = sqlx::query(
+                    "SELECT room_id, title, icon_json, members_json FROM rooms WHERE room_id = ?",
+                )
+                .bind(room_id)
+                .fetch_optional(pool)
+                .await
+                .ok()??;
+                (
+                    row.try_get::<String, _>("room_id").ok()?,
+                    row.try_get::<String, _>("title").ok(),
+                    row.try_get::<Option<String>, _>("icon_json").ok().flatten(),
+                    row.try_get::<String, _>("members_json").ok(),
+                )
+            }
+            SqlBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT room_id, title, icon_json, members_json FROM rooms WHERE room_id = $1",
+                )
+                .bind(room_id)
+                .fetch_optional(pool)
+                .await
+                .ok()??;
+                (
+                    row.try_get::<String, _>("room_id").ok()?,
+                    row.try_get::<String, _>("title").ok(),
+                    row.try_get::<Option<String>, _>("icon_json").ok().flatten(),
+                    row.try_get::<String, _>("members_json").ok(),
+                )
+            }
+        };
 
-        let stored_room_id = row.try_get::<String, _>("room_id").ok()?;
-        let title = row
-            .try_get::<String, _>("title")
-            .unwrap_or_else(|_| stored_room_id.clone());
-        let icon = row
-            .try_get::<Option<String>, _>("icon_json")
-            .ok()
-            .flatten()
+        let (stored_room_id, title, icon_json, members_json) = fields;
+        let title = title.unwrap_or_else(|| stored_room_id.clone());
+        let icon = icon_json
             .and_then(|value| serde_json::from_str::<RoomIcon>(&value).ok());
-        let members = row
-            .try_get::<String, _>("members_json")
-            .ok()
+        let members = members_json
             .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
             .unwrap_or_default();
 
@@ -1202,27 +1241,48 @@ impl RoomDatabase {
     }
 
     pub async fn set_room_record(&self, room_id: &str, room: &RoomRecord) -> ApiResult<()> {
-        let icon_json = room
-            .icon
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|err| ApiError::internal("Icon json serialize", err))?;
-        let members_json = serde_json::to_string(&room.members)
-            .map_err(|err| ApiError::internal("Members json serialize", err))?;
-        sqlx::query(
-            "INSERT INTO rooms (room_id, title, icon_json, members_json, updated_at) VALUES (?, ?, ?, ?, ?) \
-             ON CONFLICT(room_id) DO UPDATE SET title = excluded.title, icon_json = excluded.icon_json, members_json = excluded.members_json, updated_at = excluded.updated_at",
-        )
-        .bind(room_id)
-        .bind(&room.title)
-        .bind(icon_json)
-        .bind(members_json)
-        .bind(now_ms() as i64)
-        .execute(&self.pool)
-        .await
-        .map_err(|err| ApiError::internal("Set room record", err))?;
-        Ok(())
+        let (icon_json, members_json, updated_at): (Option<String>, String, i64) = (
+            room.icon
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|err| ApiError::internal("Icon json serialize", err))?,
+            serde_json::to_string(&room.members)
+                .map_err(|err| ApiError::internal("Members json serialize", err))?,
+            now_ms() as i64,
+        );
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO rooms (room_id, title, icon_json, members_json, updated_at) VALUES (?, ?, ?, ?, ?) \
+                     ON CONFLICT(room_id) DO UPDATE SET title = excluded.title, icon_json = excluded.icon_json, members_json = excluded.members_json, updated_at = excluded.updated_at",
+                )
+                .bind(room_id)
+                .bind(&room.title)
+                .bind(icon_json)
+                .bind(members_json)
+                .bind(updated_at)
+                .execute(pool)
+                .await
+                .map(|_| ())
+                .map_err(|err| ApiError::internal("Set room record", err))
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO rooms (room_id, title, icon_json, members_json, updated_at) VALUES ($1, $2, $3, $4, $5) \
+                     ON CONFLICT(room_id) DO UPDATE SET title = excluded.title, icon_json = excluded.icon_json, members_json = excluded.members_json, updated_at = excluded.updated_at",
+                )
+                .bind(room_id)
+                .bind(&room.title)
+                .bind(icon_json)
+                .bind(members_json)
+                .bind(updated_at)
+                .execute(pool)
+                .await
+                .map(|_| ())
+                .map_err(|err| ApiError::internal("Set room record", err))
+            }
+        }
     }
 
     pub async fn room_icon(&self, room_id: &str) -> Option<RoomIcon> {
@@ -1231,12 +1291,24 @@ impl RoomDatabase {
 
     pub async fn room_icon_uses_file_id(&self, file_id: &str) -> ApiResult<bool> {
         let pattern = format!("%\"id\":\"{}\"%", file_id.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
-        let found = sqlx::query("SELECT 1 FROM rooms WHERE icon_json LIKE ? ESCAPE '\\' LIMIT 1")
+        let found = match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query(
+                "SELECT 1 FROM rooms WHERE icon_json LIKE ? ESCAPE '\\' LIMIT 1",
+            )
             .bind(pattern)
-            .fetch_optional(&self.pool)
+            .fetch_optional(pool)
             .await
             .map_err(|err| ApiError::internal("Room icon search", err))?
-            .is_some();
+            .is_some(),
+            SqlBackend::Postgres(pool) => sqlx::query(
+                "SELECT 1 FROM rooms WHERE icon_json LIKE $1 ESCAPE '\\' LIMIT 1",
+            )
+            .bind(pattern)
+            .fetch_optional(pool)
+            .await
+            .map_err(|err| ApiError::internal("Room icon search", err))?
+            .is_some(),
+        };
         Ok(found)
     }
 
