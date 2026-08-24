@@ -1678,25 +1678,44 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
+    // Stale voice sessions from a crashed client (same account) that have not
+    // timed out yet are evicted so the user can reconnect to voice instantly.
+    let mut evicted_sessions: Vec<(Vec<String>, String, UserPresenceStatus, String, String)> =
+        Vec::new();
     let voice_result = {
         let mut players = state.players.write().await;
-        let duplicate_voice_session = if is_voice_chat {
-            players.get(session_id).is_some_and(|current| {
-                !current.user_id.is_empty()
-                    && players.values().any(|player| {
-                        player.id != session_id
-                            && player.user_id == current.user_id
-                            && player.is_voice_chat
-                    })
-            })
-        } else {
-            false
-        };
+
+        if is_voice_chat {
+            if let Some(user_id) = players
+                .get(session_id)
+                .map(|player| player.user_id.clone())
+                .filter(|id| !id.is_empty())
+            {
+                for stale in players.values_mut() {
+                    if stale.id != session_id
+                        && stale.user_id == user_id
+                        && stale.is_voice_chat
+                    {
+                        evicted_sessions.push((
+                            stale.rooms.iter().cloned().collect(),
+                            stale.username.clone(),
+                            stale.status,
+                            stale.client_id.clone(),
+                            stale.platform.clone(),
+                        ));
+                        stale.is_voice_chat = false;
+                        stale.call_camera = false;
+                        stale.call_screen = false;
+                        stale.call_room = None;
+                        stale.call_deafened = false;
+                    }
+                }
+            }
+        }
+
         if let Some(player) = players.get_mut(session_id) {
             if is_voice_chat && player.status == UserPresenceStatus::Invisible {
                 Err("Invisible users cannot join voice chat")
-            } else if duplicate_voice_session {
-                Err("This account is already connected to a call")
             } else if let Some(room) = call_room.as_deref() {
                 if !player.rooms.contains(room) {
                     Err("Not a member of this room")
@@ -1775,6 +1794,31 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
             }),
         )
         .await;
+    }
+
+    // Notify everyone that the evicted stale sessions left voice, using their
+    // own client id so the voice-member map stays accurate.
+    for (stale_rooms, stale_username, stale_status, stale_client_id, stale_platform) in
+        evicted_sessions
+    {
+        for game_id in &stale_rooms {
+            broadcast_to_room(
+                state,
+                game_id,
+                json!({
+                    "op": 98,
+                    "d": {
+                        "gameId": game_id,
+                        "user": stale_username.clone(),
+                        "status": stale_status,
+                        "isVoiceChat": false,
+                        "clientId": stale_client_id.clone(),
+                        "platform": stale_platform.clone()
+                    }
+                }),
+            )
+            .await;
+        }
     }
 
     respond_to_sender(

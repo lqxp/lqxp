@@ -38,8 +38,25 @@ pub async fn handle_socket(state: SharedState, socket: WebSocket) {
 
     info!("Client connected: {}", session_id);
 
-    while let Some(result) = ws_receiver.next().await {
-        match result {
+    // If the client stops sending its `op: 1` heartbeat (crash, killed app,
+    // dropped network without a clean close), we must drop the connection so
+    // `disconnect_player` runs and clears its voice/presence state. Otherwise
+    // a stale session lingers in memory forever and blocks the user from
+    // rejoining voice chat after reconnecting.
+    let heartbeat_ms = state.config.network.heartbeat_interval.max(1_000) as u64;
+    let idle_timeout = std::time::Duration::from_millis((heartbeat_ms * 3).max(10_000));
+
+    loop {
+        let received = match tokio::time::timeout(idle_timeout, ws_receiver.next()).await {
+            Ok(Some(result)) => result,
+            Ok(None) => break,
+            Err(_) => {
+                warn!("Client heartbeat timeout: {}", session_id);
+                break;
+            }
+        };
+
+        match received {
             Ok(Message::Text(text)) => {
                 if rate_limit_hit(&state, format!("ws-msg:session:{session_id}"), 120, 60_000).await {
                     send_json(&tx, json!({ "op": 0, "d": { "error": "Rate limited." } }));
