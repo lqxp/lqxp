@@ -46,6 +46,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/profile/image", post(profile_image_upload_handler))
         .route("/api/rooms/:room_id/icon", post(room_icon_upload_handler))
         .route("/api/admin/overview", get(admin_overview_handler))
+        .route("/api/admin/users/search", get(admin_users_search_handler))
         .route("/api/admin/features", post(admin_features_handler))
         .route(
             "/api/admin/users/:user_id/disabled",
@@ -517,6 +518,28 @@ async fn admin_overview_handler(
     admin::admin_overview(&state, &admin).await.map(Json)
 }
 
+#[derive(Debug, Deserialize)]
+struct AdminUserSearchQuery {
+    q: Option<String>,
+}
+
+async fn admin_users_search_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<AdminUserSearchQuery>,
+) -> ApiResult<impl IntoResponse> {
+    let admin = authenticated_user(&state, &headers).await?;
+    let rate_key = format!("admin:users:search:user:{}", admin.id);
+    if crate::core::security::rate_limit_hit(&state, rate_key, 120, 60_000).await {
+        return Err(ApiError::too_many_requests(
+            "Search rate limit exceeded. Please wait a minute.",
+        ));
+    }
+    admin::search_users(&state, &admin, query.q.as_deref().unwrap_or(""))
+        .await
+        .map(Json)
+}
+
 async fn admin_features_handler(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -581,6 +604,14 @@ async fn admin_users_purge_handler(
     Json(body): Json<PurgeUsersRequest>,
 ) -> ApiResult<impl IntoResponse> {
     let admin = authenticated_user(&state, &headers).await?;
+    // Purge is the most destructive admin action (bulk account deletion):
+    // keep it strictly rate limited per admin.
+    let rate_key = format!("admin:users:purge:user:{}", admin.id);
+    if crate::core::security::rate_limit_hit(&state, rate_key, 5, 10 * 60 * 1000).await {
+        return Err(ApiError::too_many_requests(
+            "Purge rate limit exceeded. Please wait 10 minutes.",
+        ));
+    }
     admin::purge_accounts(
         &state,
         &admin,

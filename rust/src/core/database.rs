@@ -895,6 +895,98 @@ impl AccountDatabase {
             .collect()
     }
 
+    pub async fn count_users(&self) -> ApiResult<u64> {
+        let count = match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+                .fetch_one(pool)
+                .await,
+            SqlBackend::Postgres(pool) => {
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+                    .fetch_one(pool)
+                    .await
+            }
+        }
+        .map_err(|err| ApiError::internal("Count users query", err))?;
+        Ok(count.max(0) as u64)
+    }
+
+    /// Admin username search: never loads the whole table. Bounded SQL
+    /// candidates (exact → prefix → substring) are then ranked in Rust by
+    /// edit distance, so typos still surface and only the top `limit`
+    /// matches are returned.
+    pub async fn search_users(&self, query: &str, limit: usize) -> ApiResult<Vec<PublicUser>> {
+        // Usernames are capped at 32 chars server-side; bound the needle so
+        // huge queries can't turn into expensive LIKE scans.
+        let needle: String = query.trim().to_lowercase().chars().take(64).collect();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let limit = limit.clamp(1, 50);
+        // Ask the DB for a few extra candidates so the in-Rust ranking has
+        // room to promote close matches.
+        let sql_limit = (limit * 4).max(100) as i64;
+        let prefix = format!("{}%", escape_like_pattern(&needle));
+        let substring = format!("%{}%", escape_like_pattern(&needle));
+
+        let select = "SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users";
+        let rows = match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                let sql = format!(
+                    "{select} WHERE LOWER(username) = ? OR LOWER(username) LIKE ? ESCAPE '\\' OR LOWER(username) LIKE ? ESCAPE '\\' ORDER BY CASE WHEN LOWER(username) = ? THEN 0 WHEN LOWER(username) LIKE ? ESCAPE '\\' THEN 1 ELSE 2 END ASC, created_at DESC LIMIT ?"
+                );
+                sqlx::query_as::<_, RawStoredUser>(&sql)
+                    .bind(&needle)
+                    .bind(&prefix)
+                    .bind(&substring)
+                    .bind(&needle)
+                    .bind(&prefix)
+                    .bind(sql_limit)
+                    .fetch_all(pool)
+                    .await
+            }
+            SqlBackend::Postgres(pool) => {
+                let sql = format!(
+                    "{select} WHERE LOWER(username) = $1 OR LOWER(username) LIKE $2 ESCAPE '\\' OR LOWER(username) LIKE $3 ESCAPE '\\' ORDER BY CASE WHEN LOWER(username) = $1 THEN 0 WHEN LOWER(username) LIKE $2 ESCAPE '\\' THEN 1 ELSE 2 END ASC, created_at DESC LIMIT $4"
+                );
+                sqlx::query_as::<_, RawStoredUser>(&sql)
+                    .bind(&needle)
+                    .bind(&prefix)
+                    .bind(&substring)
+                    .bind(sql_limit)
+                    .fetch_all(pool)
+                    .await
+            }
+        }
+        .map_err(|err| ApiError::internal("Search users query", err))?;
+
+        let mut ranked: Vec<(u8, usize, StoredUser)> = Vec::with_capacity(rows.len());
+        for row in rows {
+            let user = self.stored_from_raw(row)?;
+            let username = user.username.to_lowercase();
+            let class = if username == needle {
+                0
+            } else if username.starts_with(&needle) {
+                1
+            } else {
+                2
+            };
+            ranked.push((class, levenshtein_distance(&username, &needle), user));
+        }
+
+        // Exact matches first, then prefix, then substring; within a class
+        // the closest (smallest edit distance) and most recent come first.
+        ranked.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(a.1.cmp(&b.1))
+                .then(b.2.created_at.cmp(&a.2.created_at))
+        });
+        ranked.truncate(limit);
+        Ok(ranked
+            .into_iter()
+            .map(|(_, _, user)| self.public_user(user))
+            .collect())
+    }
+
     pub async fn set_user_disabled(&self, user_id: &str, disabled: bool) -> ApiResult<()> {
         let value = if disabled { 1i64 } else { 0i64 };
         let now = now_ms() as i64;
@@ -1130,6 +1222,35 @@ fn sanitize_custom_badges(badges: &[String]) -> Vec<String> {
         }
     }
     cleaned
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 #[derive(Debug)]

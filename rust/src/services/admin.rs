@@ -19,7 +19,7 @@ pub async fn admin_overview(
         return Err(ApiError::forbidden("Admin only."));
     }
 
-    let users = state.accounts.list_users().await?;
+    let total_users = state.accounts.count_users().await?;
     let features = state.accounts.feature_flags().await?;
 
     let mut room_previews: BTreeMap<String, serde_json::Value> = BTreeMap::new();
@@ -68,11 +68,30 @@ pub async fn admin_overview(
 
     Ok(json!({
         "ok": true,
-        "users": users,
+        "totalUsers": total_users,
         "features": features,
         "rooms": rooms,
         "onlineCount": online_count
     }))
+}
+
+/// Server-side username search: returns the top matches (exact first, then
+/// prefix, then substring/fuzzy) without ever loading the full user list
+/// into the client.
+pub async fn search_users(
+    state: &SharedState,
+    admin: &AuthenticatedUser,
+    query: &str,
+) -> ApiResult<serde_json::Value> {
+    if !admin.admin {
+        return Err(ApiError::forbidden("Admin only."));
+    }
+    let needle = String::from(query).trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(json!({ "ok": true, "users": [] }));
+    }
+    let users = state.accounts.search_users(&needle, 30).await?;
+    Ok(json!({ "ok": true, "users": users }))
 }
 
 pub async fn set_feature(
