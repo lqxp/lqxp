@@ -25,6 +25,8 @@ use crate::core::{
 const SESSION_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 const MAX_USER_BADGES: usize = 16;
 const MAX_USER_BADGE_LEN: usize = 32;
+const MAX_BLOCKS_PER_ACCOUNT: usize = 512;
+pub const MAX_SOCIAL_BLOB_BYTES: usize = 64 * 1024;
 
 const USER_SELECT_BY_CREATED_DESC: &str =
     "SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users ORDER BY created_at DESC";
@@ -102,6 +104,12 @@ struct RawStoredUser {
     user_rank: i64,
     username_changes_json: String,
     custom_badges_json: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct StoredPrekey {
+    pub bundle_json: String,
+    pub updated_at: i64,
 }
 
 #[derive(Debug)]
@@ -197,6 +205,36 @@ impl AccountDatabase {
                 enabled BIGINT NOT NULL
             )
             "#,
+        )
+        .await?;
+
+        // QXP-PHANTOM : préclés publiques, tags de blocage opaques, blob roster.
+        self.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS prekeys (
+                user_id TEXT PRIMARY KEY,
+                bundle_json TEXT NOT NULL,
+                updated_at BIGINT NOT NULL
+            )
+            "#,
+        )
+        .await?;
+        self.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS blocks (
+                tag TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                created_at BIGINT NOT NULL
+            )
+            "#,
+        )
+        .await?;
+        self.ensure_column("users", "social_blob", "social_blob TEXT NULL")
+            .await?;
+        self.ensure_column(
+            "users",
+            "social_blob_ver",
+            "social_blob_ver BIGINT NOT NULL DEFAULT 0",
         )
         .await?;
         Ok(())
@@ -619,6 +657,18 @@ impl AccountDatabase {
                     .await
                     .map(|_| ())
                     .map_err(|err| ApiError::internal("Delete user sessions", err))?;
+                sqlx::query("DELETE FROM prekeys WHERE user_id = ?")
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| ApiError::internal("Delete user prekeys", err))?;
+                sqlx::query("DELETE FROM blocks WHERE user_id = ?")
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| ApiError::internal("Delete user blocks", err))?;
                 sqlx::query("DELETE FROM users WHERE id = ?")
                     .bind(user_id)
                     .execute(pool)
@@ -633,6 +683,18 @@ impl AccountDatabase {
                     .await
                     .map(|_| ())
                     .map_err(|err| ApiError::internal("Delete user sessions", err))?;
+                sqlx::query("DELETE FROM prekeys WHERE user_id = $1")
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| ApiError::internal("Delete user prekeys", err))?;
+                sqlx::query("DELETE FROM blocks WHERE user_id = $1")
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| ApiError::internal("Delete user blocks", err))?;
                 sqlx::query("DELETE FROM users WHERE id = $1")
                     .bind(user_id)
                     .execute(pool)
@@ -641,6 +703,251 @@ impl AccountDatabase {
                     .map_err(|err| ApiError::internal("Delete user record", err))
             }
         }
+    }
+
+    pub async fn publish_prekey(&self, user_id: &str, bundle_json: &str) -> ApiResult<()> {
+        let now = now_ms() as i64;
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO prekeys (user_id, bundle_json, updated_at) VALUES (?, ?, ?) \
+                     ON CONFLICT(user_id) DO UPDATE SET bundle_json = excluded.bundle_json, updated_at = excluded.updated_at",
+                )
+                .bind(user_id)
+                .bind(bundle_json)
+                .bind(now)
+                .execute(pool)
+                .await
+                .map(|_| ())
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO prekeys (user_id, bundle_json, updated_at) VALUES ($1, $2, $3) \
+                     ON CONFLICT (user_id) DO UPDATE SET bundle_json = EXCLUDED.bundle_json, updated_at = EXCLUDED.updated_at",
+                )
+                .bind(user_id)
+                .bind(bundle_json)
+                .bind(now)
+                .execute(pool)
+                .await
+                .map(|_| ())
+            }
+        }
+        .map_err(|err| ApiError::internal("Publish prekey", err))
+    }
+
+    pub async fn get_prekey_by_user_id(&self, user_id: &str) -> ApiResult<Option<StoredPrekey>> {
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query_as::<_, StoredPrekey>(
+                    "SELECT bundle_json, updated_at FROM prekeys WHERE user_id = ?",
+                )
+                .bind(user_id)
+                .fetch_optional(pool)
+                .await
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query_as::<_, StoredPrekey>(
+                    "SELECT bundle_json, updated_at FROM prekeys WHERE user_id = $1",
+                )
+                .bind(user_id)
+                .fetch_optional(pool)
+                .await
+            }
+        }
+        .map_err(|err| ApiError::internal("Fetch prekey", err))
+    }
+
+    pub async fn get_prekey_by_username(&self, username: &str) -> ApiResult<Option<StoredPrekey>> {
+        let Some(user) = self.user_by_username(username).await? else {
+            return Ok(None);
+        };
+        self.get_prekey_by_user_id(&user.id).await
+    }
+
+    pub async fn add_block_tag(&self, user_id: &str, tag: &str) -> ApiResult<bool> {
+        if self.count_block_tags(user_id).await? >= MAX_BLOCKS_PER_ACCOUNT {
+            return Ok(false);
+        }
+        let now = now_ms() as i64;
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO blocks (tag, user_id, created_at) VALUES (?, ?, ?)",
+                )
+                .bind(tag)
+                .bind(user_id)
+                .bind(now)
+                .execute(pool)
+                .await
+                .map(|_| ())
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO blocks (tag, user_id, created_at) VALUES ($1, $2, $3) ON CONFLICT (tag) DO NOTHING",
+                )
+                .bind(tag)
+                .bind(user_id)
+                .bind(now)
+                .execute(pool)
+                .await
+                .map(|_| ())
+            }
+        }
+        .map_err(|err| ApiError::internal("Add block tag", err))?;
+        Ok(true)
+    }
+
+    pub async fn remove_block_tag(&self, user_id: &str, tag: &str) -> ApiResult<()> {
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query("DELETE FROM blocks WHERE tag = ? AND user_id = ?")
+                    .bind(tag)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query("DELETE FROM blocks WHERE tag = $1 AND user_id = $2")
+                    .bind(tag)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+        }
+        .map_err(|err| ApiError::internal("Remove block tag", err))
+    }
+
+    pub async fn count_block_tags(&self, user_id: &str) -> ApiResult<usize> {
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                let row = sqlx::query("SELECT COUNT(*) FROM blocks WHERE user_id = ?")
+                    .bind(user_id)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(|err| ApiError::internal("Count block tags", err))?;
+                Ok(row.get::<i64, _>(0) as usize)
+            }
+            SqlBackend::Postgres(pool) => {
+                let row = sqlx::query("SELECT COUNT(*) FROM blocks WHERE user_id = $1")
+                    .bind(user_id)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(|err| ApiError::internal("Count block tags", err))?;
+                Ok(row.get::<i64, _>(0) as usize)
+            }
+        }
+    }
+
+    pub async fn list_block_tags(&self, user_id: &str) -> ApiResult<Vec<String>> {
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                let rows = sqlx::query("SELECT tag FROM blocks WHERE user_id = ?")
+                    .bind(user_id)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(|err| ApiError::internal("List block tags", err))?;
+                Ok(rows.iter().map(|row| row.get::<String, _>("tag")).collect())
+            }
+            SqlBackend::Postgres(pool) => {
+                let rows = sqlx::query("SELECT tag FROM blocks WHERE user_id = $1")
+                    .bind(user_id)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(|err| ApiError::internal("List block tags", err))?;
+                Ok(rows.iter().map(|row| row.get::<String, _>("tag")).collect())
+            }
+        }
+    }
+
+    pub async fn is_blocked_tag(&self, tag: &str) -> ApiResult<bool> {
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                let row = sqlx::query("SELECT 1 FROM blocks WHERE tag = ?")
+                    .bind(tag)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(|err| ApiError::internal("Check block tag", err))?;
+                Ok(row.is_some())
+            }
+            SqlBackend::Postgres(pool) => {
+                let row = sqlx::query("SELECT 1 FROM blocks WHERE tag = $1")
+                    .bind(tag)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(|err| ApiError::internal("Check block tag", err))?;
+                Ok(row.is_some())
+            }
+        }
+    }
+
+    pub async fn get_social_blob(&self, user_id: &str) -> ApiResult<(i64, Option<String>)> {
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                let row = sqlx::query(
+                    "SELECT social_blob_ver, social_blob FROM users WHERE id = ?",
+                )
+                .bind(user_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|err| ApiError::internal("Fetch social blob", err))?;
+                match row {
+                    Some(row) => Ok((
+                        row.get::<i64, _>("social_blob_ver"),
+                        row.get::<Option<String>, _>("social_blob"),
+                    )),
+                    None => Ok((0, None)),
+                }
+            }
+            SqlBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT social_blob_ver, social_blob FROM users WHERE id = $1",
+                )
+                .bind(user_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|err| ApiError::internal("Fetch social blob", err))?;
+                match row {
+                    Some(row) => Ok((
+                        row.get::<i64, _>("social_blob_ver"),
+                        row.get::<Option<String>, _>("social_blob"),
+                    )),
+                    None => Ok((0, None)),
+                }
+            }
+        }
+    }
+
+    /// Retourne `Ok(Some(ver_courant))` en cas de conflit LWW, `Ok(None)` sinon.
+    pub async fn put_social_blob(&self, user_id: &str, ver: i64, blob: &str) -> ApiResult<Option<i64>> {
+        let (current_ver, _) = self.get_social_blob(user_id).await?;
+        if ver <= current_ver {
+            return Ok(Some(current_ver));
+        }
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query("UPDATE users SET social_blob = ?, social_blob_ver = ? WHERE id = ?")
+                    .bind(blob)
+                    .bind(ver)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query("UPDATE users SET social_blob = $1, social_blob_ver = $2 WHERE id = $3")
+                    .bind(blob)
+                    .bind(ver)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+        }
+        .map_err(|err| ApiError::internal("Update social blob", err))?;
+        Ok(None)
     }
 
     pub async fn purge_accounts(

@@ -7,6 +7,7 @@ use hmac::{Hmac, Mac};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 
 use crate::core::{
@@ -116,7 +117,10 @@ pub async fn verify_and_consume_nullifier(
     }
 
     let expected_nullifier = compute_nullifier(&token.ticket, token.epoch, expected_action);
-    if nullifier != expected_nullifier {
+    // Comparaison constant-time (S4).
+    let left = nullifier.as_bytes();
+    let right = expected_nullifier.as_bytes();
+    if left.len() != right.len() || !bool::from(left.ct_eq(right)) {
         return Err(ApiError::bad_request("Malformed rate-limiting nullifier."));
     }
 

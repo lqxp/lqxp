@@ -16,7 +16,8 @@ pub fn request_id(value: &Value) -> Option<String> {
     value
         .get("requestId")
         .and_then(Value::as_str)
-        .map(str::to_owned)
+        // Plafonné à 128 caractères côté serveur (S5).
+        .map(|s| s.chars().take(128).collect())
 }
 
 pub fn with_request_id(mut payload: Value, request_id: Option<String>) -> Value {

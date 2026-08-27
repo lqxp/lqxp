@@ -284,3 +284,86 @@ pub struct SocketPayload {
     #[serde(default)]
     pub d: serde_json::Value,
 }
+
+// ── QXP-PHANTOM (rendez-vous fantôme) ────────────────────────────────────────
+// Couche externe d'une enveloppe : les seuls champs visibles par le serveur.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhantomEnvelope {
+    pub pv: u8,
+    pub slot_id: String,
+    pub recipient_fp: String,
+    pub sender_hint: String,
+    pub bucket: u32,
+    pub ct: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PhantomGateMode {
+    Pass,
+    Cap,
+    Ghost,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhantomGate {
+    pub mode: PhantomGateMode,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub nullifier: String,
+    /// Jeton de quota RLN (obtenu via `GET /api/auth/challenge`).
+    #[serde(default)]
+    pub quota_token: Option<crate::core::rln::EpochQuotaToken>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhantomDepositRequest {
+    pub envelope: PhantomEnvelope,
+    pub gate: PhantomGate,
+}
+
+fn default_want() -> usize {
+    8
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhantomPollRequest {
+    #[serde(default)]
+    pub slots: Vec<String>,
+    #[serde(default = "default_want")]
+    pub want: usize,
+}
+
+// Bundle de prékey publique (§2.1), persistée telle quelle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrekeyBundle {
+    pub version: u32,
+    pub mlkem768_pk: String,
+    pub ecdsa_p256_pk: serde_json::Value,
+    pub mldsa65_pk: String,
+    pub sig_ecdsa: String,
+    pub sig_mldsa: String,
+    #[serde(default)]
+    pub block_filter: Vec<String>,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SocialBlobPutRequest {
+    pub ver: i64,
+    pub blob: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PassRedeemRequest {
+    pub token_response: String,
+    pub nonce: String,
+}

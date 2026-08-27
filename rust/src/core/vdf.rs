@@ -6,6 +6,7 @@ use num_traits::{One, Zero};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use crate::core::{
     models::now_ms,
@@ -189,7 +190,7 @@ pub fn generate_vdf_challenge(target: Option<&str>, iterations_override: Option<
     let x_hex = format!("{:x}", x);
     let modulus_hex = format!("{:x}", modulus);
 
-    let content_to_sign = format!("{now}:{t}:{target_hash}:{salt}:{x_hex}");
+    let content_to_sign = format!("{now}:{t}:{target_hash}:{salt}:{x_hex}:{expires_at}");
     let signature = sign_challenge(&content_to_sign);
 
     VdfChallenge {
@@ -248,12 +249,13 @@ pub fn verify_vdf(
     }
 
     let content_to_verify = format!(
-        "{}:{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}:{}",
         challenge.issued_at,
         challenge.t,
         challenge.target_hash,
         challenge.salt,
-        challenge.x
+        challenge.x,
+        challenge.expires_at
     );
 
     if !verify_signature(&content_to_verify, &challenge.signature) {
@@ -262,11 +264,20 @@ pub fn verify_vdf(
 
     if let Some(target) = expected_target {
         let expected_hash = hash_target(target);
-        if challenge.target_hash != expected_hash {
+        let left = challenge.target_hash.as_bytes();
+        let right = expected_hash.as_bytes();
+        // Comparaison constant-time (S4).
+        if left.len() != right.len() || !bool::from(left.ct_eq(right)) {
             return Err(ApiError::bad_request(
                 "VDF security challenge was not bound to this target username.",
             ));
         }
+    }
+
+    // Borne de taille AVANT parse_bytes (S3) : évite l'allocation de grands
+    // entiers sur entrée non fiable.
+    if challenge.x.len() > 1024 || proof.y.len() > 1024 || proof.pi.len() > 1024 {
+        return Err(ApiError::bad_request("VDF parameters exceed size bound."));
     }
 
     let modulus = get_modulus();

@@ -127,6 +127,7 @@ pub async fn process_message(
         32 => upload_room_icon(&state, &session_id, payload.d).await,
         33 => update_room_title(&state, &session_id, payload.d).await,
         35 => request_public_profiles(&state, &session_id, payload.d).await,
+        38 => create_ghost_link_op(&state, &session_id, payload.d).await,
         40 => create_room(&state, &session_id, payload.d).await,
         41 => update_room_description(&state, &session_id, payload.d).await,
         42 => set_member_role(&state, &session_id, payload.d).await,
@@ -3803,6 +3804,56 @@ async fn request_public_profiles(state: &SharedState, session_id: &str, d: Value
     )
     .await;
     false
+}
+
+// Op 38 — LINK_CREATE : génère un lien fantôme single-use.
+//
+// NB : dans CE dépôt, les opcodes 43/44/45 sont déjà occupés par la modération
+// (ban/unban/kick). Les ops PHANTOM utilisent donc 36/37 (prekeys, M2),
+// 38 (LINK_CREATE) et 39 (BLOCK_UPDATE, M2) au lieu de 43/45 de la spec.
+async fn create_ghost_link_op(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+
+    let user_id = {
+        let players = state.players.read().await;
+        players
+            .get(session_id)
+            .filter(|player| !player.user_id.trim().is_empty())
+            .map(|player| player.user_id.clone())
+    };
+    let Some(user_id) = user_id else {
+        return respond_error(state, session_id, 38, "You need to be identified before", req_id).await;
+    };
+
+    if rate_limit_hit(
+        state.as_ref(),
+        format!("ghost:create:user:{user_id}"),
+        4,
+        15_000,
+    )
+    .await
+    {
+        return respond_error(state, session_id, 38, "Rate limit exceeded", req_id).await;
+    }
+
+    match crate::services::phantom::create_ghost_link(state, &user_id).await {
+        Ok(url) => {
+            respond_to_sender(
+                state,
+                session_id,
+                with_request_id(
+                    json!({
+                        "op": 38,
+                        "d": { "ok": true, "url": url }
+                    }),
+                    req_id,
+                ),
+            )
+            .await;
+            false
+        }
+        Err(_) => respond_error(state, session_id, 38, "Unable to create ghost link", req_id).await,
+    }
 }
 
 fn public_profile_cache_key(user_id: Option<&str>, username: Option<&str>) -> String {

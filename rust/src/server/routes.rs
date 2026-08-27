@@ -14,16 +14,18 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use tokio::fs;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
     core::{
-        database::AuthenticatedUser,
+        database::{AuthenticatedUser, MAX_SOCIAL_BLOB_BYTES},
+        models::{PassRedeemRequest, PhantomDepositRequest, PhantomPollRequest, SocialBlobPutRequest},
         presence::SharedState,
         result::{ApiError, ApiResult},
     },
-    services::{admin, auth, messaging, room, user},
+    services::{admin, auth, messaging, phantom, privacy_pass, room, user},
     websocket::handle_socket,
 };
 
@@ -66,6 +68,14 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/api/admin/users/purge", post(admin_users_purge_handler))
         .route("/api/release", get(latest_release_handler))
+        .route("/api/pass/redeem", post(pass_redeem_handler))
+        .route("/api/phantom/deposit", post(phantom_deposit_handler))
+        .route("/api/phantom/poll", post(phantom_poll_handler))
+        .route("/api/phantom/prekey/:username", get(phantom_prekey_handler))
+        .route(
+            "/api/social/blob",
+            get(social_blob_get_handler).put(social_blob_put_handler),
+        )
         .route("/ws", get(ws_upgrade_handler))
         .route("/*path", get(public_asset_handler))
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
@@ -906,6 +916,85 @@ fn public_origin(headers: &HeaderMap, configured_domain: &str) -> Option<String>
         return None;
     }
     Some(format!("https://{configured}"))
+}
+
+async fn pass_redeem_handler(
+    State(state): State<SharedState>,
+    Json(body): Json<PassRedeemRequest>,
+) -> ApiResult<impl IntoResponse> {
+    if crate::core::security::rate_limit_hit(&state, "pass:redeem:global".to_string(), 60, 60_000)
+        .await
+    {
+        return Err(ApiError::too_many_requests("Redemption rate limit exceeded."));
+    }
+    let deposit_token = privacy_pass::redeem_pass_token(&body.token_response, &body.nonce).await?;
+    Ok(Json(json!({ "ok": true, "depositToken": deposit_token })))
+}
+
+async fn phantom_deposit_handler(
+    State(state): State<SharedState>,
+    Json(body): Json<PhantomDepositRequest>,
+) -> ApiResult<impl IntoResponse> {
+    // Réponse générique unique : ok:true ou ok:false{reason:"gate"}. Aucune
+    // distinction observable entre refus de porte, blocage et validation.
+    match phantom::deposit(&state, body).await {
+        Ok(()) => Ok(Json(json!({ "ok": true }))),
+        Err(_) => Ok(Json(json!({ "ok": false, "reason": "gate" }))),
+    }
+}
+
+async fn phantom_poll_handler(
+    State(state): State<SharedState>,
+    Json(body): Json<PhantomPollRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let frames = phantom::poll(&state, body).await?;
+    Ok(Json(json!({ "frames": frames })))
+}
+
+async fn phantom_prekey_handler(
+    State(state): State<SharedState>,
+    AxumPath(username): AxumPath<String>,
+) -> ApiResult<impl IntoResponse> {
+    match phantom::fetch_prekey(&state, &username).await? {
+        Some(bundle) => Ok(Json(bundle)),
+        None => Err(ApiError::new(StatusCode::NOT_FOUND, "Prekey not found.")),
+    }
+}
+
+async fn social_blob_get_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> ApiResult<impl IntoResponse> {
+    let user = authenticated_user(&state, &headers).await?;
+    let (ver, blob) = state.accounts.get_social_blob(&user.id).await?;
+    Ok(Json(json!({ "ver": ver, "blob": blob })))
+}
+
+async fn social_blob_put_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<SocialBlobPutRequest>,
+) -> ApiResult<Response> {
+    let user = authenticated_user(&state, &headers).await?;
+    let decoded = B64
+        .decode(&body.blob)
+        .map_err(|_| ApiError::bad_request("Invalid blob encoding."))?;
+    if decoded.len() > MAX_SOCIAL_BLOB_BYTES {
+        return Err(ApiError::bad_request("Social blob too large."));
+    }
+
+    match state
+        .accounts
+        .put_social_blob(&user.id, body.ver, &body.blob)
+        .await?
+    {
+        Some(current_ver) => Ok((
+            StatusCode::CONFLICT,
+            Json(json!({ "currentVer": current_ver })),
+        )
+            .into_response()),
+        None => Ok((StatusCode::OK, Json(json!({ "ok": true }))).into_response()),
+    }
 }
 
 async fn authenticated_user(
