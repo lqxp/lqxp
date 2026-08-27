@@ -122,7 +122,6 @@ struct RawStoredUser {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct StoredPrekey {
     pub bundle_json: String,
-    pub updated_at: i64,
 }
 
 #[derive(Debug)]
@@ -845,7 +844,7 @@ impl AccountDatabase {
         match &self.backend {
             SqlBackend::Sqlite(pool) => {
                 sqlx::query_as::<_, StoredPrekey>(
-                    "SELECT bundle_json, updated_at FROM prekeys WHERE user_id = ?",
+                    "SELECT bundle_json FROM prekeys WHERE user_id = ?",
                 )
                 .bind(user_id)
                 .fetch_optional(pool)
@@ -853,7 +852,7 @@ impl AccountDatabase {
             }
             SqlBackend::Postgres(pool) => {
                 sqlx::query_as::<_, StoredPrekey>(
-                    "SELECT bundle_json, updated_at FROM prekeys WHERE user_id = $1",
+                    "SELECT bundle_json FROM prekeys WHERE user_id = $1",
                 )
                 .bind(user_id)
                 .fetch_optional(pool)
