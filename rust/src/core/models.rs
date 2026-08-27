@@ -303,7 +303,6 @@ pub struct PhantomEnvelope {
 pub enum PhantomGateMode {
     Pass,
     Cap,
-    Ghost,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -3,8 +3,6 @@ use std::{
     sync::{Arc, Once, OnceLock},
 };
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::{rngs::OsRng, RngCore};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -27,9 +25,6 @@ const MAX_WANT: usize = 8;
 const MAX_CT_LEN: usize = 96 * 1024;
 const MAX_GATE_TOKEN_LEN: usize = 4096;
 const VALID_BUCKETS: &[u32] = &[4096, 16384, 65536];
-
-const GHOST_TOKEN_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
-const MAX_ACTIVE_GHOST_PER_ACCOUNT: usize = 16;
 
 fn is_hex64(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -75,97 +70,12 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
 }
 
 /// `fp(pk) = SHA256(octets bruts de la clé publique)`, hex minuscule 64 chars.
-/// Convention partagée serveur/client pour `recipientFp` et le paramètre `f`
-/// d'un lien fantôme.
+/// Convention partagée serveur/client pour `recipientFp`.
 fn fingerprint_of_mlkem_hex(hex: &str) -> Option<String> {
     let bytes = decode_hex(hex)?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     Some(format!("{:x}", hasher.finalize()))
-}
-
-// ── Ghost codes (liens d'ami single-use) ─────────────────────────────────────
-#[derive(Debug, Clone)]
-struct GhostEntry {
-    owner_user_id: String,
-    expires_at: u64,
-}
-
-static GHOST_REGISTRY: OnceLock<Arc<Mutex<HashMap<String, GhostEntry>>>> = OnceLock::new();
-
-fn get_ghost_registry() -> &'static Arc<Mutex<HashMap<String, GhostEntry>>> {
-    GHOST_REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
-}
-
-fn ghost_token_key(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
-}
-
-/// Génère un `ghostToken` (32 octets) et stocke son SHA-256 en RAM (TTL 7 j,
-/// max 16 actifs/compte). Renvoie le token encodé b64url (sans padding).
-pub async fn register_ghost_token(user_id: &str) -> ApiResult<String> {
-    let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    let token_str = URL_SAFE_NO_PAD.encode(bytes);
-    let key = ghost_token_key(&bytes);
-
-    let registry = get_ghost_registry();
-    let mut map = registry.lock().await;
-    let now = now_ms();
-    map.retain(|_, entry| entry.expires_at > now);
-
-    let active = map
-        .values()
-        .filter(|entry| entry.owner_user_id == user_id)
-        .count();
-    if active >= MAX_ACTIVE_GHOST_PER_ACCOUNT {
-        return Err(ApiError::bad_request("Too many active ghost links."));
-    }
-
-    map.insert(
-        key,
-        GhostEntry {
-            owner_user_id: user_id.to_owned(),
-            expires_at: now + GHOST_TOKEN_TTL_MS,
-        },
-    );
-    Ok(token_str)
-}
-
-/// Consomme un ghost token (one-time). Ne retourne rien d'identifiable en cas
-/// d'échec — la dépense EST la consommation au dépôt.
-pub async fn consume_ghost_token(token: &str) -> ApiResult<()> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(token)
-        .map_err(|_| ApiError::bad_request("Invalid ghost token."))?;
-    if bytes.len() != 32 {
-        return Err(ApiError::bad_request("Invalid ghost token."));
-    }
-    let key = ghost_token_key(&bytes);
-    let registry = get_ghost_registry();
-    let mut map = registry.lock().await;
-    let now = now_ms();
-    match map.remove(&key) {
-        Some(entry) if entry.expires_at > now => Ok(()),
-        _ => Err(ApiError::bad_request("Ghost token already consumed or expired.")),
-    }
-}
-
-/// Construit le lien `qxp://ghost#t=<token>&f=<fp(prekey émetteur)>`.
-pub async fn create_ghost_link(state: &SharedState, user_id: &str) -> ApiResult<String> {
-    let Some(prekey) = state.accounts.get_prekey_by_user_id(user_id).await? else {
-        return Err(ApiError::bad_request(
-            "Publish a prekey before creating a ghost link.",
-        ));
-    };
-    let bundle: PrekeyBundle = serde_json::from_str(&prekey.bundle_json)
-        .map_err(|err| ApiError::internal("Prekey bundle decode", err))?;
-    let fingerprint = fingerprint_of_mlkem_hex(&bundle.mlkem768_pk)
-        .ok_or_else(|| ApiError::bad_request("Invalid stored prekey."))?;
-    let token = register_ghost_token(user_id).await?;
-    Ok(format!("qxp://ghost#t={token}&f={fingerprint}"))
 }
 
 #[derive(Debug, Clone)]
@@ -318,9 +228,6 @@ pub async fn deposit(state: &SharedState, req: PhantomDepositRequest) -> ApiResu
         }
         PhantomGateMode::Pass => {
             crate::services::privacy_pass::consume_deposit_token(&req.gate.token).await?;
-        }
-        PhantomGateMode::Ghost => {
-            consume_ghost_token(&req.gate.token).await?;
         }
     }
 
