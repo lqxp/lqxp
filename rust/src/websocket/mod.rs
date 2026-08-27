@@ -58,7 +58,7 @@ pub async fn handle_socket(state: SharedState, socket: WebSocket) {
 
         match received {
             Ok(Message::Text(text)) => {
-                if rate_limit_hit(&state, format!("ws-msg:session:{session_id}"), 120, 60_000).await {
+                if rate_limit_hit(&state, format!("ws-msg:session:{session_id}"), 600, 60_000).await {
                     send_json(&tx, json!({ "op": 0, "d": { "error": "Rate limited." } }));
                     break;
                 }
@@ -75,7 +75,7 @@ pub async fn handle_socket(state: SharedState, socket: WebSocket) {
                 }
             }
             Ok(Message::Binary(payload)) => {
-                if rate_limit_hit(&state, format!("ws-msg:session:{session_id}"), 120, 60_000).await {
+                if rate_limit_hit(&state, format!("ws-msg:session:{session_id}"), 600, 60_000).await {
                     send_json(&tx, json!({ "op": 0, "d": { "error": "Rate limited." } }));
                     break;
                 }

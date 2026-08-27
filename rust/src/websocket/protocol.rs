@@ -284,7 +284,7 @@ async fn identify_player(state: &SharedState, session_id: &str, d: Value) -> boo
 
 async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
     let req_id = request_id(&d);
-    if rate_limit_hit(state.as_ref(), format!("join:session:{}", session_id), 25, 10_000).await {
+    if rate_limit_hit(state.as_ref(), format!("join:session:{}", session_id), 150, 10_000).await {
         return respond_error(state, session_id, 3, "Join rate limit exceeded", req_id).await;
     }
     let Some(game_id) = d.get("gameId").and_then(Value::as_str).map(str::trim) else {
@@ -1102,7 +1102,7 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
 
 async fn send_room_history(state: &SharedState, session_id: &str, d: Value) -> bool {
     let req_id = request_id(&d);
-    if rate_limit_hit(state.as_ref(), format!("room_history:session:{}", session_id), 10, 10_000).await {
+    if rate_limit_hit(state.as_ref(), format!("room_history:session:{}", session_id), 150, 10_000).await {
         return respond_error(state, session_id, 18, "History request rate limit exceeded", req_id).await;
     }
     let requested_room = d.get("gameId").and_then(Value::as_str);
