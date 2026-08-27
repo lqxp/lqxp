@@ -1011,6 +1011,8 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
         encrypted,
         preview: None,
         deleted: false,
+        deleted_by: String::new(),
+        deleted_by_moderator: false,
     };
 
     let stored_message = store_room_message(state, &room_name, message_record).await;
@@ -1387,6 +1389,7 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
     };
 
     let timestamp = now_ms();
+    let mut deleted_by_moderator = false;
     let result = {
         let mut rooms = state.room_messages.write().await;
 
@@ -1407,12 +1410,14 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                     let room_record = state.database.room_record(&room_id).await;
                     let can_delete = if matches!(&room_record, Some(room) if room.kind == RoomKind::Community) {
                         let room = room_record.as_ref().unwrap();
-                        if message.username == username || (!message.user_id.is_empty() && message.user_id == user_id) {
+                        let is_self = message.username == username
+                            || (!message.user_id.is_empty() && message.user_id == user_id);
+                        if is_self {
                             true
                         } else {
                             let actor_role = role_in_room(room, &user_id);
                             let author_role = role_in_room(room, &message.user_id);
-                            match actor_role {
+                            let allowed = match actor_role {
                                 RoomRole::Administrator => true,
                                 RoomRole::SubAdministrator => {
                                     author_role == RoomRole::Member || author_role == RoomRole::Moderator
@@ -1421,7 +1426,11 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                                     room.mod_permissions.can_delete && author_role == RoomRole::Member
                                 }
                                 RoomRole::Member => false,
+                            };
+                            if allowed {
+                                deleted_by_moderator = true;
                             }
+                            allowed
                         }
                     } else {
                         is_admin || message.username == username
@@ -1443,6 +1452,8 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                     message.reactions.clear();
                     message.edited_at = None;
                     message.deleted = true;
+                    message.deleted_by = username.clone();
+                    message.deleted_by_moderator = deleted_by_moderator;
                     hit = Some((room_id, false));
                     break;
                 }
@@ -1468,6 +1479,7 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                     "gameId": room_id,
                     "messageId": message_id,
                     "deletedBy": username,
+                    "deletedByModerator": deleted_by_moderator,
                     "deletedAt": timestamp
                 }
             }),

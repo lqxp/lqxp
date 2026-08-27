@@ -272,6 +272,10 @@ pub struct ChatMessageRecord {
     pub preview: Option<LinkPreview>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deleted: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty", rename = "deletedBy")]
+    pub deleted_by: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not", rename = "deletedByModerator")]
+    pub deleted_by_moderator: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
