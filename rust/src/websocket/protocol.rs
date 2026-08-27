@@ -10,8 +10,8 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use crate::{
     core::{
         models::{
-            now_ms, Attachment, ChatMessageRecord, EncryptedPayload, MessageReaction, PlayerStatus, ProfileImage,
-            RoomIcon, RoomRecord, SocketPayload, UserPresenceStatus, UserProfile,
+            now_ms, Attachment, ChatMessageRecord, EncryptedPayload, MessageReaction, ModeratorPermissions, PlayerStatus,
+            ProfileImage, RoomIcon, RoomKind, RoomRecord, RoomRole, SocketPayload, UserPresenceStatus, UserProfile,
         },
         presence::SharedState,
         security::rate_limit_hit,
@@ -56,6 +56,11 @@ const PUBLIC_PROFILE_RATE_LIMIT_WINDOW_MS: u64 = 15_000;
 const PUBLIC_PROFILE_RATE_LIMIT_MAX: u32 = 4;
 const PUBLIC_PROFILE_MAX_LOOKUPS: usize = 8;
 const SYSTEM_USERNAME: &str = "system";
+const MAX_ROOM_DESCRIPTION_CHARS: usize = 140;
+const MAX_ROOM_MODERATORS: usize = 5;
+const MAX_ROOM_SUB_ADMINS: usize = 3;
+const MIN_TIMEOUT_SECS: u64 = 60;
+const MAX_TIMEOUT_SECS: u64 = 7 * 24 * 60 * 60;
 
 fn is_reserved_system_username(username: &str) -> bool {
     username.trim().eq_ignore_ascii_case(SYSTEM_USERNAME)
@@ -122,6 +127,17 @@ pub async fn process_message(
         32 => upload_room_icon(&state, &session_id, payload.d).await,
         33 => update_room_title(&state, &session_id, payload.d).await,
         35 => request_public_profiles(&state, &session_id, payload.d).await,
+        40 => create_room(&state, &session_id, payload.d).await,
+        41 => update_room_description(&state, &session_id, payload.d).await,
+        42 => set_member_role(&state, &session_id, payload.d).await,
+        43 => ban_member(&state, &session_id, payload.d).await,
+        44 => unban_member(&state, &session_id, payload.d).await,
+        45 => kick_member(&state, &session_id, payload.d).await,
+        46 => timeout_member(&state, &session_id, payload.d).await,
+        47 => transfer_ownership(&state, &session_id, payload.d).await,
+        48 => set_chat_lock(&state, &session_id, payload.d).await,
+        49 => set_moderator_permissions(&state, &session_id, payload.d).await,
+        50 => set_calls_enabled(&state, &session_id, payload.d).await,
         98 => update_voice_chat(&state, &session_id, payload.d).await,
         100 => update_mute_state(&state, &session_id, payload.d).await,
         110 => update_call_media_state(&state, &session_id, payload.d).await,
@@ -287,19 +303,30 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                 Err("Maximum room limit reached (100 rooms max)")
             } else {
                 let already_in = !player.rooms.insert(game_id.to_owned());
-                Ok((already_in, player.username.clone()))
+                Ok((already_in, player.username.clone(), player.user_id.clone()))
             }
         } else {
             Err("You need to be identified before")
         }
     };
 
-    let (already_in, player_name) = match join_result {
+    let (already_in, player_name, player_user_id) = match join_result {
         Ok(value) => value,
         Err(message) => return respond_error(state, session_id, 3, message, request_id(&d)).await,
     };
 
     if !already_in {
+        if let Some(room) = state.database.room_record(game_id).await {
+            if room.kind == RoomKind::Community && room.banned.contains_key(&player_user_id) {
+                {
+                    let mut players = state.players.write().await;
+                    if let Some(player) = players.get_mut(session_id) {
+                        player.rooms.remove(game_id);
+                    }
+                }
+                return respond_error(state, session_id, 3, "You are banned from this room", request_id(&d)).await;
+            }
+        }
         if let Err(err) = sync_room_record(state, game_id).await {
             error!("Failed to persist room {} on join: {}", game_id, err);
         }
@@ -315,12 +342,14 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
             title: game_id.to_owned(),
             icon: None,
             members: room_usernames(state, game_id, Some(session_id)).await,
+            ..Default::default()
         });
     let room_icon_url = room_record
         .icon
         .as_ref()
         .map(|icon| icon.file.url.clone())
         .unwrap_or_default();
+    let my_role = role_to_str(role_in_room(&room_record, &player_user_id));
     let broadcast_roster = room_players(state, game_id, None).await;
     let broadcast_profiles = room_profiles(state, game_id, None).await;
     let broadcast_statuses = room_statuses(state, game_id, None).await;
@@ -353,6 +382,7 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "voicePlayers": broadcast_voice_roster,
                     "callPlayers": broadcast_call_players,
                     "iconUrl": room_icon_url,
+                    "myRole": my_role,
                     "room": room_record
                 }
             }),
@@ -377,6 +407,7 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "callPlayers": call_players,
                     "alreadyJoined": already_in,
                     "iconUrl": room_icon_url,
+                    "myRole": my_role,
                     "room": room_record
                 }
             }),
@@ -445,6 +476,7 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
             title: game_id.to_owned(),
             icon: None,
             members: room_usernames(state, game_id, None).await,
+            ..Default::default()
         });
 
     broadcast_to_room(
@@ -910,19 +942,19 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
                     ))
                 } else {
                     player.last_message_timestamp = Some(now);
-                    Ok(player.username.clone())
+                    Ok((player.username.clone(), player.user_id.clone()))
                 }
             } else {
                 player.last_message_timestamp = Some(now);
-                Ok(player.username.clone())
+                Ok((player.username.clone(), player.user_id.clone()))
             }
         } else {
             Err("You need to be identified before sending message".to_owned())
         }
     };
 
-    let (player_name, current_profile) = match chat_result {
-        Ok(name) => {
+    let (player_name, user_id, current_profile) = match chat_result {
+        Ok((name, user_id)) => {
             let current_profile = {
                 let players = state.players.read().await;
                 players
@@ -930,12 +962,17 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
                     .map(|player| player.profile.clone())
                     .unwrap_or_default()
             };
-            (name, current_profile)
+            (name, user_id, current_profile)
         }
         Err(message) => return respond_error(state, session_id, 7, &message, request_id(&d)).await,
     };
 
     let room_name = target_game_id.to_owned();
+    if let Some(room) = state.database.room_record(&room_name).await {
+        if room.kind == RoomKind::Community && !can_speak(&room, &user_id) {
+            return respond_error(state, session_id, 7, "You are not allowed to speak in this room", request_id(&d)).await;
+        }
+    }
     let prefix = if room_name == "lobby" {
         "[lobby]"
     } else {
@@ -1328,11 +1365,11 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
 
     let room_hint = d.get("gameId").and_then(Value::as_str).map(str::trim);
 
-    let (username, is_admin) = {
+    let (username, is_admin, user_id) = {
         let players = state.players.read().await;
         match players.get(session_id) {
             Some(player) if !player.username.is_empty() => {
-                (player.username.clone(), player.is_admin)
+                (player.username.clone(), player.is_admin, player.user_id.clone())
             }
             _ => {
                 return respond_error(
@@ -1365,12 +1402,23 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                         hit = Some((room_id, true));
                         break;
                     }
-                    if !is_admin && message.username != username {
+                    let room_record = state.database.room_record(&room_id).await;
+                    let can_delete = if matches!(&room_record, Some(room) if room.kind == RoomKind::Community) {
+                        let room = room_record.as_ref().unwrap();
+                        match role_in_room(room, &user_id) {
+                            RoomRole::Administrator | RoomRole::SubAdministrator => true,
+                            RoomRole::Moderator => room.mod_permissions.can_delete,
+                            RoomRole::Member => message.username == username,
+                        }
+                    } else {
+                        is_admin || message.username == username
+                    };
+                    if !can_delete {
                         return respond_error(
                             state,
                             session_id,
                             21,
-                            "Only the author can delete this message",
+                            "You are not allowed to delete this message",
                             req_id,
                         )
                         .await;
@@ -1678,6 +1726,24 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
+
+    if is_voice_chat {
+        if let Some(room_id) = call_room.as_deref() {
+            if let Some(room) = state.database.room_record(room_id).await {
+                if room.kind == RoomKind::Community && !room.calls_enabled {
+                    let user_id = {
+                        let players = state.players.read().await;
+                        players.get(session_id).map(|p| p.user_id.clone()).unwrap_or_default()
+                    };
+                    let role = role_in_room(&room, &user_id);
+                    if role != RoomRole::Administrator && role != RoomRole::SubAdministrator {
+                        return respond_error(state, session_id, 98, "Calls are disabled in this room", req_id).await;
+                    }
+                }
+            }
+        }
+    }
+
     // Stale voice sessions from a crashed client (same account) that have not
     // timed out yet are evicted so the user can reconnect to voice instantly.
     let mut evicted_sessions: Vec<(Vec<String>, String, UserPresenceStatus, String, String)> =
@@ -2377,89 +2443,20 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
             Err(message) => return respond_error(state, session_id, 32, &message, req_id).await,
         };
 
-    let Some(raw) = d.get("file") else {
-        return respond_error(state, session_id, 32, "Missing file", req_id).await;
-    };
-    let Some(obj) = raw.as_object() else {
-        return respond_error(state, session_id, 32, "Invalid file payload", req_id).await;
-    };
-
-    let data_b64 = obj
-        .get("dataB64")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let Some(data_b64) = data_b64 else {
-        return respond_error(state, session_id, 32, "Missing file data", req_id).await;
-    };
-    if data_b64.len() > MAX_ROOM_ICON_UPLOAD_B64_LEN {
-        return respond_error(
-            state,
-            session_id,
-            32,
-            "Room icon too large (5MB max)",
-            req_id,
-        )
-        .await;
+    if let Some(room) = state.database.room_record(&room_id).await {
+        if room.kind == RoomKind::Community {
+            let role = role_in_room(&room, &user_id);
+            if role != RoomRole::Administrator && role != RoomRole::SubAdministrator {
+                return respond_error(state, session_id, 32, "You are not allowed to change this room", req_id).await;
+            }
+        }
     }
 
-    let decoded = match B64.decode(data_b64.as_bytes()) {
-        Ok(decoded) => decoded,
-        Err(_) => return respond_error(state, session_id, 32, "Invalid file base64", req_id).await,
-    };
-    if decoded.len() > MAX_ROOM_ICON_UPLOAD_BYTES {
-        return respond_error(
-            state,
-            session_id,
-            32,
-            "Room icon too large (5MB max)",
-            req_id,
-        )
-        .await;
-    }
-
-    let declared_mime = obj
-        .get("mimeType")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or("");
-    let (mime_type, _, _) = match detect_profile_image(&decoded, declared_mime) {
-        Ok(result) => result,
+    let icon = match store_room_icon_from_payload(state, &d, &room_id).await {
+        Ok(Some(icon)) => icon,
+        Ok(None) => return respond_error(state, session_id, 32, "Missing file", req_id).await,
         Err(message) => return respond_error(state, session_id, 32, message, req_id).await,
     };
-
-    let filename = sanitize_filename(
-        obj.get("filename")
-            .and_then(Value::as_str)
-            .unwrap_or("room-icon"),
-        "room-icon",
-        MAX_FILENAME_LEN,
-    );
-    let extension = filename
-        .rsplit('.')
-        .next()
-        .filter(|segment| *segment != filename)
-        .unwrap_or(match mime_type {
-            "image/png" => "png",
-            "image/gif" => "gif",
-            "image/jpeg" => "jpg",
-            _ => "bin",
-        });
-
-    if let Some(previous_icon) = state.database.room_icon(&room_id).await {
-        let previous_path =
-            std::path::Path::new(&state.config.network.upload_dir).join(&previous_icon.file.id);
-        let _ = tokio::fs::remove_file(previous_path).await;
-    }
-
-    let stored = match store_uploaded_bytes(state.as_ref(), extension, &decoded, mime_type).await {
-        Ok(stored) => stored,
-        Err(_) => {
-            return respond_error(state, session_id, 32, "Failed to save icon", req_id).await;
-        }
-    };
-
-    let icon = RoomIcon { file: stored };
 
     if let Err(err) = state.database.set_room_icon(&room_id, &icon).await {
         error!("Failed to persist room icon for {}: {}", room_id, err);
@@ -2479,6 +2476,7 @@ async fn upload_room_icon(state: &SharedState, session_id: &str, d: Value) -> bo
             title: room_id.clone(),
             icon: Some(icon.clone()),
             members: room_usernames(state, &room_id, Some(session_id)).await,
+            ..Default::default()
         });
 
     broadcast_room_record_to_members(state, &room_id, 32, req_id.clone(), true, room.clone()).await;
@@ -2524,6 +2522,15 @@ async fn update_room_title(state: &SharedState, session_id: &str, d: Value) -> b
             Ok(room_id) => room_id,
             Err(message) => return respond_error(state, session_id, 33, &message, req_id).await,
         };
+
+    if let Some(room) = state.database.room_record(&room_id).await {
+        if room.kind == RoomKind::Community {
+            let role = role_in_room(&room, &user_id);
+            if role != RoomRole::Administrator && role != RoomRole::SubAdministrator {
+                return respond_error(state, session_id, 33, "You are not allowed to change this room", req_id).await;
+            }
+        }
+    }
 
     let title = d
         .get("title")
@@ -2580,6 +2587,858 @@ async fn update_room_title(state: &SharedState, session_id: &str, d: Value) -> b
             }),
             req_id,
         ),
+    )
+    .await;
+    false
+}
+
+fn role_in_room(room: &RoomRecord, user_id: &str) -> RoomRole {
+    if room.owner_id.as_deref() == Some(user_id) {
+        return RoomRole::Administrator;
+    }
+    room.roles.get(user_id).copied().unwrap_or(RoomRole::Member)
+}
+
+fn role_to_str(role: RoomRole) -> &'static str {
+    match role {
+        RoomRole::Member => "member",
+        RoomRole::Moderator => "moderator",
+        RoomRole::SubAdministrator => "subAdmin",
+        RoomRole::Administrator => "administrator",
+    }
+}
+
+fn role_from_str(value: &str) -> Option<RoomRole> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "member" => Some(RoomRole::Member),
+        "moderator" => Some(RoomRole::Moderator),
+        "subadmin" | "sub-admin" | "subadministrator" => Some(RoomRole::SubAdministrator),
+        "administrator" | "admin" => Some(RoomRole::Administrator),
+        _ => None,
+    }
+}
+
+fn count_role(room: &RoomRecord, role: RoomRole) -> usize {
+    room.roles.values().filter(|current| **current == role).count()
+}
+
+fn can_speak(room: &RoomRecord, user_id: &str) -> bool {
+    if room.banned.contains_key(user_id) {
+        return false;
+    }
+    if let Some(&expiry) = room.timeouts.get(user_id) {
+        if expiry > now_ms() {
+            return false;
+        }
+    }
+    if room.chat_locked {
+        let role = role_in_room(room, user_id);
+        return role == RoomRole::Administrator || role == RoomRole::SubAdministrator;
+    }
+    true
+}
+
+#[derive(Clone, Copy)]
+enum ModAction {
+    Ban,
+    Kick,
+    Mute,
+}
+
+fn can_moderate(room: &RoomRecord, actor: RoomRole, target: RoomRole, action: ModAction) -> bool {
+    match actor {
+        RoomRole::Administrator => true,
+        RoomRole::SubAdministrator => target != RoomRole::Administrator,
+        RoomRole::Moderator => {
+            if target != RoomRole::Member {
+                return false;
+            }
+            match action {
+                ModAction::Ban => room.mod_permissions.can_ban,
+                ModAction::Kick => room.mod_permissions.can_kick,
+                ModAction::Mute => room.mod_permissions.can_mute,
+            }
+        }
+        RoomRole::Member => false,
+    }
+}
+
+fn parse_mod_permissions(raw: Option<&Value>) -> Option<ModeratorPermissions> {
+    raw.and_then(|value| serde_json::from_value::<ModeratorPermissions>(value.clone()).ok())
+}
+
+async fn session_identity(state: &SharedState, session_id: &str) -> Option<(String, String)> {
+    let players = state.players.read().await;
+    let player = players.get(session_id)?;
+    if player.user_id.is_empty() || player.username.is_empty() {
+        return None;
+    }
+    Some((player.user_id.clone(), player.username.clone()))
+}
+
+async fn username_for_user_id(state: &SharedState, user_id: &str) -> Option<String> {
+    let players = state.players.read().await;
+    players
+        .values()
+        .find(|player| player.user_id == user_id)
+        .map(|player| player.username.clone())
+}
+
+async fn resolve_target(state: &SharedState, d: &Value) -> Result<(String, String), &'static str> {
+    if let Some(id) = d
+        .get("targetUserId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let username = username_for_user_id(state, id).await.unwrap_or_default();
+        return Ok((id.to_owned(), username));
+    }
+    if let Some(name) = d
+        .get("targetUsername")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let players = state.players.read().await;
+        if let Some(player) = players
+            .values()
+            .find(|player| player.username.eq_ignore_ascii_case(name))
+        {
+            return Ok((player.user_id.clone(), player.username.clone()));
+        }
+        return Err("Unknown target user");
+    }
+    Err("Missing target user")
+}
+
+async fn remove_user_from_room(state: &SharedState, room_id: &str, user_id: &str, reason: &str) {
+    let mut sessions = Vec::new();
+    {
+        let mut players = state.players.write().await;
+        for player in players.values_mut() {
+            if player.user_id == user_id && player.rooms.remove(room_id) {
+                sessions.push((player.id.clone(), player.tx.clone()));
+            }
+        }
+    }
+    let payload = json!({
+        "op": 4,
+        "d": {
+            "ok": true,
+            "gameId": room_id,
+            "removed": true,
+            "reason": reason
+        }
+    })
+    .to_string();
+    for (_, tx) in sessions {
+        let _ = tx.send(Message::Text(payload.clone()));
+    }
+}
+
+async fn broadcast_member_removed(
+    state: &SharedState,
+    room_id: &str,
+    target_username: &str,
+    room: &RoomRecord,
+) {
+    let roster = room_players(state, room_id, None).await;
+    let profiles = room_profiles(state, room_id, None).await;
+    let statuses = room_statuses(state, room_id, None).await;
+    let platforms = room_platforms(state, room_id, None).await;
+    let voice_roster = room_voice_usernames(state, room_id, None).await;
+    let call_players = room_call_players(state, room_id, None).await;
+    broadcast_to_room(
+        state,
+        room_id,
+        json!({
+            "op": 4,
+            "d": {
+                "gameId": room_id,
+                "left": target_username,
+                "players": roster,
+                "profiles": profiles,
+                "statuses": statuses,
+                "platforms": platforms,
+                "voicePlayers": voice_roster,
+                "callPlayers": call_players,
+                "room": room
+            }
+        }),
+    )
+    .await;
+}
+
+async fn store_room_icon_from_payload(
+    state: &SharedState,
+    d: &Value,
+    room_id: &str,
+) -> Result<Option<RoomIcon>, &'static str> {
+    let Some(raw) = d.get("file") else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let Some(obj) = raw.as_object() else {
+        return Err("Invalid file payload");
+    };
+    let Some(data_b64) = obj
+        .get("dataB64")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err("Missing file data");
+    };
+    if data_b64.len() > MAX_ROOM_ICON_UPLOAD_B64_LEN {
+        return Err("Room icon too large (5MB max)");
+    }
+    let decoded = B64
+        .decode(data_b64.as_bytes())
+        .map_err(|_| "Invalid file base64")?;
+    if decoded.len() > MAX_ROOM_ICON_UPLOAD_BYTES {
+        return Err("Room icon too large (5MB max)");
+    }
+    let declared_mime = obj
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let (mime_type, _, _) = detect_profile_image(&decoded, declared_mime)?;
+    let filename = sanitize_filename(
+        obj.get("filename")
+            .and_then(Value::as_str)
+            .unwrap_or("room-icon"),
+        "room-icon",
+        MAX_FILENAME_LEN,
+    );
+    let extension = filename
+        .rsplit('.')
+        .next()
+        .filter(|segment| *segment != filename)
+        .unwrap_or(match mime_type {
+            "image/png" => "png",
+            "image/gif" => "gif",
+            "image/jpeg" => "jpg",
+            _ => "bin",
+        });
+
+    if let Some(previous_icon) = state.database.room_icon(room_id).await {
+        let previous_path =
+            std::path::Path::new(&state.config.network.upload_dir).join(&previous_icon.file.id);
+        let _ = tokio::fs::remove_file(previous_path).await;
+    }
+
+    let stored = store_uploaded_bytes(state.as_ref(), extension, &decoded, mime_type)
+        .await
+        .map_err(|_| "Failed to save icon")?;
+    Ok(Some(RoomIcon { file: stored }))
+}
+
+async fn create_room(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("create_room:session:{session_id}"), 5, 60_000).await {
+        return respond_error(state, session_id, 40, "Create room rate limit exceeded", req_id).await;
+    }
+    let Some((user_id, _username)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 40, "You need to be identified before", req_id).await;
+    };
+    let Some(room_id) = d
+        .get("roomId")
+        .or_else(|| d.get("gameId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return respond_error(state, session_id, 40, "Missing roomId", req_id).await;
+    };
+    if let Err(message) = validate_room_id(room_id) {
+        return respond_error(state, session_id, 40, message, req_id).await;
+    }
+    let kind = match d.get("kind").and_then(Value::as_str).map(str::trim).unwrap_or("community") {
+        "community" => RoomKind::Community,
+        "classic" => RoomKind::Classic,
+        _ => return respond_error(state, session_id, 40, "Invalid room kind", req_id).await,
+    };
+    if kind != RoomKind::Community {
+        return respond_error(state, session_id, 40, "Classic rooms are created locally", req_id).await;
+    }
+
+    let title = d
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(64).collect::<String>())
+        .unwrap_or_else(|| room_id.to_owned());
+    let description = d
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .chars()
+        .take(MAX_ROOM_DESCRIPTION_CHARS)
+        .collect::<String>();
+    let mod_permissions = parse_mod_permissions(d.get("modPermissions")).unwrap_or_default();
+
+    let mut roles = BTreeMap::new();
+    roles.insert(user_id.clone(), RoomRole::Administrator);
+
+    let mut room = RoomRecord {
+        room_id: room_id.to_owned(),
+        title,
+        icon: None,
+        members: Vec::new(),
+        kind,
+        description,
+        owner_id: Some(user_id.clone()),
+        chat_locked: false,
+        roles,
+        banned: BTreeMap::new(),
+        timeouts: BTreeMap::new(),
+        mod_permissions,
+        calls_enabled: true,
+    };
+
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist community room {}: {}", room_id, err);
+        return respond_error(state, session_id, 40, "Failed to persist room", req_id).await;
+    }
+
+    if let Ok(Some(icon)) = store_room_icon_from_payload(state, &d, &room_id).await {
+        room.icon = Some(icon);
+        if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+            error!("Failed to persist community room icon {}: {}", room_id, err);
+        }
+    }
+
+    let room = state.database.room_record(&room_id).await.unwrap_or(room);
+
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(
+            json!({
+                "op": 40,
+                "d": {
+                    "ok": true,
+                    "gameId": room_id,
+                    "room": room,
+                    "myRole": "administrator"
+                }
+            }),
+            req_id,
+        ),
+    )
+    .await;
+    false
+}
+
+async fn update_room_description(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("room_desc:session:{session_id}"), 5, 30_000).await {
+        return respond_error(state, session_id, 41, "Rate limit exceeded", req_id).await;
+    }
+    let Some((user_id, _username)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 41, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 41, &message, req_id).await,
+        };
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 41, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 41, "Not available for classic rooms", req_id).await;
+    }
+    let role = role_in_room(&room, &user_id);
+    if role != RoomRole::Administrator && role != RoomRole::SubAdministrator {
+        return respond_error(state, session_id, 41, "You are not allowed to change this room", req_id).await;
+    }
+
+    room.description = d
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .chars()
+        .take(MAX_ROOM_DESCRIPTION_CHARS)
+        .collect::<String>();
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist room description for {}: {}", room_id, err);
+        return respond_error(state, session_id, 41, "Failed to persist description", req_id).await;
+    }
+
+    broadcast_room_record_to_members(state, &room_id, 41, req_id.clone(), true, room.clone()).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({"op": 41, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
+    )
+    .await;
+    false
+}
+
+async fn set_member_role(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("set_role:session:{session_id}"), 10, 30_000).await {
+        return respond_error(state, session_id, 42, "Rate limit exceeded", req_id).await;
+    }
+    let Some((actor_id, _username)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 42, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 42, &message, req_id).await,
+        };
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 42, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 42, "Not a community room", req_id).await;
+    }
+    if role_in_room(&room, &actor_id) != RoomRole::Administrator {
+        return respond_error(state, session_id, 42, "Only the administrator can manage roles", req_id).await;
+    }
+    let Some(new_role) = d.get("role").and_then(Value::as_str).and_then(role_from_str) else {
+        return respond_error(state, session_id, 42, "Invalid role", req_id).await;
+    };
+    if new_role == RoomRole::Administrator {
+        return respond_error(state, session_id, 42, "Use transfer ownership", req_id).await;
+    }
+    let (target_id, _target_name) = match resolve_target(state, &d).await {
+        Ok(target) => target,
+        Err(message) => return respond_error(state, session_id, 42, message, req_id).await,
+    };
+    if target_id == actor_id {
+        return respond_error(state, session_id, 42, "You cannot change your own role", req_id).await;
+    }
+    let current_role = role_in_room(&room, &target_id);
+    if current_role == RoomRole::Administrator {
+        return respond_error(state, session_id, 42, "Cannot change the administrator's role", req_id).await;
+    }
+    if new_role == RoomRole::Moderator && current_role != RoomRole::Moderator
+        && count_role(&room, RoomRole::Moderator) >= MAX_ROOM_MODERATORS
+    {
+        return respond_error(state, session_id, 42, "Moderator limit reached (5 max)", req_id).await;
+    }
+    if new_role == RoomRole::SubAdministrator && current_role != RoomRole::SubAdministrator
+        && count_role(&room, RoomRole::SubAdministrator) >= MAX_ROOM_SUB_ADMINS
+    {
+        return respond_error(state, session_id, 42, "Sub-administrator limit reached (3 max)", req_id).await;
+    }
+
+    if new_role == RoomRole::Member {
+        room.roles.remove(&target_id);
+    } else {
+        room.roles.insert(target_id.clone(), new_role);
+    }
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist room role for {}: {}", room_id, err);
+        return respond_error(state, session_id, 42, "Failed to persist role", req_id).await;
+    }
+
+    let room = state.database.room_record(&room_id).await.unwrap_or(room);
+    broadcast_room_record_to_members(state, &room_id, 42, req_id.clone(), true, room.clone()).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({"op": 42, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
+    )
+    .await;
+    false
+}
+
+async fn ban_member(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("ban:session:{session_id}"), 10, 30_000).await {
+        return respond_error(state, session_id, 43, "Rate limit exceeded", req_id).await;
+    }
+    let Some((actor_id, _username)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 43, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 43, &message, req_id).await,
+        };
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 43, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 43, "Not a community room", req_id).await;
+    }
+    let actor_role = role_in_room(&room, &actor_id);
+    let (target_id, target_name) = match resolve_target(state, &d).await {
+        Ok(target) => target,
+        Err(message) => return respond_error(state, session_id, 43, message, req_id).await,
+    };
+    if target_id == actor_id {
+        return respond_error(state, session_id, 43, "You cannot target yourself", req_id).await;
+    }
+    let target_role = role_in_room(&room, &target_id);
+    if !can_moderate(&room, actor_role, target_role, ModAction::Ban) {
+        return respond_error(state, session_id, 43, "You are not allowed to ban this member", req_id).await;
+    }
+
+    room.banned.insert(target_id.clone(), target_name.clone());
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist ban for {}: {}", room_id, err);
+        return respond_error(state, session_id, 43, "Failed to persist ban", req_id).await;
+    }
+
+    remove_user_from_room(state, &room_id, &target_id, "banned").await;
+    if let Err(err) = sync_room_record(state, &room_id).await {
+        error!("Failed to sync room {} after ban: {}", room_id, err);
+    }
+    let room = state.database.room_record(&room_id).await.unwrap_or(room);
+    broadcast_member_removed(state, &room_id, &target_name, &room).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({"op": 43, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
+    )
+    .await;
+    false
+}
+
+async fn unban_member(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("unban:session:{session_id}"), 10, 30_000).await {
+        return respond_error(state, session_id, 44, "Rate limit exceeded", req_id).await;
+    }
+    let Some((actor_id, _username)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 44, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 44, &message, req_id).await,
+        };
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 44, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 44, "Not a community room", req_id).await;
+    }
+    let actor_role = role_in_room(&room, &actor_id);
+    if actor_role != RoomRole::Administrator && actor_role != RoomRole::SubAdministrator {
+        return respond_error(state, session_id, 44, "You are not allowed to unban", req_id).await;
+    }
+    let (target_id, _target_name) = match resolve_target(state, &d).await {
+        Ok(target) => target,
+        Err(message) => return respond_error(state, session_id, 44, message, req_id).await,
+    };
+    room.banned.remove(&target_id);
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist unban for {}: {}", room_id, err);
+        return respond_error(state, session_id, 44, "Failed to persist unban", req_id).await;
+    }
+    let room = state.database.room_record(&room_id).await.unwrap_or(room);
+    broadcast_room_record_to_members(state, &room_id, 44, req_id.clone(), true, room.clone()).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({"op": 44, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
+    )
+    .await;
+    false
+}
+
+async fn kick_member(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("kick:session:{session_id}"), 10, 30_000).await {
+        return respond_error(state, session_id, 45, "Rate limit exceeded", req_id).await;
+    }
+    let Some((actor_id, _username)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 45, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 45, &message, req_id).await,
+        };
+    let Some(room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 45, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 45, "Not a community room", req_id).await;
+    }
+    let actor_role = role_in_room(&room, &actor_id);
+    let (target_id, target_name) = match resolve_target(state, &d).await {
+        Ok(target) => target,
+        Err(message) => return respond_error(state, session_id, 45, message, req_id).await,
+    };
+    if target_id == actor_id {
+        return respond_error(state, session_id, 45, "You cannot target yourself", req_id).await;
+    }
+    let target_role = role_in_room(&room, &target_id);
+    if !can_moderate(&room, actor_role, target_role, ModAction::Kick) {
+        return respond_error(state, session_id, 45, "You are not allowed to kick this member", req_id).await;
+    }
+
+    remove_user_from_room(state, &room_id, &target_id, "kicked").await;
+    if let Err(err) = sync_room_record(state, &room_id).await {
+        error!("Failed to sync room {} after kick: {}", room_id, err);
+    }
+    let room = state.database.room_record(&room_id).await.unwrap_or(room);
+    broadcast_member_removed(state, &room_id, &target_name, &room).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({"op": 45, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
+    )
+    .await;
+    false
+}
+
+async fn timeout_member(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("timeout:session:{session_id}"), 10, 30_000).await {
+        return respond_error(state, session_id, 46, "Rate limit exceeded", req_id).await;
+    }
+    let Some((actor_id, _username)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 46, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 46, &message, req_id).await,
+        };
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 46, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 46, "Not a community room", req_id).await;
+    }
+    let actor_role = role_in_room(&room, &actor_id);
+    let (target_id, _target_name) = match resolve_target(state, &d).await {
+        Ok(target) => target,
+        Err(message) => return respond_error(state, session_id, 46, message, req_id).await,
+    };
+    if target_id == actor_id {
+        return respond_error(state, session_id, 46, "You cannot target yourself", req_id).await;
+    }
+    let target_role = role_in_room(&room, &target_id);
+    if !can_moderate(&room, actor_role, target_role, ModAction::Mute) {
+        return respond_error(state, session_id, 46, "You are not allowed to mute this member", req_id).await;
+    }
+
+    let seconds = d
+        .get("durationSecs")
+        .or_else(|| d.get("duration"))
+        .and_then(Value::as_u64)
+        .unwrap_or(MIN_TIMEOUT_SECS)
+        .clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS);
+    room.timeouts.insert(target_id, now_ms() + seconds.saturating_mul(1000));
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist timeout for {}: {}", room_id, err);
+        return respond_error(state, session_id, 46, "Failed to persist timeout", req_id).await;
+    }
+    let room = state.database.room_record(&room_id).await.unwrap_or(room);
+    broadcast_room_record_to_members(state, &room_id, 46, req_id.clone(), true, room.clone()).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({"op": 46, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
+    )
+    .await;
+    false
+}
+
+async fn transfer_ownership(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("transfer:session:{session_id}"), 5, 60_000).await {
+        return respond_error(state, session_id, 47, "Rate limit exceeded", req_id).await;
+    }
+    let Some((actor_id, _username)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 47, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 47, &message, req_id).await,
+        };
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 47, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 47, "Not a community room", req_id).await;
+    }
+    if room.owner_id.as_deref() != Some(actor_id.as_str()) {
+        return respond_error(state, session_id, 47, "Only the owner can transfer the room", req_id).await;
+    }
+    let (target_id, _target_name) = match resolve_target(state, &d).await {
+        Ok(target) => target,
+        Err(message) => return respond_error(state, session_id, 47, message, req_id).await,
+    };
+    let target_role = role_in_room(&room, &target_id);
+    if target_role != RoomRole::Moderator && target_role != RoomRole::SubAdministrator {
+        return respond_error(state, session_id, 47, "The new owner must be a moderator or sub-administrator", req_id).await;
+    }
+
+    let target_is_subadmin = target_role == RoomRole::SubAdministrator;
+    if !target_is_subadmin && count_role(&room, RoomRole::SubAdministrator) >= MAX_ROOM_SUB_ADMINS {
+        return respond_error(state, session_id, 47, "No sub-administrator slot available for the current owner", req_id).await;
+    }
+
+    room.owner_id = Some(target_id.clone());
+    room.roles.insert(target_id, RoomRole::Administrator);
+    room.roles.insert(actor_id, RoomRole::SubAdministrator);
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist ownership transfer for {}: {}", room_id, err);
+        return respond_error(state, session_id, 47, "Failed to persist transfer", req_id).await;
+    }
+    let room = state.database.room_record(&room_id).await.unwrap_or(room);
+    broadcast_room_record_to_members(state, &room_id, 47, req_id.clone(), true, room.clone()).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({"op": 47, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
+    )
+    .await;
+    false
+}
+
+async fn set_chat_lock(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("chat_lock:session:{session_id}"), 10, 30_000).await {
+        return respond_error(state, session_id, 48, "Rate limit exceeded", req_id).await;
+    }
+    let Some((actor_id, _username)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 48, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 48, &message, req_id).await,
+        };
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 48, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 48, "Not a community room", req_id).await;
+    }
+    let role = role_in_room(&room, &actor_id);
+    if role != RoomRole::Administrator && role != RoomRole::SubAdministrator {
+        return respond_error(state, session_id, 48, "You are not allowed to change chat mode", req_id).await;
+    }
+    room.chat_locked = d.get("locked").and_then(Value::as_bool).unwrap_or(false);
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist chat lock for {}: {}", room_id, err);
+        return respond_error(state, session_id, 48, "Failed to persist chat lock", req_id).await;
+    }
+    let room = state.database.room_record(&room_id).await.unwrap_or(room);
+    broadcast_room_record_to_members(state, &room_id, 48, req_id.clone(), true, room.clone()).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({"op": 48, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
+    )
+    .await;
+    false
+}
+
+async fn set_moderator_permissions(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("mod_perms:session:{session_id}"), 10, 30_000).await {
+        return respond_error(state, session_id, 49, "Rate limit exceeded", req_id).await;
+    }
+    let Some((actor_id, _username)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 49, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 49, &message, req_id).await,
+        };
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 49, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 49, "Not a community room", req_id).await;
+    }
+    if role_in_room(&room, &actor_id) != RoomRole::Administrator {
+        return respond_error(state, session_id, 49, "Only the administrator can configure moderator permissions", req_id).await;
+    }
+    let Some(permissions) = parse_mod_permissions(d.get("modPermissions")) else {
+        return respond_error(state, session_id, 49, "Invalid permissions payload", req_id).await;
+    };
+    room.mod_permissions = permissions;
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist moderator permissions for {}: {}", room_id, err);
+        return respond_error(state, session_id, 49, "Failed to persist permissions", req_id).await;
+    }
+    let room = state.database.room_record(&room_id).await.unwrap_or(room);
+    broadcast_room_record_to_members(state, &room_id, 49, req_id.clone(), true, room.clone()).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({"op": 49, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
+    )
+    .await;
+    false
+}
+
+async fn set_calls_enabled(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("calls_enabled:session:{session_id}"), 10, 30_000).await {
+        return respond_error(state, session_id, 50, "Rate limit exceeded", req_id).await;
+    }
+    let Some((actor_id, _username)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 50, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 50, &message, req_id).await,
+        };
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 50, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 50, "Not a community room", req_id).await;
+    }
+    let role = role_in_room(&room, &actor_id);
+    if role != RoomRole::Administrator && role != RoomRole::SubAdministrator {
+        return respond_error(state, session_id, 50, "You are not allowed to change call mode", req_id).await;
+    }
+    room.calls_enabled = d.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist calls enabled for {}: {}", room_id, err);
+        return respond_error(state, session_id, 50, "Failed to persist call mode", req_id).await;
+    }
+    let room = state.database.room_record(&room_id).await.unwrap_or(room);
+    broadcast_room_record_to_members(state, &room_id, 50, req_id.clone(), true, room.clone()).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({"op": 50, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
     )
     .await;
     false
@@ -3227,8 +4086,7 @@ pub async fn sync_room_record(
     let mut room = previous.unwrap_or(RoomRecord {
         room_id: room_id.to_owned(),
         title: room_id.to_owned(),
-        icon: None,
-        members: Vec::new(),
+        ..Default::default()
     });
     if room.title.trim().is_empty() {
         room.title = room_id.to_owned();

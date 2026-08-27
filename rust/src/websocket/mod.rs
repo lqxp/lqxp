@@ -174,8 +174,7 @@ pub async fn disconnect_player(state: &SharedState, session_id: &str) {
                 crate::core::models::RoomRecord {
                     room_id: game_id.clone(),
                     title: game_id.clone(),
-                    icon: None,
-                    members: Vec::new(),
+                    ..Default::default()
                 },
             );
             protocol::broadcast_to_room(

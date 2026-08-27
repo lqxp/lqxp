@@ -7,7 +7,7 @@ use tokio::fs;
 use crate::{
     core::{
         database::AuthenticatedUser,
-        models::{RoomIcon, RoomRecord},
+        models::{RoomIcon, RoomKind, RoomRecord, RoomRole},
         presence::SharedState,
         result::{ApiError, ApiResult},
     },
@@ -37,6 +37,19 @@ pub async fn upload_room_icon(
     };
     if !is_member {
         return Err(ApiError::forbidden("You are not in this room."));
+    }
+
+    if let Some(room) = state.database.room_record(&room_id).await {
+        if room.kind == RoomKind::Community {
+            let role = if room.owner_id.as_deref() == Some(user.id.as_str()) {
+                RoomRole::Administrator
+            } else {
+                room.roles.get(&user.id).copied().unwrap_or(RoomRole::Member)
+            };
+            if role != RoomRole::Administrator && role != RoomRole::SubAdministrator {
+                return Err(ApiError::forbidden("You are not allowed to change this room."));
+            }
+        }
     }
 
     let mut file_name = String::new();
@@ -88,6 +101,7 @@ pub async fn upload_room_icon(
             title: room_id.clone(),
             icon: Some(icon.clone()),
             members: protocol::room_usernames(state, &room_id, None).await,
+            ..Default::default()
         });
 
     protocol::broadcast_to_room(

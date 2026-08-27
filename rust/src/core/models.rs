@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn now_ms() -> u64 {
@@ -69,7 +70,57 @@ pub struct RoomIcon {
     pub file: StoredFile,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RoomKind {
+    #[serde(rename = "classic")]
+    #[default]
+    Classic,
+    #[serde(rename = "community")]
+    Community,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+pub enum RoomRole {
+    #[serde(rename = "member")]
+    #[default]
+    Member,
+    #[serde(rename = "moderator")]
+    Moderator,
+    #[serde(rename = "subAdmin")]
+    SubAdministrator,
+    #[serde(rename = "administrator")]
+    Administrator,
+}
+
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ModeratorPermissions {
+    #[serde(default = "default_true", rename = "canBan")]
+    pub can_ban: bool,
+    #[serde(default = "default_true", rename = "canKick")]
+    pub can_kick: bool,
+    #[serde(default = "default_true", rename = "canMute")]
+    pub can_mute: bool,
+    #[serde(default = "default_true", rename = "canDelete")]
+    pub can_delete: bool,
+}
+
+impl Default for ModeratorPermissions {
+    fn default() -> Self {
+        Self {
+            can_ban: true,
+            can_kick: true,
+            can_mute: true,
+            can_delete: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomRecord {
     #[serde(rename = "roomId")]
     pub room_id: String,
@@ -79,6 +130,44 @@ pub struct RoomRecord {
     pub icon: Option<RoomIcon>,
     #[serde(default)]
     pub members: Vec<String>,
+    #[serde(default, rename = "kind")]
+    pub kind: RoomKind,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "ownerId")]
+    pub owner_id: Option<String>,
+    #[serde(default, rename = "chatLocked")]
+    pub chat_locked: bool,
+    #[serde(default, rename = "roles")]
+    pub roles: BTreeMap<String, RoomRole>,
+    #[serde(default, rename = "banned")]
+    pub banned: BTreeMap<String, String>,
+    #[serde(default, rename = "timeouts")]
+    pub timeouts: BTreeMap<String, u64>,
+    #[serde(default, rename = "modPermissions")]
+    pub mod_permissions: ModeratorPermissions,
+    #[serde(default = "default_true", rename = "callsEnabled")]
+    pub calls_enabled: bool,
+}
+
+impl Default for RoomRecord {
+    fn default() -> Self {
+        Self {
+            room_id: String::new(),
+            title: String::new(),
+            icon: None,
+            members: Vec::new(),
+            kind: RoomKind::Classic,
+            description: String::new(),
+            owner_id: None,
+            chat_locked: false,
+            roles: BTreeMap::new(),
+            banned: BTreeMap::new(),
+            timeouts: BTreeMap::new(),
+            mod_permissions: ModeratorPermissions::default(),
+            calls_enabled: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

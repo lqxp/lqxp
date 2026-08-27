@@ -1,4 +1,4 @@
-use std::{path::Path, str::FromStr};
+use std::{collections::BTreeMap, path::Path, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 use sqlx::{
@@ -10,7 +10,10 @@ use tokio::fs;
 
 use crate::core::{
     config::DatabaseConfig,
-    models::{now_ms, status_from_str, status_to_str, RoomIcon, RoomRecord, UserPresenceStatus, UserProfile},
+    models::{
+        now_ms, status_from_str, status_to_str, ModeratorPermissions, RoomIcon, RoomKind, RoomRecord,
+        RoomRole, UserPresenceStatus, UserProfile,
+    },
     result::{ApiError, ApiResult},
     security::{
         generate_recovery_words, generate_session_token, generate_snowflake_id, hash_secret,
@@ -1303,19 +1306,85 @@ impl RoomDatabase {
                 title TEXT NOT NULL,
                 icon_json TEXT,
                 members_json TEXT NOT NULL DEFAULT '[]',
-                updated_at BIGINT NOT NULL DEFAULT 0
+                updated_at BIGINT NOT NULL DEFAULT 0,
+                kind TEXT NOT NULL DEFAULT 'classic',
+                description TEXT NOT NULL DEFAULT '',
+                owner_id TEXT,
+                roles_json TEXT NOT NULL DEFAULT '{}',
+                bans_json TEXT NOT NULL DEFAULT '[]',
+                timeouts_json TEXT NOT NULL DEFAULT '{}',
+                chat_locked BIGINT NOT NULL DEFAULT 0,
+                mod_permissions_json TEXT NOT NULL DEFAULT '{"canBan":true,"canKick":true,"canMute":true,"canDelete":true}',
+                calls_enabled BIGINT NOT NULL DEFAULT 1
             )
             "#,
         )
-        .await
-        .map_err(|err| ApiError::internal("Room DB migration", err))
+        .await?;
+        self.ensure_column("rooms", "kind", "kind TEXT NOT NULL DEFAULT 'classic'").await?;
+        self.ensure_column("rooms", "description", "description TEXT NOT NULL DEFAULT ''").await?;
+        self.ensure_column("rooms", "owner_id", "owner_id TEXT").await?;
+        self.ensure_column("rooms", "roles_json", "roles_json TEXT NOT NULL DEFAULT '{}'").await?;
+        self.ensure_column("rooms", "bans_json", "bans_json TEXT NOT NULL DEFAULT '[]'").await?;
+        self.ensure_column("rooms", "timeouts_json", "timeouts_json TEXT NOT NULL DEFAULT '{}'").await?;
+        self.ensure_column("rooms", "chat_locked", "chat_locked BIGINT NOT NULL DEFAULT 0").await?;
+        self.ensure_column("rooms", "mod_permissions_json", "mod_permissions_json TEXT NOT NULL DEFAULT '{\"canBan\":true,\"canKick\":true,\"canMute\":true,\"canDelete\":true}'").await?;
+        self.ensure_column("rooms", "calls_enabled", "calls_enabled BIGINT NOT NULL DEFAULT 1").await?;
+        Ok(())
+    }
+
+    async fn ensure_column(&self, table: &str, column: &str, definition: &str) -> ApiResult<()> {
+        let exists = match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+                    .fetch_all(pool)
+                    .await
+                    .map_err(|err| ApiError::internal("Room DB schema query", err))?;
+                rows.iter().any(|row| {
+                    row.try_get::<String, _>("name")
+                        .map(|name| name == column)
+                        .unwrap_or(false)
+                })
+            }
+            SqlBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
+                )
+                .bind(table)
+                .bind(column)
+                .fetch_optional(pool)
+                .await
+                .map_err(|err| ApiError::internal("Room DB schema query", err))?;
+                row.is_some()
+            }
+        };
+        if exists {
+            return Ok(());
+        }
+        self.execute(&format!("ALTER TABLE {table} ADD COLUMN {definition}"))
+            .await
     }
 
     pub async fn room_record(&self, room_id: &str) -> Option<RoomRecord> {
-        let fields = match &self.backend {
+        type Fields = (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+        );
+
+        let fields: Fields = match &self.backend {
             SqlBackend::Sqlite(pool) => {
                 let row = sqlx::query(
-                    "SELECT room_id, title, icon_json, members_json FROM rooms WHERE room_id = ?",
+                    "SELECT room_id, title, icon_json, members_json, kind, description, owner_id, roles_json, bans_json, timeouts_json, chat_locked, mod_permissions_json, calls_enabled FROM rooms WHERE room_id = ?",
                 )
                 .bind(room_id)
                 .fetch_optional(pool)
@@ -1326,11 +1395,20 @@ impl RoomDatabase {
                     row.try_get::<String, _>("title").ok(),
                     row.try_get::<Option<String>, _>("icon_json").ok().flatten(),
                     row.try_get::<String, _>("members_json").ok(),
+                    row.try_get::<String, _>("kind").ok(),
+                    row.try_get::<String, _>("description").ok(),
+                    row.try_get::<Option<String>, _>("owner_id").ok().flatten(),
+                    row.try_get::<String, _>("roles_json").ok(),
+                    row.try_get::<String, _>("bans_json").ok(),
+                    row.try_get::<String, _>("timeouts_json").ok(),
+                    row.try_get::<i64, _>("chat_locked").ok(),
+                    row.try_get::<String, _>("mod_permissions_json").ok(),
+                    row.try_get::<i64, _>("calls_enabled").ok(),
                 )
             }
             SqlBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT room_id, title, icon_json, members_json FROM rooms WHERE room_id = $1",
+                    "SELECT room_id, title, icon_json, members_json, kind, description, owner_id, roles_json, bans_json, timeouts_json, chat_locked, mod_permissions_json, calls_enabled FROM rooms WHERE room_id = $1",
                 )
                 .bind(room_id)
                 .fetch_optional(pool)
@@ -1341,48 +1419,109 @@ impl RoomDatabase {
                     row.try_get::<String, _>("title").ok(),
                     row.try_get::<Option<String>, _>("icon_json").ok().flatten(),
                     row.try_get::<String, _>("members_json").ok(),
+                    row.try_get::<String, _>("kind").ok(),
+                    row.try_get::<String, _>("description").ok(),
+                    row.try_get::<Option<String>, _>("owner_id").ok().flatten(),
+                    row.try_get::<String, _>("roles_json").ok(),
+                    row.try_get::<String, _>("bans_json").ok(),
+                    row.try_get::<String, _>("timeouts_json").ok(),
+                    row.try_get::<i64, _>("chat_locked").ok(),
+                    row.try_get::<String, _>("mod_permissions_json").ok(),
+                    row.try_get::<i64, _>("calls_enabled").ok(),
                 )
             }
         };
 
-        let (stored_room_id, title, icon_json, members_json) = fields;
+        let (stored_room_id, title, icon_json, members_json, kind, description, owner_id, roles_json, bans_json, timeouts_json, chat_locked, mod_permissions_json, calls_enabled) = fields;
         let title = title.unwrap_or_else(|| stored_room_id.clone());
         let icon = icon_json
             .and_then(|value| serde_json::from_str::<RoomIcon>(&value).ok());
         let members = members_json
             .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
             .unwrap_or_default();
+        let kind = kind
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<RoomKind>(&format!("\"{value}\"" )).ok())
+            .unwrap_or(RoomKind::Classic);
+        let description = description.unwrap_or_default();
+        let roles = roles_json
+            .and_then(|value| serde_json::from_str::<BTreeMap<String, RoomRole>>(&value).ok())
+            .unwrap_or_default();
+        let banned = bans_json
+            .and_then(|value| serde_json::from_str::<BTreeMap<String, String>>(&value).ok())
+            .unwrap_or_default();
+        let timeouts = timeouts_json
+            .and_then(|value| serde_json::from_str::<BTreeMap<String, u64>>(&value).ok())
+            .unwrap_or_default();
+        let chat_locked = chat_locked.unwrap_or(0) != 0;
+        let mod_permissions = mod_permissions_json
+            .and_then(|value| serde_json::from_str::<ModeratorPermissions>(&value).ok())
+            .unwrap_or_default();
+        let calls_enabled = calls_enabled.unwrap_or(1) != 0;
 
         Some(RoomRecord {
             room_id: stored_room_id,
             title,
             icon,
             members,
+            kind,
+            description,
+            owner_id,
+            chat_locked,
+            roles,
+            banned,
+            timeouts,
+            mod_permissions,
+            calls_enabled,
         })
     }
 
     pub async fn set_room_record(&self, room_id: &str, room: &RoomRecord) -> ApiResult<()> {
-        let (icon_json, members_json, updated_at): (Option<String>, String, i64) = (
-            room.icon
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(|err| ApiError::internal("Icon json serialize", err))?,
-            serde_json::to_string(&room.members)
-                .map_err(|err| ApiError::internal("Members json serialize", err))?,
-            now_ms() as i64,
-        );
+        let icon_json: Option<String> = room
+            .icon
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|err| ApiError::internal("Icon json serialize", err))?;
+        let members_json = serde_json::to_string(&room.members)
+            .map_err(|err| ApiError::internal("Members json serialize", err))?;
+        let roles_json = serde_json::to_string(&room.roles)
+            .map_err(|err| ApiError::internal("Roles json serialize", err))?;
+        let bans_json = serde_json::to_string(&room.banned)
+            .map_err(|err| ApiError::internal("Bans json serialize", err))?;
+        let timeouts_json = serde_json::to_string(&room.timeouts)
+            .map_err(|err| ApiError::internal("Timeouts json serialize", err))?;
+        let mod_permissions_json = serde_json::to_string(&room.mod_permissions)
+            .map_err(|err| ApiError::internal("Moderator permissions json serialize", err))?;
+        let kind = match room.kind {
+            RoomKind::Classic => "classic",
+            RoomKind::Community => "community",
+        };
+        let updated_at = now_ms() as i64;
+        let chat_locked = if room.chat_locked { 1i64 } else { 0i64 };
+        let calls_enabled = if room.calls_enabled { 1i64 } else { 0i64 };
+
         match &self.backend {
             SqlBackend::Sqlite(pool) => {
                 sqlx::query(
-                    "INSERT INTO rooms (room_id, title, icon_json, members_json, updated_at) VALUES (?, ?, ?, ?, ?) \
-                     ON CONFLICT(room_id) DO UPDATE SET title = excluded.title, icon_json = excluded.icon_json, members_json = excluded.members_json, updated_at = excluded.updated_at",
+                    "INSERT INTO rooms (room_id, title, icon_json, members_json, updated_at, kind, description, owner_id, roles_json, bans_json, timeouts_json, chat_locked, mod_permissions_json, calls_enabled) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                     ON CONFLICT(room_id) DO UPDATE SET title = excluded.title, icon_json = excluded.icon_json, members_json = excluded.members_json, updated_at = excluded.updated_at, kind = excluded.kind, description = excluded.description, owner_id = excluded.owner_id, roles_json = excluded.roles_json, bans_json = excluded.bans_json, timeouts_json = excluded.timeouts_json, chat_locked = excluded.chat_locked, mod_permissions_json = excluded.mod_permissions_json, calls_enabled = excluded.calls_enabled",
                 )
                 .bind(room_id)
                 .bind(&room.title)
                 .bind(icon_json)
                 .bind(members_json)
                 .bind(updated_at)
+                .bind(kind)
+                .bind(&room.description)
+                .bind(room.owner_id.as_deref())
+                .bind(roles_json)
+                .bind(bans_json)
+                .bind(timeouts_json)
+                .bind(chat_locked)
+                .bind(mod_permissions_json)
+                .bind(calls_enabled)
                 .execute(pool)
                 .await
                 .map(|_| ())
@@ -1390,14 +1529,24 @@ impl RoomDatabase {
             }
             SqlBackend::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO rooms (room_id, title, icon_json, members_json, updated_at) VALUES ($1, $2, $3, $4, $5) \
-                     ON CONFLICT(room_id) DO UPDATE SET title = excluded.title, icon_json = excluded.icon_json, members_json = excluded.members_json, updated_at = excluded.updated_at",
+                    "INSERT INTO rooms (room_id, title, icon_json, members_json, updated_at, kind, description, owner_id, roles_json, bans_json, timeouts_json, chat_locked, mod_permissions_json, calls_enabled) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) \
+                     ON CONFLICT(room_id) DO UPDATE SET title = excluded.title, icon_json = excluded.icon_json, members_json = excluded.members_json, updated_at = excluded.updated_at, kind = excluded.kind, description = excluded.description, owner_id = excluded.owner_id, roles_json = excluded.roles_json, bans_json = excluded.bans_json, timeouts_json = excluded.timeouts_json, chat_locked = excluded.chat_locked, mod_permissions_json = excluded.mod_permissions_json, calls_enabled = excluded.calls_enabled",
                 )
                 .bind(room_id)
                 .bind(&room.title)
                 .bind(icon_json)
                 .bind(members_json)
                 .bind(updated_at)
+                .bind(kind)
+                .bind(&room.description)
+                .bind(room.owner_id.as_deref())
+                .bind(roles_json)
+                .bind(bans_json)
+                .bind(timeouts_json)
+                .bind(chat_locked)
+                .bind(mod_permissions_json)
+                .bind(calls_enabled)
                 .execute(pool)
                 .await
                 .map(|_| ())
@@ -1437,8 +1586,7 @@ impl RoomDatabase {
         let mut room = self.room_record(room_id).await.unwrap_or(RoomRecord {
             room_id: room_id.to_owned(),
             title: room_id.to_owned(),
-            icon: None,
-            members: Vec::new(),
+            ..Default::default()
         });
         room.icon = Some(icon.clone());
         self.set_room_record(room_id, &room).await
