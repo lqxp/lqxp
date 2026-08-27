@@ -990,6 +990,7 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
         room_id: room_name.clone(),
         user: format!("{} {}", prefix, player_name),
         username: player_name,
+        user_id: user_id.clone(),
         text: if encrypted.is_some() {
             String::new()
         } else {
@@ -1405,10 +1406,21 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                     let room_record = state.database.room_record(&room_id).await;
                     let can_delete = if matches!(&room_record, Some(room) if room.kind == RoomKind::Community) {
                         let room = room_record.as_ref().unwrap();
-                        match role_in_room(room, &user_id) {
-                            RoomRole::Administrator | RoomRole::SubAdministrator => true,
-                            RoomRole::Moderator => room.mod_permissions.can_delete,
-                            RoomRole::Member => message.username == username,
+                        if message.username == username || (!message.user_id.is_empty() && message.user_id == user_id) {
+                            true
+                        } else {
+                            let actor_role = role_in_room(room, &user_id);
+                            let author_role = role_in_room(room, &message.user_id);
+                            match actor_role {
+                                RoomRole::Administrator => true,
+                                RoomRole::SubAdministrator => {
+                                    author_role == RoomRole::Member || author_role == RoomRole::Moderator
+                                }
+                                RoomRole::Moderator => {
+                                    room.mod_permissions.can_delete && author_role == RoomRole::Member
+                                }
+                                RoomRole::Member => false,
+                            }
                         }
                     } else {
                         is_admin || message.username == username
@@ -3006,8 +3018,9 @@ async fn set_member_role(state: &SharedState, session_id: &str, d: Value) -> boo
     if room.kind != RoomKind::Community {
         return respond_error(state, session_id, 42, "Not a community room", req_id).await;
     }
-    if role_in_room(&room, &actor_id) != RoomRole::Administrator {
-        return respond_error(state, session_id, 42, "Only the administrator can manage roles", req_id).await;
+    let actor_role = role_in_room(&room, &actor_id);
+    if actor_role != RoomRole::Administrator && actor_role != RoomRole::SubAdministrator {
+        return respond_error(state, session_id, 42, "Only administrators can manage roles", req_id).await;
     }
     let Some(new_role) = d.get("role").and_then(Value::as_str).and_then(role_from_str) else {
         return respond_error(state, session_id, 42, "Invalid role", req_id).await;
@@ -3381,8 +3394,9 @@ async fn set_moderator_permissions(state: &SharedState, session_id: &str, d: Val
     if room.kind != RoomKind::Community {
         return respond_error(state, session_id, 49, "Not a community room", req_id).await;
     }
-    if role_in_room(&room, &actor_id) != RoomRole::Administrator {
-        return respond_error(state, session_id, 49, "Only the administrator can configure moderator permissions", req_id).await;
+    let actor_role = role_in_room(&room, &actor_id);
+    if actor_role != RoomRole::Administrator && actor_role != RoomRole::SubAdministrator {
+        return respond_error(state, session_id, 49, "Only administrators can configure moderator permissions", req_id).await;
     }
     let Some(permissions) = parse_mod_permissions(d.get("modPermissions")) else {
         return respond_error(state, session_id, 49, "Invalid permissions payload", req_id).await;

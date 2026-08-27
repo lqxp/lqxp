@@ -248,6 +248,8 @@ pub struct ChatMessageRecord {
     pub room_id: String,
     pub user: String,
     pub username: String,
+    #[serde(default, skip_serializing_if = "String::is_empty", rename = "userId")]
+    pub user_id: String,
     pub text: String,
     pub timestamp: u64,
     #[serde(default)]
