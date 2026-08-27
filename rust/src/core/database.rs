@@ -74,6 +74,19 @@ impl Default for FeatureFlags {
     }
 }
 
+/// Salon par défaut (« session par défaut ») : roomId + roomKey, configurable à
+/// chaud par un admin. Le serveur détient volontairement la `room_key` E2EE du
+/// salon officiel afin de pouvoir la redistribuer à chaque connexion (accepté
+/// par conception pour un canal de news non sensible).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultRoom {
+    pub room_id: String,
+    pub room_key: String,
+    #[serde(default)]
+    pub title: String,
+}
+
 #[derive(Debug, Clone)]
 struct StoredUser {
     id: String,
@@ -229,6 +242,18 @@ impl AccountDatabase {
             "#,
         )
         .await?;
+        self.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS default_room (
+                id INTEGER PRIMARY KEY,
+                room_id TEXT NOT NULL,
+                room_key TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                updated_at BIGINT NOT NULL
+            )
+            "#,
+        )
+        .await?;
         self.ensure_column("users", "social_blob", "social_blob TEXT NULL")
             .await?;
         self.ensure_column(
@@ -353,6 +378,86 @@ impl AccountDatabase {
             .map(|_| ()),
         }
         .map_err(|err| ApiError::internal("Database set feature", err))
+    }
+
+    pub async fn set_default_room(
+        &self,
+        room_id: &str,
+        room_key: &str,
+        title: &str,
+    ) -> ApiResult<()> {
+        let now = now_ms() as i64;
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query(
+                "INSERT INTO default_room (id, room_id, room_key, title, updated_at) VALUES (1, ?, ?, ?, ?) \
+                     ON CONFLICT(id) DO UPDATE SET room_id = excluded.room_id, room_key = excluded.room_key, title = excluded.title, updated_at = excluded.updated_at",
+            )
+            .bind(room_id)
+            .bind(room_key)
+            .bind(title)
+            .bind(now)
+            .execute(pool)
+            .await
+            .map(|_| ()),
+            SqlBackend::Postgres(pool) => sqlx::query(
+                "INSERT INTO default_room (id, room_id, room_key, title, updated_at) VALUES (1, $1, $2, $3, $4) \
+                     ON CONFLICT (id) DO UPDATE SET room_id = EXCLUDED.room_id, room_key = EXCLUDED.room_key, title = EXCLUDED.title, updated_at = EXCLUDED.updated_at",
+            )
+            .bind(room_id)
+            .bind(room_key)
+            .bind(title)
+            .bind(now)
+            .execute(pool)
+            .await
+            .map(|_| ()),
+        }
+        .map_err(|err| ApiError::internal("Database set default room", err))
+    }
+
+    pub async fn get_default_room(&self) -> ApiResult<Option<DefaultRoom>> {
+        let room = match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query("SELECT room_id, room_key, title FROM default_room WHERE id = 1")
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(|err| ApiError::internal("Database get default room", err))?
+                    .map(|row| DefaultRoom {
+                        room_id: row.get::<String, _>("room_id"),
+                        room_key: row.get::<String, _>("room_key"),
+                        title: row.get::<String, _>("title"),
+                    })
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query("SELECT room_id, room_key, title FROM default_room WHERE id = 1")
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(|err| ApiError::internal("Database get default room", err))?
+                    .map(|row| DefaultRoom {
+                        room_id: row.get::<String, _>("room_id"),
+                        room_key: row.get::<String, _>("room_key"),
+                        title: row.get::<String, _>("title"),
+                    })
+            }
+        };
+        Ok(room)
+    }
+
+    pub async fn clear_default_room(&self) -> ApiResult<()> {
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query("DELETE FROM default_room WHERE id = 1")
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+            SqlBackend::Postgres(pool) => {
+                sqlx::query("DELETE FROM default_room WHERE id = 1")
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+        }
+        .map_err(|err| ApiError::internal("Database clear default room", err))
     }
 
     pub async fn register(

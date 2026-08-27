@@ -263,6 +263,8 @@ async fn identify_player(state: &SharedState, session_id: &str, d: Value) -> boo
         )
     };
 
+    let default_room = state.accounts.get_default_room().await.ok().flatten();
+
     respond_to_sender(
         state,
         session_id,
@@ -275,7 +277,8 @@ async fn identify_player(state: &SharedState, session_id: &str, d: Value) -> boo
                     "admin": is_admin,
                     "profile": profile.clone(),
                     "status": status,
-                    "badges": account.badges
+                    "badges": account.badges,
+                    "defaultRoom": default_room
                 }
             }),
             request_id(&d),

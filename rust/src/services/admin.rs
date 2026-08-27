@@ -21,6 +21,7 @@ pub async fn admin_overview(
 
     let total_users = state.accounts.count_users().await?;
     let features = state.accounts.feature_flags().await?;
+    let default_room = state.accounts.get_default_room().await?;
 
     let mut room_previews: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     let online_count = {
@@ -70,6 +71,7 @@ pub async fn admin_overview(
         "ok": true,
         "totalUsers": total_users,
         "features": features,
+        "defaultRoom": default_room,
         "rooms": rooms,
         "onlineCount": online_count
     }))
@@ -111,6 +113,49 @@ pub async fn set_feature(
     state.accounts.set_feature(key, enabled).await?;
     let features = state.accounts.feature_flags().await?;
     Ok(json!({ "ok": true, "features": features }))
+}
+
+pub async fn set_default_room(
+    state: &SharedState,
+    admin: &AuthenticatedUser,
+    room_id: &str,
+    room_key: &str,
+    title: &str,
+) -> ApiResult<serde_json::Value> {
+    if !admin.admin {
+        return Err(ApiError::forbidden("Admin only."));
+    }
+    let room_id = room_id.trim();
+    if room_id.len() < 8
+        || room_id.len() > 64
+        || !room_id.chars().all(|ch| ch.is_ascii_alphanumeric())
+    {
+        return Err(ApiError::bad_request("Invalid default room id."));
+    }
+    let room_key = room_key.trim();
+    if room_key.is_empty() || room_key.len() > 512 {
+        return Err(ApiError::bad_request("Invalid default room key."));
+    }
+    let title = title.trim().chars().take(64).collect::<String>();
+    state
+        .accounts
+        .set_default_room(room_id, room_key, &title)
+        .await?;
+    Ok(json!({
+        "ok": true,
+        "defaultRoom": { "roomId": room_id, "roomKey": room_key, "title": title }
+    }))
+}
+
+pub async fn clear_default_room(
+    state: &SharedState,
+    admin: &AuthenticatedUser,
+) -> ApiResult<serde_json::Value> {
+    if !admin.admin {
+        return Err(ApiError::forbidden("Admin only."));
+    }
+    state.accounts.clear_default_room().await?;
+    Ok(json!({ "ok": true, "defaultRoom": null }))
 }
 
 pub async fn set_user_disabled(

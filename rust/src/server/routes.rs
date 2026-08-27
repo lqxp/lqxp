@@ -50,6 +50,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/admin/overview", get(admin_overview_handler))
         .route("/api/admin/users/search", get(admin_users_search_handler))
         .route("/api/admin/features", post(admin_features_handler))
+        .route("/api/admin/default-room", post(admin_default_room_handler))
         .route(
             "/api/admin/users/:user_id/disabled",
             post(admin_user_disabled_handler),
@@ -220,6 +221,19 @@ struct UsernameRequest {
 struct FeatureRequest {
     key: String,
     enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DefaultRoomRequest {
+    #[serde(default)]
+    clear: bool,
+    #[serde(default)]
+    room_id: Option<String>,
+    #[serde(default)]
+    room_key: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -559,6 +573,24 @@ async fn admin_features_handler(
     admin::set_feature(&state, &admin, &body.key, body.enabled)
         .await
         .map(Json)
+}
+
+async fn admin_default_room_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<DefaultRoomRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let admin = authenticated_user(&state, &headers).await?;
+    if body.clear {
+        admin::clear_default_room(&state, &admin).await.map(Json)
+    } else {
+        let room_id = body.room_id.unwrap_or_default();
+        let room_key = body.room_key.unwrap_or_default();
+        let title = body.title.unwrap_or_default();
+        admin::set_default_room(&state, &admin, &room_id, &room_key, &title)
+            .await
+            .map(Json)
+    }
 }
 
 async fn admin_user_disabled_handler(
