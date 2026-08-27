@@ -326,7 +326,23 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                         player.rooms.remove(game_id);
                     }
                 }
-                return respond_error(state, session_id, 3, "You are banned from this room", request_id(&d)).await;
+                respond_to_sender(
+                    state,
+                    session_id,
+                    with_request_id(
+                        json!({
+                            "op": 3,
+                            "d": {
+                                "error": "You are banned from this room",
+                                "gameId": game_id,
+                                "banned": true
+                            }
+                        }),
+                        request_id(&d),
+                    ),
+                )
+                .await;
+                return false;
             }
         }
         if let Err(err) = sync_room_record(state, game_id).await {
