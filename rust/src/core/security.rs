@@ -13,6 +13,7 @@ use crate::core::result::{ApiError, ApiResult};
 
 const USERNAME_MIN: usize = 2;
 const USERNAME_MAX: usize = 32;
+const USERNAME_REGISTER_MAX: usize = 24;
 const RESERVED_USERNAMES: &[&str] = &["system"];
 const PASSWORD_MIN: usize = 8;
 const PASSWORD_MAX: usize = 128;
@@ -97,11 +98,19 @@ pub fn normalize_recovery_phrase(words: &str) -> String {
 }
 
 pub fn validate_username(username: &str) -> ApiResult<String> {
+    validate_username_with_max(username, USERNAME_MAX)
+}
+
+pub fn validate_registration_username(username: &str) -> ApiResult<String> {
+    validate_username_with_max(username, USERNAME_REGISTER_MAX)
+}
+
+fn validate_username_with_max(username: &str, max: usize) -> ApiResult<String> {
     let trimmed = username.trim();
     let char_count = trimmed.chars().count();
-    if !(USERNAME_MIN..=USERNAME_MAX).contains(&char_count) {
+    if !(USERNAME_MIN..=max).contains(&char_count) {
         return Err(ApiError::bad_request(format!(
-            "Username must be between {USERNAME_MIN} and {USERNAME_MAX} characters."
+            "Username must be between {USERNAME_MIN} and {max} characters."
         )));
     }
 

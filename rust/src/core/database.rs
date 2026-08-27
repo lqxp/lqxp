@@ -18,7 +18,7 @@ use crate::core::{
     security::{
         generate_recovery_words, generate_session_token, generate_snowflake_id, hash_secret,
         normalize_recovery_phrase, normalize_username, token_hash, validate_password,
-        validate_username, verify_secret, verify_secret_constant_time,
+        validate_registration_username, validate_username, verify_secret, verify_secret_constant_time,
     },
 };
 
@@ -322,7 +322,7 @@ impl AccountDatabase {
         username: &str,
         password: &str,
     ) -> ApiResult<(PublicUser, String, Vec<String>)> {
-        let username = validate_username(username)?;
+        let username = validate_registration_username(username)?;
         validate_password(password)?;
         if self.user_by_username(&username).await?.is_some() {
             let _ = verify_secret_constant_time(password, None);
