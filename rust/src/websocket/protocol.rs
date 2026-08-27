@@ -1761,6 +1761,18 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
             let role = role_in_room(&room, &user_id);
             if role == RoomRole::Administrator || role == RoomRole::SubAdministrator {
                 state.call_access_overrides.write().await.remove(room_id);
+                broadcast_to_room(
+                    state,
+                    room_id,
+                    json!({
+                        "op": 51,
+                        "d": {
+                            "gameId": room_id,
+                            "allowMembers": false
+                        }
+                    }),
+                )
+                .await;
             }
         }
     }
@@ -3501,6 +3513,20 @@ async fn set_call_access(state: &SharedState, session_id: &str, d: Value) -> boo
             overrides.remove(&room_id);
         }
     }
+
+    broadcast_to_room(
+        state,
+        &room_id,
+        json!({
+            "op": 51,
+            "d": {
+                "gameId": room_id,
+                "allowMembers": allow_members
+            }
+        }),
+    )
+    .await;
+
     respond_to_sender(
         state,
         session_id,
