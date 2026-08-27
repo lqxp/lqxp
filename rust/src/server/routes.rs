@@ -939,7 +939,12 @@ async fn phantom_deposit_handler(
     // distinction observable entre refus de porte, blocage et validation.
     match phantom::deposit(&state, body).await {
         Ok(()) => Ok(Json(json!({ "ok": true }))),
-        Err(_) => Ok(Json(json!({ "ok": false, "reason": "gate" }))),
+        Err(err) => {
+            // Journal interne uniquement (debug) — la réponse client reste
+            // générique pour préserver INV13/E1.
+            tracing::debug!("phantom deposit rejected: {err}");
+            Ok(Json(json!({ "ok": false, "reason": "gate" })))
+        }
     }
 }
 
