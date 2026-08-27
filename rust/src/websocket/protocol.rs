@@ -138,6 +138,7 @@ pub async fn process_message(
         48 => set_chat_lock(&state, &session_id, payload.d).await,
         49 => set_moderator_permissions(&state, &session_id, payload.d).await,
         50 => set_calls_enabled(&state, &session_id, payload.d).await,
+        51 => set_call_access(&state, &session_id, payload.d).await,
         98 => update_voice_chat(&state, &session_id, payload.d).await,
         100 => update_mute_state(&state, &session_id, payload.d).await,
         110 => update_call_media_state(&state, &session_id, payload.d).await,
@@ -1739,19 +1740,28 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
 
+    let user_id = {
+        let players = state.players.read().await;
+        players.get(session_id).map(|p| p.user_id.clone()).unwrap_or_default()
+    };
+
     if is_voice_chat {
         if let Some(room_id) = call_room.as_deref() {
             if let Some(room) = state.database.room_record(room_id).await {
                 if room.kind == RoomKind::Community && !room.calls_enabled {
-                    let user_id = {
-                        let players = state.players.read().await;
-                        players.get(session_id).map(|p| p.user_id.clone()).unwrap_or_default()
-                    };
                     let role = role_in_room(&room, &user_id);
-                    if role != RoomRole::Administrator && role != RoomRole::SubAdministrator {
+                    let overridden = state.call_access_overrides.read().await.contains(room_id);
+                    if role != RoomRole::Administrator && role != RoomRole::SubAdministrator && !overridden {
                         return respond_error(state, session_id, 98, "Calls are disabled in this room", req_id).await;
                     }
                 }
+            }
+        }
+    } else if let Some(room_id) = call_room.as_deref() {
+        if let Some(room) = state.database.room_record(room_id).await {
+            let role = role_in_room(&room, &user_id);
+            if role == RoomRole::Administrator || role == RoomRole::SubAdministrator {
+                state.call_access_overrides.write().await.remove(room_id);
             }
         }
     }
@@ -3453,6 +3463,52 @@ async fn set_calls_enabled(state: &SharedState, session_id: &str, d: Value) -> b
         state,
         session_id,
         with_request_id(json!({"op": 50, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
+    )
+    .await;
+    false
+}
+
+async fn set_call_access(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("call_access:session:{session_id}"), 10, 30_000).await {
+        return respond_error(state, session_id, 51, "Rate limit exceeded", req_id).await;
+    }
+    let Some((actor_id, _username)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 51, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 51, &message, req_id).await,
+        };
+    let Some(room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 51, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 51, "Not a community room", req_id).await;
+    }
+    let role = role_in_room(&room, &actor_id);
+    if role != RoomRole::Administrator && role != RoomRole::SubAdministrator {
+        return respond_error(state, session_id, 51, "You are not allowed to change call access", req_id).await;
+    }
+    let allow_members = d.get("allowMembers").and_then(Value::as_bool).unwrap_or(false);
+    {
+        let mut overrides = state.call_access_overrides.write().await;
+        if allow_members {
+            overrides.insert(room_id.clone());
+        } else {
+            overrides.remove(&room_id);
+        }
+    }
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(
+            json!({"op": 51, "d": { "ok": true, "gameId": room_id, "allowMembers": allow_members }}),
+            req_id,
+        ),
     )
     .await;
     false

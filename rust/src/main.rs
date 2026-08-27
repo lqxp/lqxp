@@ -5,7 +5,7 @@ mod services;
 mod utils;
 mod websocket;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use tokio::{net::TcpListener, sync::RwLock};
 use tracing::info;
@@ -52,6 +52,7 @@ async fn main() {
         accounts,
         rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         public_profile_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        call_access_overrides: Arc::new(RwLock::new(HashSet::new())),
     });
 
     let app = build_router(state.clone());

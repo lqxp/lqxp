@@ -22,6 +22,7 @@ pub struct AppState {
     pub accounts: Arc<AccountDatabase>,
     pub rate_limits: Arc<Mutex<HashMap<String, RateLimitBucket>>>,
     pub public_profile_cache: Arc<Mutex<HashMap<String, CachedPublicProfile>>>,
+    pub call_access_overrides: Arc<RwLock<HashSet<String>>>,
 }
 
 pub type SharedState = Arc<AppState>;
