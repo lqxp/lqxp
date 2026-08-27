@@ -383,7 +383,6 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
                     "voicePlayers": broadcast_voice_roster,
                     "callPlayers": broadcast_call_players,
                     "iconUrl": room_icon_url,
-                    "myRole": my_role,
                     "room": room_record
                 }
             }),
