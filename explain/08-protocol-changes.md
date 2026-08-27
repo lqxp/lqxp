@@ -6,30 +6,28 @@ specification or threat model and the shipped implementation.
 
 ## 8.1 Added WebSocket operations
 
-Four authenticated WebSocket operations were added for QXP-PHANTOM:
+Three authenticated WebSocket operations were added for QXP-PHANTOM:
 
 | Opcode | Name | Request | Response |
 | --- | --- | --- | --- |
 | 36 | Publish prekey | a prekey bundle | `{ "ok": true, "version": 1 }` |
 | 37 | Fetch prekeys | `{ "usernames": ["..."] }` | `{ "bundles": { "user": bundle } }` |
-| 38 | Create ghost link | empty | `{ "ok": true, "url": "qxp://ghost#..." }` |
 | 39 | Update blocks | `{ "add": ["<hex64>"], "remove": ["<hex64>"] }` | `{ "filter": ["<hex64>"] }` |
 
-All four require an identified session and follow the existing
+All three require an identified session and follow the existing
 `respond_error(state, sid, op, message, request_id)` error pattern with static
 messages.
 
 ## 8.2 Opcode renumbering versus the specification
 
-The design specification assigned PHANTOM the opcodes 36, 37, 43, and 45. In the
-shipped code, opcodes 43, 44, and 45 were already occupied by moderation
-operations (ban, unban, kick). PHANTOM therefore uses 36, 37, 38, and 39.
+The design specification assigned PHANTOM the opcodes 36, 37, and 45. In the
+shipped code, opcode 45 was already occupied by moderation (kick), so block
+updates use 39. Prekey publish and fetch keep their specification opcodes.
 
 | Concept | Specification opcode | Shipped opcode |
 | --- | --- | --- |
 | Publish prekey | 36 | 36 |
 | Fetch prekeys | 37 | 37 |
-| Create ghost link | 43 | 38 |
 | Update blocks | 45 | 39 |
 
 ## 8.3 Default room
@@ -73,7 +71,7 @@ without review.
 | Privacy Pass redemption | Implemented (S1, E7) | Route and nonce store wired, but VOPRF verification is a stub that always fails | The `pass` deposit gate is currently unusable. |
 | Contextual pseudonym | Ed25519 derived per room (P3) | ECDSA P-256 derived per room | Same domain separation property, different curve. |
 | Inner envelope sealing | MLS / X-Wing inner layer (P4) | ML-KEM-768 plus AES-256-GCM, no second MLS layer | Envelopes are sealed to the recipient and opaque to the server. |
-| Deposit gate | Pass, cap, or ghost token | Anonymous quota nullifier plus one of pass, cap, or ghost | One additional anonymous gate is always required. |
+| Deposit gate | Pass, cap, or ghost token | Anonymous quota nullifier plus one of pass or cap | One additional anonymous gate is always required. The ghost gate was removed. |
 
 ## 8.7 Audit items integrated
 

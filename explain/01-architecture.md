@@ -50,8 +50,7 @@ The client source is under `web/src/`:
 The client uses two independent transports:
 
 - **Authenticated WebSocket** at `/ws` for chat, rooms, presence, calls, and the
-  authenticated QXP-PHANTOM operations (prekey publish/fetch, ghost link
-  creation, block updates).
+  authenticated QXP-PHANTOM operations (prekey publish/fetch and block updates).
 - **Anonymous HTTP** for the QXP-PHANTOM dead-drop operations (`deposit` and
   `poll`) and for the anti-abuse challenge endpoints. These requests never carry
   an authorization header, so the server cannot bind a deposit or a poll to an
@@ -91,8 +90,8 @@ The server uses two storage classes.
 - The QXP-PHANTOM dead-drop. Capped at 100 000 envelopes, 24 hour TTL, destroyed
   on restart.
 - Rate limit buckets, the public profile cache, and all ephemeral crypto key
-  registries (VDF consumed set, PQC ephemeral keys, quota nullifiers, CAPTCHA
-  tokens, ghost token registry).
+  registries (VDF consumed set, PQC ephemeral keys, quota nullifiers, and
+  CAPTCHA tokens).
 
 **Persisted in SQLite or PostgreSQL through `sqlx`:**
 

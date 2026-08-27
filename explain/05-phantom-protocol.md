@@ -149,7 +149,7 @@ Deposits and polls use anonymous HTTP and never carry an authorization header.
 ```json
 {
   "mode": "cap",
-  "token": "<cap token or ghost token or deposit token>",
+  "token": "<cap token or deposit token>",
   "nullifier": "<hex64>",
   "quotaToken": { "epoch": 0, "ticket": "...", "signature": "..." }
 }
@@ -161,8 +161,8 @@ The server applies, in order:
 2. Envelope and gate validation.
 3. The opaque block check.
 4. The anonymous quota nullifier check.
-5. The mode-specific gate: `cap` verifies a CAPTCHA token, `pass` consumes a
-   Privacy Pass deposit token, or `ghost` consumes a single-use ghost token.
+5. The mode-specific gate: `cap` verifies a CAPTCHA token, or `pass` consumes a
+   Privacy Pass deposit token.
 
 On success the envelope is stored in the RAM dead-drop. On any failure the
 response is the same generic `{ "ok": false, "reason": "gate" }`.
@@ -187,21 +187,7 @@ The store is a RAM `HashMap<slotId, VecDeque<envelope>>` with these bounds:
 
 The store is never written to disk and is lost on restart.
 
-## 5.6 Ghost links
-
-A ghost link lets someone deposit one envelope to the link creator without
-solving the CAPTCHA.
-
-Creation is opcode 38 and requires a published prekey. The server generates a
-random 32 byte token, stores only `SHA256(token)` in RAM for 7 days, and returns:
-
-```text
-qxp://ghost#t=<b64url token>&f=<fp(creator prekey)>
-```
-
-A deposit with `mode: "ghost"` consumes the token exactly once.
-
-## 5.7 Blocking
+## 5.6 Blocking
 
 Blocking is two layered barriers.
 
@@ -226,7 +212,7 @@ the per-account quota of 512 and is never joined or exposed.
 fingerprints and silently destroys any incoming envelope whose sender is in the
 list, before any UI rendering.
 
-## 5.8 Encrypted roster
+## 5.7 Encrypted roster
 
 The friend list is synchronized across devices through an opaque encrypted blob.
 The blob key is:
@@ -250,7 +236,7 @@ The decrypted content is:
 }
 ```
 
-## 5.9 Rendezvous state machine
+## 5.8 Rendezvous state machine
 
 ```text
 Shared-room path

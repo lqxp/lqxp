@@ -37,7 +37,6 @@ The dispatch table from `websocket/protocol.rs::process_message` is:
 | 35 | Request public profiles | Client to server |
 | 36 | Publish prekey (PHANTOM) | Client to server |
 | 37 | Fetch prekeys (PHANTOM) | Client to server |
-| 38 | Create ghost link (PHANTOM) | Client to server |
 | 39 | Update block list (PHANTOM) | Client to server |
 | 40 | Create room | Client to server |
 | 41 | Update room description | Client to server |

@@ -20,7 +20,7 @@ The documentation covers:
   identity, contextual keys, and the hybrid signature scheme.
 - The real-time message transport and the end-to-end encrypted message format.
 - The QXP-PHANTOM friend rendezvous protocol: prekeys, slots, envelopes, gates,
-  blocking, ghost links, and the encrypted roster.
+  blocking, and the encrypted roster.
 - The cryptographic primitives and their exact wire formats.
 - The anti-abuse layer: rate limiting, anonymous quota tokens, the Verifiable
   Delay Function, the CAPTCHA challenge, and the Privacy Pass redemption status.

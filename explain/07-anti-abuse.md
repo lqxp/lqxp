@@ -19,7 +19,6 @@ Representative limits:
 | `phantom:poll:global` | 20 | 1 second |
 | `phantom:prekey:global` | 60 | 60 seconds |
 | `prekey-fetch:user:<id>` | 4 | 15 seconds |
-| `ghost:create:user:<id>` | 4 | 15 seconds |
 | `register:global` | 10 | 15 seconds |
 | `register:user:<name>` | 3 | 30 seconds |
 | `recover:user:<name>` | 3 | 30 seconds |
@@ -101,8 +100,7 @@ eviction. The deposit token issuance and consumption are implemented.
 However, the actual VOPRF verification of the `AmortizedBatchTokenResponse`
 against a public issuer keyset is not yet wired. The `verify_amortized_batch_response`
 function currently returns an error unconditionally. As a result, the `pass`
-deposit gate cannot currently be satisfied. The `cap` and `ghost` gates are the
-working paths.
+deposit gate cannot currently be satisfied. The `cap` gate is the working path.
 
 ## 7.7 Storage bounds and TTLs
 
@@ -116,5 +114,4 @@ The ephemeral stores are bounded to prevent unbounded growth.
 | VDF consumed challenges | 10 000 | challenge expiry |
 | PQC ephemeral keys | 10 000 | 3 minutes |
 | CAPTCHA tokens | pruned by expiry | 5 minutes |
-| Ghost tokens | 16 per account | 7 days |
 | Privacy Pass nonce store | 100 000 | n/a, FIFO eviction |
