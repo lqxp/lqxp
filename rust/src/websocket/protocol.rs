@@ -139,6 +139,7 @@ pub async fn process_message(
         49 => set_moderator_permissions(&state, &session_id, payload.d).await,
         50 => set_calls_enabled(&state, &session_id, payload.d).await,
         51 => set_call_access(&state, &session_id, payload.d).await,
+        52 => unmute_member(&state, &session_id, payload.d).await,
         98 => update_voice_chat(&state, &session_id, payload.d).await,
         100 => update_mute_state(&state, &session_id, payload.d).await,
         110 => update_call_media_state(&state, &session_id, payload.d).await,
@@ -3534,6 +3535,52 @@ async fn set_call_access(state: &SharedState, session_id: &str, d: Value) -> boo
             json!({"op": 51, "d": { "ok": true, "gameId": room_id, "allowMembers": allow_members }}),
             req_id,
         ),
+    )
+    .await;
+    false
+}
+
+async fn unmute_member(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("unmute:session:{session_id}"), 10, 30_000).await {
+        return respond_error(state, session_id, 52, "Rate limit exceeded", req_id).await;
+    }
+    let Some((actor_id, _username)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 52, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 52, &message, req_id).await,
+        };
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 52, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 52, "Not a community room", req_id).await;
+    }
+    let actor_role = role_in_room(&room, &actor_id);
+    let (target_id, _target_name) = match resolve_target(state, &d).await {
+        Ok(target) => target,
+        Err(message) => return respond_error(state, session_id, 52, message, req_id).await,
+    };
+    let target_role = role_in_room(&room, &target_id);
+    if !can_moderate(&room, actor_role, target_role, ModAction::Mute) {
+        return respond_error(state, session_id, 52, "You are not allowed to unmute this member", req_id).await;
+    }
+    room.timeouts.remove(&target_id);
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist unmute for {}: {}", room_id, err);
+        return respond_error(state, session_id, 52, "Failed to persist unmute", req_id).await;
+    }
+    let room = state.database.room_record(&room_id).await.unwrap_or(room);
+    broadcast_room_record_to_members(state, &room_id, 52, req_id.clone(), true, room.clone()).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({"op": 52, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
     )
     .await;
     false
