@@ -17,6 +17,7 @@ hmac = "0.12"
 http = "1"
 mime_guess = "2"
 ml-dsa = "0.1"
+ml-kem = { version = "0.3", features = ["getrandom"] }
 num-bigint = { version = "0.4", features = ["rand"] }
 num-traits = "0.2"
 p256 = { version = "0.13", features = ["ecdsa"] }
