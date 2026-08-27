@@ -1342,7 +1342,7 @@ impl AccountDatabase {
         let prefix = format!("{}%", escape_like_pattern(&needle));
         let substring = format!("%{}%", escape_like_pattern(&needle));
 
-        let select = "SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users";
+        let select = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) ranked_users";
         let rows = match &self.backend {
             SqlBackend::Sqlite(pool) => {
                 let sql = format!(
