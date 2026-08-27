@@ -5,6 +5,7 @@ use std::{
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::{rngs::OsRng, RngCore};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
@@ -366,6 +367,83 @@ pub async fn fetch_prekey(state: &SharedState, username: &str) -> ApiResult<Opti
     let bundle: PrekeyBundle = serde_json::from_str(&stored.bundle_json)
         .map_err(|err| ApiError::internal("Prekey bundle decode", err))?;
     Ok(Some(bundle))
+}
+
+/// Op 36 — publie un bundle de prékey après vérification des DEUX signatures
+/// hybrides (ECDSA P-256 ‖ ML-DSA-65) sur la forme canonique.
+pub async fn publish_prekey(
+    state: &SharedState,
+    user_id: &str,
+    bundle: &PrekeyBundle,
+) -> ApiResult<serde_json::Value> {
+    crate::services::phantom_crypto::verify_prekey_bundle(bundle)?;
+
+    let bundle_json = serde_json::to_string(bundle)
+        .map_err(|err| ApiError::internal("Prekey bundle encode", err))?;
+    state.accounts.publish_prekey(user_id, &bundle_json).await?;
+
+    Ok(json!({ "ok": true, "version": bundle.version }))
+}
+
+/// Op 37 — récupère les bundles publics d'un lot d'usernames (≤8).
+pub async fn fetch_prekeys(
+    state: &SharedState,
+    usernames: &[String],
+) -> ApiResult<serde_json::Value> {
+    let mut bundles = serde_json::Map::new();
+    for username in usernames {
+        if let Some(stored) = state.accounts.get_prekey_by_username(username).await? {
+            if let Ok(bundle) = serde_json::from_str::<PrekeyBundle>(&stored.bundle_json) {
+                bundles.insert(username.clone(), serde_json::to_value(bundle).unwrap_or(serde_json::Value::Null));
+            }
+        }
+    }
+    Ok(json!({ "bundles": bundles }))
+}
+
+async fn owner_fingerprint(state: &SharedState, user_id: &str) -> ApiResult<String> {
+    let prekey = state
+        .accounts
+        .get_prekey_by_user_id(user_id)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("Publish a prekey before updating blocks."))?;
+    let bundle: PrekeyBundle = serde_json::from_str(&prekey.bundle_json)
+        .map_err(|err| ApiError::internal("Prekey bundle decode", err))?;
+    fingerprint_of_mlkem_hex(&bundle.mlkem768_pk)
+        .ok_or_else(|| ApiError::bad_request("Invalid stored prekey."))
+}
+
+/// Op 39 — bloque/débloque des hints de façon opaque. Le serveur stocke
+/// `SHA256(fp(mlkem_pk_propriétaire) ‖ hint)` ; il ne joint jamais compte→cible.
+pub async fn update_blocks(
+    state: &SharedState,
+    user_id: &str,
+    add: &[String],
+    remove: &[String],
+) -> ApiResult<serde_json::Value> {
+    let owner_fp = owner_fingerprint(state, user_id).await?;
+
+    for hint in add {
+        if !is_hex64(hint) {
+            return Err(ApiError::bad_request("Malformed block hint."));
+        }
+        state
+            .accounts
+            .add_block_tag(user_id, &block_tag(&owner_fp, hint))
+            .await?;
+    }
+    for hint in remove {
+        if !is_hex64(hint) {
+            return Err(ApiError::bad_request("Malformed block hint."));
+        }
+        state
+            .accounts
+            .remove_block_tag(user_id, &block_tag(&owner_fp, hint))
+            .await?;
+    }
+
+    let filter = state.accounts.list_block_tags(user_id).await?;
+    Ok(json!({ "filter": filter }))
 }
 
 #[cfg(test)]

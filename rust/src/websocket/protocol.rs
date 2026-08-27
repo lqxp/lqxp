@@ -11,7 +11,7 @@ use crate::{
     core::{
         models::{
             now_ms, Attachment, ChatMessageRecord, EncryptedPayload, MessageReaction, ModeratorPermissions, PlayerStatus,
-            ProfileImage, RoomIcon, RoomKind, RoomRecord, RoomRole, SocketPayload, UserPresenceStatus, UserProfile,
+            PrekeyBundle, ProfileImage, RoomIcon, RoomKind, RoomRecord, RoomRole, SocketPayload, UserPresenceStatus, UserProfile,
         },
         presence::SharedState,
         security::rate_limit_hit,
@@ -127,7 +127,10 @@ pub async fn process_message(
         32 => upload_room_icon(&state, &session_id, payload.d).await,
         33 => update_room_title(&state, &session_id, payload.d).await,
         35 => request_public_profiles(&state, &session_id, payload.d).await,
+        36 => publish_prekey_op(&state, &session_id, payload.d).await,
+        37 => fetch_prekey_op(&state, &session_id, payload.d).await,
         38 => create_ghost_link_op(&state, &session_id, payload.d).await,
+        39 => block_update_op(&state, &session_id, payload.d).await,
         40 => create_room(&state, &session_id, payload.d).await,
         41 => update_room_description(&state, &session_id, payload.d).await,
         42 => set_member_role(&state, &session_id, payload.d).await,
@@ -3853,6 +3856,114 @@ async fn create_ghost_link_op(state: &SharedState, session_id: &str, d: Value) -
             false
         }
         Err(_) => respond_error(state, session_id, 38, "Unable to create ghost link", req_id).await,
+    }
+}
+
+async fn session_user_id(state: &SharedState, session_id: &str) -> Option<String> {
+    let players = state.players.read().await;
+    players
+        .get(session_id)
+        .filter(|player| !player.user_id.trim().is_empty())
+        .map(|player| player.user_id.clone())
+}
+
+async fn publish_prekey_op(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    let Some(user_id) = session_user_id(state, session_id).await else {
+        return respond_error(state, session_id, 36, "You need to be identified before", req_id).await;
+    };
+    let bundle: PrekeyBundle = match serde_json::from_value(d) {
+        Ok(bundle) => bundle,
+        Err(_) => return respond_error(state, session_id, 36, "Malformed prekey bundle", req_id).await,
+    };
+    match crate::services::phantom::publish_prekey(state, &user_id, &bundle).await {
+        Ok(res) => {
+            respond_to_sender(
+                state,
+                session_id,
+                with_request_id(json!({ "op": 36, "d": res }), req_id),
+            )
+            .await;
+            false
+        }
+        Err(_) => respond_error(state, session_id, 36, "Prekey publish failed", req_id).await,
+    }
+}
+
+async fn fetch_prekey_op(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    let Some(user_id) = session_user_id(state, session_id).await else {
+        return respond_error(state, session_id, 37, "You need to be identified before", req_id).await;
+    };
+
+    let usernames: Vec<String> = d
+        .get("usernames")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .take(8)
+                .filter_map(Value::as_str)
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if usernames.is_empty() {
+        return respond_error(state, session_id, 37, "Missing usernames", req_id).await;
+    }
+    if rate_limit_hit(state.as_ref(), format!("prekey-fetch:user:{user_id}"), 4, 15_000).await {
+        return respond_error(state, session_id, 37, "Rate limit exceeded", req_id).await;
+    }
+
+    match crate::services::phantom::fetch_prekeys(state, &usernames).await {
+        Ok(res) => {
+            respond_to_sender(
+                state,
+                session_id,
+                with_request_id(json!({ "op": 37, "d": res }), req_id),
+            )
+            .await;
+            false
+        }
+        Err(_) => respond_error(state, session_id, 37, "Prekey fetch failed", req_id).await,
+    }
+}
+
+fn string_array_field(d: &Value, key: &str) -> Vec<String> {
+    d.get(key)
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(|s| s.trim().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn block_update_op(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    let Some(user_id) = session_user_id(state, session_id).await else {
+        return respond_error(state, session_id, 39, "You need to be identified before", req_id).await;
+    };
+
+    let add = string_array_field(&d, "add");
+    let remove = string_array_field(&d, "remove");
+    if add.is_empty() && remove.is_empty() {
+        return respond_error(state, session_id, 39, "Nothing to update", req_id).await;
+    }
+
+    match crate::services::phantom::update_blocks(state, &user_id, &add, &remove).await {
+        Ok(res) => {
+            respond_to_sender(
+                state,
+                session_id,
+                with_request_id(json!({ "op": 39, "d": res }), req_id),
+            )
+            .await;
+            false
+        }
+        Err(_) => respond_error(state, session_id, 39, "Block update failed", req_id).await,
     }
 }
 
