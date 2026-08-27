@@ -178,6 +178,28 @@ mod tests {
     }
 
     #[test]
+    fn canonical_bundle_matches_client_contract() {
+        // Vecteur cross-langage : la sortie doit être identique à celle de
+        // `web/src/crypto/phantom.selfcheck.ts` (CROSS_LANG_CANONICAL).
+        let bundle = PrekeyBundle {
+            version: 1,
+            mlkem768_pk: "aa".to_string(),
+            ecdsa_p256_pk: json!({ "kty": "EC", "crv": "P-256", "x": "AQID", "y": "BAUG" }),
+            mldsa65_pk: "bb".to_string(),
+            sig_ecdsa: "c2ln".to_string(),
+            sig_mldsa: "cc".to_string(),
+            block_filter: vec![],
+            updated_at: 1730000000000,
+        };
+        let bytes = canonical_prekey_bundle_bytes(&bundle).expect("canonical");
+        let text = String::from_utf8(bytes).expect("utf8");
+        assert_eq!(
+            text,
+            r#"{"blockFilter":[],"ecdsaP256Pk":{"crv":"P-256","kty":"EC","x":"AQID","y":"BAUG"},"mldsa65Pk":"bb","mlkem768Pk":"aa","updatedAt":1730000000000,"version":1}"#
+        );
+    }
+
+    #[test]
     fn ecdsa_p256_roundtrip_raw_signature() {
         use p256::ecdsa::signature::Signer as _;
         use p256::elliptic_curve::PrimeField as _;
