@@ -55,6 +55,7 @@ pub struct AuthenticatedUser {
     pub banned: bool,
     pub admin: bool,
     pub badges: Vec<String>,
+    pub created_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -697,6 +698,7 @@ impl AccountDatabase {
             banned: user.banned,
             admin: self.is_admin(&user.id),
             badges,
+            created_at: user.created_at,
         }))
     }
 
@@ -1116,7 +1118,7 @@ impl AccountDatabase {
                 banned: user.banned,
                 admin: user.admin,
                 badges: user.badges,
-                created_at: 0,
+                created_at: user.created_at,
             },
             token.to_owned(),
         )))
