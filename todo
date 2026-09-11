@@ -1,9 +1,0 @@
-Todo:
-
-audit of the code:
-    fix all the potential XSS vulnerabilities about the emoji, message content , reactions parsing
-
-make a docker image of the lqxp server
-    - do Dockerfile, dockercompose, docker image, a tutorial to installing it into machine
-        - And a Pelican.dev panel egg
-            - search on the internet the Yolks/Egg format to known how to use it into
