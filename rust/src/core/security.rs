@@ -14,7 +14,44 @@ use crate::core::result::{ApiError, ApiResult};
 const USERNAME_MIN: usize = 2;
 const USERNAME_MAX: usize = 32;
 const USERNAME_REGISTER_MAX: usize = 24;
-const RESERVED_USERNAMES: &[&str] = &["system"];
+// Noms réservés : empêche l'usurpation de comptes officiels/staff
+// (« qxchat official » etc.) à l'inscription comme au renommage. Doit rester
+// en phase avec la liste client (lqxp-client `RESERVED_USERNAMES`).
+const RESERVED_USERNAMES: &[&str] = &[
+    "system",
+    "official",
+    "official_qxchat",
+    "qxchat",
+    "qx_protocol",
+    "qxprotocol",
+    "admin",
+    "administrator",
+    "moderator",
+    "mod",
+    "staff",
+    "support",
+    "help",
+    "helpdesk",
+    "root",
+    "owner",
+    "team",
+    "noreply",
+    "no_reply",
+    "donotreply",
+    "welcome",
+    "dmca",
+    "abuse",
+    "security",
+    "press",
+    "contact",
+    "announce",
+    "announcement",
+    "server",
+    "bot",
+];
+// Sous-chaînes interdites où qu'elles apparaissent : la marque ne doit pas
+// pouvoir être injectée dans un pseudo (« qxchat_official », « myqxchat »…).
+const RESERVED_USERNAME_SUBSTRINGS: &[&str] = &["qxchat", "qx_protocol", "qxprotocol"];
 const PASSWORD_MIN: usize = 8;
 const PASSWORD_MAX: usize = 128;
 
@@ -116,6 +153,12 @@ fn validate_username_with_max(username: &str, max: usize) -> ApiResult<String> {
 
     let normalized = normalize_username(trimmed);
     if RESERVED_USERNAMES.contains(&normalized.as_str()) {
+        return Err(ApiError::bad_request("Username is reserved."));
+    }
+    if RESERVED_USERNAME_SUBSTRINGS
+        .iter()
+        .any(|token| normalized.contains(token))
+    {
         return Err(ApiError::bad_request("Username is reserved."));
     }
 
