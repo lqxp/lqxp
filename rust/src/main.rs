@@ -45,6 +45,7 @@ async fn main() {
 
     let state = Arc::new(AppState {
         config: config.clone(),
+        started_at_ms: crate::core::models::now_ms(),
         blocklist_terms: Arc::new(blocklist_terms),
         players: Arc::new(RwLock::new(HashMap::new())),
         room_messages: Arc::new(RwLock::new(HashMap::new())),

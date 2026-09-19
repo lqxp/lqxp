@@ -1376,6 +1376,25 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
     false
 }
 
+/// Whether `actor` is the author of a message.
+///
+/// Usernames can be released and claimed by someone else, so authorship is
+/// decided on the stable account id whenever the message carries one; the
+/// display name is only a fallback for messages stored before ids were
+/// recorded.
+fn is_message_author(
+    message_user_id: &str,
+    message_username: &str,
+    actor_user_id: &str,
+    actor_username: &str,
+) -> bool {
+    if message_user_id.is_empty() {
+        !message_username.is_empty() && message_username == actor_username
+    } else {
+        !actor_user_id.is_empty() && message_user_id == actor_user_id
+    }
+}
+
 async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool {
     let req_id = request_id(&d);
     if rate_limit_hit(state.as_ref(), format!("delete_message:session:{session_id}"), 10, 10_000).await {
@@ -1430,10 +1449,15 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                         break;
                     }
                     let room_record = state.database.room_record(&room_id).await;
+                    // Usernames can be released and taken over, so authorship
+                    // is decided on the account id whenever the message
+                    // carries one; the name is only a fallback for messages
+                    // stored before ids were recorded.
+                    let is_author =
+                        is_message_author(&message.user_id, &message.username, &user_id, &username);
                     let can_delete = if matches!(&room_record, Some(room) if room.kind == RoomKind::Community) {
                         let room = room_record.as_ref().unwrap();
-                        let is_self = message.username == username
-                            || (!message.user_id.is_empty() && message.user_id == user_id);
+                        let is_self = is_author;
                         if is_self {
                             true
                         } else {
@@ -1455,7 +1479,7 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                             allowed
                         }
                     } else {
-                        is_admin || message.username == username
+                        is_admin || is_author
                     };
                     if !can_delete {
                         return respond_error(
@@ -1581,7 +1605,7 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
         return respond_error(state, session_id, 29, "Empty message", request_id(&d)).await;
     }
 
-    let (username, current_profile) = {
+    let (username, user_id, current_profile) = {
         let players = state.players.read().await;
         match players.get(session_id) {
             Some(player) if !player.username.is_empty() => {
@@ -1595,7 +1619,7 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
                     )
                     .await;
                 }
-                (player.username.clone(), player.profile.clone())
+                (player.username.clone(), player.user_id.clone(), player.profile.clone())
             }
             _ => {
                 return respond_error(
@@ -1639,7 +1663,9 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
             )
             .await;
         }
-        if message.username != username {
+        let is_author =
+            is_message_author(&message.user_id, &message.username, &user_id, &username);
+        if !is_author {
             return respond_error(
                 state,
                 session_id,

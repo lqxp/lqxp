@@ -15,6 +15,7 @@ use crate::core::{
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub config: Config,
+    pub started_at_ms: u64,
     pub blocklist_terms: Arc<Vec<String>>,
     pub players: Arc<RwLock<HashMap<String, PlayerSession>>>,
     pub room_messages: Arc<RwLock<HashMap<String, Vec<ChatMessageRecord>>>>,

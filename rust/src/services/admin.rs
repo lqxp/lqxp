@@ -5,6 +5,7 @@ use serde_json::json;
 use crate::{
     core::{
         database::{AuthenticatedUser, PublicUser},
+        models::now_ms,
         presence::SharedState,
         result::{ApiError, ApiResult},
     },
@@ -19,14 +20,24 @@ pub async fn admin_overview(
         return Err(ApiError::forbidden("Admin only."));
     }
 
-    let total_users = state.accounts.count_users().await?;
+    let accounts = state.accounts.user_stats().await?;
     let features = state.accounts.feature_flags().await?;
     let default_room = state.accounts.get_default_room().await?;
 
     let mut room_previews: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    let online_count = {
+    let (session_count, online_users, voice_sessions, platforms) = {
         let players = state.players.read().await;
+        let mut distinct_users: HashSet<&str> = HashSet::new();
+        let mut voice_sessions = 0usize;
+        // `platform` is normalised to a closed set when the session announces
+        // itself (see `sanitize_platform`), so this map stays bounded.
+        let mut platforms: BTreeMap<String, usize> = BTreeMap::new();
         for player in players.values() {
+            distinct_users.insert(player.user_id.as_str());
+            if player.is_voice_chat {
+                voice_sessions += 1;
+            }
+            *platforms.entry(player.platform.clone()).or_insert(0) += 1;
             for room_id in &player.rooms {
                 let entry = room_previews.entry(room_id.clone()).or_insert_with(|| {
                     json!({
@@ -44,7 +55,7 @@ pub async fn admin_overview(
                 }
             }
         }
-        players.len()
+        (players.len(), distinct_users.len(), voice_sessions, platforms)
     };
 
     {
@@ -66,14 +77,45 @@ pub async fn admin_overview(
         }
     }
     let rooms = room_previews.into_values().collect::<Vec<_>>();
+    let buffered_messages: u64 = rooms
+        .iter()
+        .map(|room| room["messageCount"].as_u64().unwrap_or(0))
+        .sum();
+    let active_rooms = rooms
+        .iter()
+        .filter(|room| room["onlineCount"].as_u64().unwrap_or(0) > 0)
+        .count();
+    let room_voice: u64 = rooms
+        .iter()
+        .map(|room| room["voiceCount"].as_u64().unwrap_or(0))
+        .sum();
 
     Ok(json!({
         "ok": true,
-        "totalUsers": total_users,
+        "generatedAt": now_ms(),
+        "accounts": accounts,
+        "connections": {
+            "sessions": session_count,
+            "users": online_users,
+            "voice": voice_sessions,
+            "platforms": platforms
+                .into_iter()
+                .map(|(platform, count)| json!({ "platform": platform, "count": count }))
+                .collect::<Vec<_>>()
+        },
+        "roomTotals": {
+            "known": rooms.len(),
+            "active": active_rooms,
+            "bufferedMessages": buffered_messages,
+            "voice": room_voice
+        },
+        "server": {
+            "version": state.config.network.latest_version,
+            "uptimeMs": now_ms().saturating_sub(state.started_at_ms)
+        },
         "features": features,
         "defaultRoom": default_room,
-        "rooms": rooms,
-        "onlineCount": online_count
+        "rooms": rooms
     }))
 }
 
@@ -178,7 +220,8 @@ pub async fn set_user_disabled(
         let _ = state.accounts.invalidate_user_sessions(target_user_id).await;
         state.evict_user(target_user_id, "account_disabled").await;
     }
-    Ok(json!({ "ok": true }))
+    let user = confirmed_user(state, target_user_id).await?;
+    Ok(json!({ "ok": true, "user": user }))
 }
 
 pub async fn set_user_banned(
@@ -198,7 +241,8 @@ pub async fn set_user_banned(
         let _ = state.accounts.invalidate_user_sessions(target_user_id).await;
         state.evict_user(target_user_id, "account_banned").await;
     }
-    Ok(json!({ "ok": true }))
+    let user = confirmed_user(state, target_user_id).await?;
+    Ok(json!({ "ok": true, "user": user }))
 }
 
 pub async fn delete_user_account(
@@ -262,6 +306,18 @@ pub async fn purge_accounts(
         )
         .await?;
     Ok(json!({ "ok": true, "purgedCount": count }))
+}
+
+async fn confirmed_user(state: &SharedState, user_id: &str) -> ApiResult<PublicUser> {
+    let user = state
+        .accounts
+        .public_user_by_id_or_username(Some(user_id), None)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("Account not found."))?;
+    state
+        .invalidate_public_profile_cache(Some(&user.id), Some(&user.username))
+        .await;
+    Ok(user)
 }
 
 async fn broadcast_badge_update(state: &SharedState, user: &PublicUser) {
