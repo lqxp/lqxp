@@ -10,8 +10,11 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use crate::{
     core::{
         models::{
-            now_ms, Attachment, ChatMessageRecord, EncryptedPayload, MessageReaction, ModeratorPermissions, PlayerStatus,
-            PrekeyBundle, ProfileImage, RoomIcon, RoomKind, RoomRecord, RoomRole, SocketPayload, UserPresenceStatus, UserProfile,
+            now_ms, Attachment, ChannelCategory, ChannelKind, ChatMessageRecord, EncryptedPayload,
+            MessageReaction, ModeratorPermissions, PlayerStatus, PrekeyBundle, ProfileImage,
+            RoomIcon, RoomKind, RoomRecord, RoomRole, ServerChannel, SocketPayload,
+            UserPresenceStatus, UserProfile, default_community_channels, normalize_channel_name,
+            validate_category_name, validate_channel_name,
         },
         presence::SharedState,
         security::rate_limit_hit,
@@ -143,6 +146,13 @@ pub async fn process_message(
         50 => set_calls_enabled(&state, &session_id, payload.d).await,
         51 => set_call_access(&state, &session_id, payload.d).await,
         52 => unmute_member(&state, &session_id, payload.d).await,
+        60 => channel_list(&state, &session_id, payload.d).await,
+        61 => channel_create(&state, &session_id, payload.d).await,
+        62 => channel_update(&state, &session_id, payload.d).await,
+        63 => channel_delete(&state, &session_id, payload.d).await,
+        64 => category_create(&state, &session_id, payload.d).await,
+        65 => category_update(&state, &session_id, payload.d).await,
+        66 => category_delete(&state, &session_id, payload.d).await,
         98 => update_voice_chat(&state, &session_id, payload.d).await,
         100 => update_mute_state(&state, &session_id, payload.d).await,
         110 => update_call_media_state(&state, &session_id, payload.d).await,
@@ -439,7 +449,7 @@ async fn join_game(state: &SharedState, session_id: &str, d: Value) -> bool {
     )
     .await;
 
-    dispatch_room_history(state, session_id, game_id, None).await;
+    dispatch_room_history(state, session_id, game_id, None, None).await;
     false
 }
 
@@ -991,11 +1001,51 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
     };
 
     let room_name = target_game_id.to_owned();
-    if let Some(room) = state.database.room_record(&room_name).await {
-        if room.kind == RoomKind::Community && !can_speak(&room, &user_id) {
-            return respond_error(state, session_id, 7, "You are not allowed to speak in this room", request_id(&d)).await;
+    let requested_channel = d
+        .get("channelId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned);
+    // Résolution du salon : si le serveur a des channels, il faut un
+    // channel texte/annonce valide ; sinon on reste sur le fil legacy.
+    let (store_key, channel_id_opt) = match state.database.room_record(&room_name).await {
+        Some(mut room) if room.kind == RoomKind::Community => {
+            ensure_default_channels(&mut room);
+            if !room.channels.is_empty() {
+                let wanted = requested_channel
+                    .clone()
+                    .or_else(|| default_channel_id(&room));
+                let Some(wanted) = wanted else {
+                    return respond_error(state, session_id, 7, "Unknown channel", request_id(&d)).await;
+                };
+                let Some(ch) = find_channel(&room, &wanted).cloned() else {
+                    return respond_error(state, session_id, 7, "Unknown channel", request_id(&d)).await;
+                };
+                if ch.kind == ChannelKind::Voice {
+                    return respond_error(state, session_id, 7, "Cannot post in a voice channel", request_id(&d)).await;
+                }
+                if !can_speak_in_channel(&room, Some(&ch), &user_id) {
+                    return respond_error(state, session_id, 7, "You are not allowed to speak in this channel", request_id(&d)).await;
+                }
+                // Persiste les salons par défaut s'ils manquaient.
+                let _ = state.database.set_room_record(&room_name, &room).await;
+                (message_store_key(&room_name, Some(&ch.id)), Some(ch.id))
+            } else {
+                if !can_speak(&room, &user_id) {
+                    return respond_error(state, session_id, 7, "You are not allowed to speak in this room", request_id(&d)).await;
+                }
+                (room_name.clone(), None)
+            }
         }
-    }
+        Some(room) => {
+            if room.kind == RoomKind::Community && !can_speak(&room, &user_id) {
+                return respond_error(state, session_id, 7, "You are not allowed to speak in this room", request_id(&d)).await;
+            }
+            (room_name.clone(), None)
+        }
+        None => (room_name.clone(), None),
+    };
     let prefix = if room_name == "lobby" {
         "[lobby]"
     } else {
@@ -1011,6 +1061,7 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
     let message_record = ChatMessageRecord {
         message_id: random_message_id(),
         room_id: room_name.clone(),
+        channel_id: channel_id_opt.clone(),
         user: format!("{} {}", prefix, player_name),
         username: player_name,
         user_id: user_id.clone(),
@@ -1037,7 +1088,7 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
         deleted_by_moderator: false,
     };
 
-    let stored_message = store_room_message(state, &room_name, message_record).await;
+    let stored_message = store_room_message(state, &store_key, message_record).await;
 
     broadcast_to_room(
         state,
@@ -1068,6 +1119,7 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
     if let Some(url) = preview_target {
         let state_arc = state.clone();
         let room = room_name.clone();
+        let key = store_key.clone();
         let msg_id = stored_message.message_id.clone();
         tokio::spawn(async move {
             let preview = crate::linkpreview::fetch_preview(&url).await;
@@ -1075,7 +1127,7 @@ async fn send_chat_message(state: &SharedState, session_id: &str, d: Value) -> b
                 // Patch the stored record so late joiners see the preview.
                 {
                     let mut rooms = state_arc.room_messages.write().await;
-                    if let Some(messages) = rooms.get_mut(&room) {
+                    if let Some(messages) = rooms.get_mut(&key) {
                         if let Some(message) = messages.iter_mut().find(|m| m.message_id == msg_id)
                         {
                             if !message.deleted && message.edited_at.is_none() {
@@ -1118,8 +1170,14 @@ async fn send_room_history(state: &SharedState, session_id: &str, d: Value) -> b
             return respond_error(state, session_id, 18, &message, req_id).await
         }
     };
+    let requested_channel = d
+        .get("channelId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned);
 
-    dispatch_room_history(state, session_id, &room_id, req_id).await;
+    dispatch_room_history(state, session_id, &room_id, requested_channel.as_deref(), req_id).await;
     false
 }
 
@@ -1416,20 +1474,28 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
         let mut rooms = state.room_messages.write().await;
 
         let room_iter: Vec<String> = if let Some(hint) = room_hint.filter(|room| !room.is_empty()) {
-            vec![hint.to_owned()]
+            let mut keys = vec![hint.to_owned()];
+            for key in rooms.keys() {
+                if key.starts_with(&format!("{hint}:")) {
+                    keys.push(key.clone());
+                }
+            }
+            keys
         } else {
             rooms.keys().cloned().collect()
         };
 
         let mut hit: Option<(String, bool)> = None;
-        for room_id in room_iter {
-            if let Some(messages) = rooms.get_mut(&room_id) {
+        for store_key in room_iter {
+            // Le room_id réel est la partie avant `:` pour la résolution des rôles.
+            let base_room = store_key.split(':').next().unwrap_or(&store_key).to_owned();
+            if let Some(messages) = rooms.get_mut(&store_key) {
                 if let Some(message) = messages.iter_mut().find(|m| m.message_id == message_id) {
                     if message.deleted {
-                        hit = Some((room_id, true));
+                        hit = Some((base_room, true));
                         break;
                     }
-                    let room_record = state.database.room_record(&room_id).await;
+                    let room_record = state.database.room_record(&base_room).await;
                     let can_delete = if matches!(&room_record, Some(room) if room.kind == RoomKind::Community) {
                         let room = room_record.as_ref().unwrap();
                         let is_self = message.username == username
@@ -1476,7 +1542,7 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                     message.deleted = true;
                     message.deleted_by = username.clone();
                     message.deleted_by_moderator = deleted_by_moderator;
-                    hit = Some((room_id, false));
+                    hit = Some((base_room, false));
                     break;
                 }
             }
@@ -1619,48 +1685,71 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
 
     let edited_message = {
         let mut rooms = state.room_messages.write().await;
-        let Some(messages) = rooms.get_mut(&room_id) else {
-            return respond_error(state, session_id, 29, "Unknown messageId", request_id(&d)).await;
-        };
-        let Some(message) = messages.iter_mut().find(|m| m.message_id == message_id) else {
-            return respond_error(state, session_id, 29, "Unknown messageId", request_id(&d)).await;
-        };
-        if message.deleted {
-            return respond_error(state, session_id, 29, "Message was deleted", request_id(&d))
-                .await;
+        // Clé exacte, sinon `room:channel`, sinon scan (compat channelId optionnel).
+        let channel_hint = d
+            .get("channelId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned);
+        let mut candidates = Vec::new();
+        if let Some(ref cid) = channel_hint {
+            candidates.push(message_store_key(&room_id, Some(cid)));
         }
-        if message.system {
-            return respond_error(
-                state,
-                session_id,
-                29,
-                "System messages cannot be edited",
-                request_id(&d),
-            )
-            .await;
+        candidates.push(room_id.clone());
+        for key in rooms.keys().cloned().collect::<Vec<_>>() {
+            if key.starts_with(&format!("{room_id}:")) && !candidates.contains(&key) {
+                candidates.push(key);
+            }
         }
-        if message.username != username {
-            return respond_error(
-                state,
-                session_id,
-                29,
-                "Only the author can edit this message",
-                request_id(&d),
-            )
-            .await;
-        }
+        let mut found: Option<ChatMessageRecord> = None;
+        for key in candidates {
+            if let Some(messages) = rooms.get_mut(&key) {
+                if let Some(message) = messages.iter_mut().find(|m| m.message_id == message_id) {
+                    if message.deleted {
+                        return respond_error(state, session_id, 29, "Message was deleted", request_id(&d))
+                            .await;
+                    }
+                    if message.system {
+                        return respond_error(
+                            state,
+                            session_id,
+                            29,
+                            "System messages cannot be edited",
+                            request_id(&d),
+                        )
+                        .await;
+                    }
+                    if message.username != username {
+                        return respond_error(
+                            state,
+                            session_id,
+                            29,
+                            "Only the author can edit this message",
+                            request_id(&d),
+                        )
+                        .await;
+                    }
 
-        message.text = if encrypted.is_some() {
-            String::new()
-        } else {
-            trimmed
-        };
-        message.profile = current_profile.clone();
-        message.attachment = None;
-        message.encrypted = encrypted;
-        message.preview = None;
-        message.edited_at = Some(edited_at);
-        message.clone()
+                    message.text = if encrypted.is_some() {
+                        String::new()
+                    } else {
+                        trimmed.clone()
+                    };
+                    message.profile = current_profile.clone();
+                    message.attachment = None;
+                    message.encrypted = encrypted.clone();
+                    message.preview = None;
+                    message.edited_at = Some(edited_at);
+                    found = Some(message.clone());
+                    break;
+                }
+            }
+        }
+        match found {
+            Some(m) => m,
+            None => return respond_error(state, session_id, 29, "Unknown messageId", request_id(&d)).await,
+        }
     };
 
     broadcast_to_room(
@@ -1702,21 +1791,33 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
 
             let should_broadcast = {
                 let mut rooms = state_arc.room_messages.write().await;
-                let Some(messages) = rooms.get_mut(&room) else {
-                    return;
-                };
-                let Some(message) = messages.iter_mut().find(|m| m.message_id == msg_id) else {
-                    return;
-                };
-                if message.deleted
-                    || message.preview.is_some()
-                    || message.edited_at != Some(edited_at)
-                {
-                    false
-                } else {
-                    message.preview = Some(preview.clone());
-                    true
+                let mut target: Option<ChatMessageRecord> = None;
+                // Scan legacy + `room:channel` (édition par salon).
+                let mut keys = vec![room.clone()];
+                for key in rooms.keys().cloned().collect::<Vec<_>>() {
+                    if key.starts_with(&format!("{room}:")) {
+                        keys.push(key);
+                    }
                 }
+                let mut done = false;
+                for key in keys {
+                    if let Some(messages) = rooms.get_mut(&key) {
+                        if let Some(message) = messages.iter_mut().find(|m| m.message_id == msg_id) {
+                            if message.deleted
+                                || message.preview.is_some()
+                                || message.edited_at != Some(edited_at)
+                            {
+                                return;
+                            }
+                            message.preview = Some(preview.clone());
+                            target = Some(message.clone());
+                            done = true;
+                            break;
+                        }
+                    }
+                }
+                let _ = target;
+                done
             };
 
             if should_broadcast {
@@ -2452,6 +2553,12 @@ async fn update_typing_state(state: &SharedState, session_id: &str, d: Value) ->
         };
 
     let typing = d.get("typing").and_then(Value::as_bool).unwrap_or(false);
+    let channel_id = d
+        .get("channelId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned);
 
     let username = {
         let players = state.players.read().await;
@@ -2478,6 +2585,7 @@ async fn update_typing_state(state: &SharedState, session_id: &str, d: Value) ->
             "op": 31,
             "d": {
                 "gameId": room_id,
+                "channelId": channel_id,
                 "username": username,
                 "typing": typing
             }
@@ -2735,6 +2843,88 @@ fn parse_mod_permissions(raw: Option<&Value>) -> Option<ModeratorPermissions> {
     raw.and_then(|value| serde_json::from_value::<ModeratorPermissions>(value.clone()).ok())
 }
 
+// ── Channels (serveurs communautaires façon Discord) ─────────────────────────
+// Stockage : `RoomRecord.channels` + `RoomRecord.categories` (JSON en DB).
+// Messages : clé RAM `room_id` (legacy) ou `room_id:channel_id` quand le
+// serveur a des salons.
+
+const MAX_CHANNELS_PER_ROOM: usize = 50;
+const MAX_CATEGORIES_PER_ROOM: usize = 20;
+const MAX_CHANNEL_TOPIC_CHARS: usize = 256;
+
+fn message_store_key(room_id: &str, channel_id: Option<&str>) -> String {
+    match channel_id.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(channel) => format!("{room_id}:{channel}"),
+        None => room_id.to_owned(),
+    }
+}
+
+fn is_room_manager(role: RoomRole) -> bool {
+    matches!(role, RoomRole::Administrator | RoomRole::SubAdministrator)
+}
+
+fn find_channel<'a>(room: &'a RoomRecord, channel_id: &str) -> Option<&'a ServerChannel> {
+    room.channels
+        .iter()
+        .find(|c| c.id == channel_id)
+}
+
+fn default_channel_id(room: &RoomRecord) -> Option<String> {
+    let mut sorted = room.channels.clone();
+    sorted.sort_by_key(|c| c.position);
+    sorted
+        .iter()
+        .find(|c| c.kind != ChannelKind::Voice)
+        .or_else(|| sorted.first())
+        .map(|c| c.id.clone())
+}
+
+fn can_speak_in_channel(room: &RoomRecord, channel: Option<&ServerChannel>, user_id: &str) -> bool {
+    if !can_speak(room, user_id) {
+        return false;
+    }
+    match channel {
+        None => true,
+        Some(ch) => match ch.kind {
+            ChannelKind::Announce => {
+                matches!(
+                    role_in_room(room, user_id),
+                    RoomRole::Administrator | RoomRole::SubAdministrator
+                )
+            }
+            ChannelKind::Voice => false,
+            ChannelKind::Text => true,
+        },
+    }
+}
+
+fn ensure_default_channels(room: &mut RoomRecord) {
+    if room.kind != RoomKind::Community || !room.channels.is_empty() {
+        return;
+    }
+    let owner = room.owner_id.clone().unwrap_or_default();
+    let now = now_ms();
+    let (categories, channels) = default_community_channels(&owner, now);
+    room.categories = categories;
+    room.channels = channels;
+}
+
+fn next_channel_position(room: &RoomRecord) -> i64 {
+    room.channels.iter().map(|c| c.position).max().unwrap_or(-1) + 1
+}
+
+fn next_category_position(room: &RoomRecord) -> i64 {
+    room.categories.iter().map(|c| c.position).max().unwrap_or(-1) + 1
+}
+
+fn new_channel_id(name: &str) -> String {
+    let base = normalize_channel_name(name);
+    let base = if base.is_empty() { "salon".to_owned() } else { base };
+    let suffix = crate::utils::random_message_id();
+    let short = &suffix[..6.min(suffix.len())];
+    format!("{base}-{short}")
+}
+
 async fn session_identity(state: &SharedState, session_id: &str) -> Option<(String, String)> {
     let players = state.players.read().await;
     let player = players.get(session_id)?;
@@ -2954,6 +3144,8 @@ async fn create_room(state: &SharedState, session_id: &str, d: Value) -> bool {
     let mut roles = BTreeMap::new();
     roles.insert(user_id.clone(), RoomRole::Administrator);
 
+    let now = now_ms();
+    let (categories, channels) = default_community_channels(&user_id, now);
     let mut room = RoomRecord {
         room_id: room_id.to_owned(),
         title,
@@ -2968,6 +3160,8 @@ async fn create_room(state: &SharedState, session_id: &str, d: Value) -> bool {
         timeouts: BTreeMap::new(),
         mod_permissions,
         calls_enabled: true,
+        channels,
+        categories,
     };
 
     if let Err(err) = state.database.set_room_record(&room_id, &room).await {
@@ -2999,6 +3193,407 @@ async fn create_room(state: &SharedState, session_id: &str, d: Value) -> bool {
             }),
             req_id,
         ),
+    )
+    .await;
+    false
+}
+
+async fn channel_list(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str)).await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 60, &message, req_id).await,
+        };
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 60, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 60, "Not a community server", req_id).await;
+    }
+    ensure_default_channels(&mut room);
+    let _ = state.database.set_room_record(&room_id, &room).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(
+            json!({ "op": 60, "d": { "ok": true, "gameId": room_id, "room": room } }),
+            req_id,
+        ),
+    )
+    .await;
+    false
+}
+
+async fn channel_create(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("channel_create:session:{session_id}"), 10, 60_000).await {
+        return respond_error(state, session_id, 61, "Rate limit exceeded", req_id).await;
+    }
+    let Some((user_id, _)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 61, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str)).await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 61, &message, req_id).await,
+        };
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 61, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 61, "Not a community server", req_id).await;
+    }
+    if !is_room_manager(role_in_room(&room, &user_id)) {
+        return respond_error(state, session_id, 61, "Only admins can create channels", req_id).await;
+    }
+    ensure_default_channels(&mut room);
+    if room.channels.len() >= MAX_CHANNELS_PER_ROOM {
+        return respond_error(state, session_id, 61, "Too many channels (50 max)", req_id).await;
+    }
+    let raw_name = d.get("name").and_then(Value::as_str).unwrap_or("");
+    let name = match validate_channel_name(raw_name) {
+        Ok(name) => name,
+        Err(msg) => return respond_error(state, session_id, 61, msg, req_id).await,
+    };
+    if room.channels.iter().any(|c| c.name == name) {
+        return respond_error(state, session_id, 61, "A channel with this name already exists", req_id).await;
+    }
+    let kind = match d.get("kind").and_then(Value::as_str).unwrap_or("text") {
+        s => match ChannelKind::from_str(s) {
+            Some(k) => k,
+            None => return respond_error(state, session_id, 61, "Invalid channel kind (text|announce|voice)", req_id).await,
+        },
+    };
+    let category_id = d
+        .get("categoryId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned);
+    if let Some(ref cat) = category_id {
+        if !room.categories.iter().any(|c| &c.id == cat) {
+            return respond_error(state, session_id, 61, "Unknown category", req_id).await;
+        }
+    }
+    let topic = d
+        .get("topic")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(MAX_CHANNEL_TOPIC_CHARS)
+        .collect::<String>();
+    let channel = ServerChannel {
+        id: new_channel_id(&name),
+        name,
+        kind,
+        category_id,
+        topic,
+        position: next_channel_position(&room),
+        created_by: user_id,
+        created_at: now_ms(),
+    };
+    let channel_id = channel.id.clone();
+    room.channels.push(channel);
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist channel for {}: {}", room_id, err);
+        return respond_error(state, session_id, 61, "Failed to persist channel", req_id).await;
+    }
+    broadcast_room_record_to_members(state, &room_id, 61, None, true, room.clone()).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(
+            json!({ "op": 61, "d": { "ok": true, "gameId": room_id, "channelId": channel_id, "room": room } }),
+            req_id,
+        ),
+    )
+    .await;
+    false
+}
+
+async fn channel_update(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("channel_update:session:{session_id}"), 30, 60_000).await {
+        return respond_error(state, session_id, 62, "Rate limit exceeded", req_id).await;
+    }
+    let Some((user_id, _)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 62, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str)).await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 62, &message, req_id).await,
+        };
+    let Some(channel_id) = d.get("channelId").and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()) else {
+        return respond_error(state, session_id, 62, "Missing channelId", req_id).await;
+    };
+    let channel_id = channel_id.to_owned();
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 62, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 62, "Not a community server", req_id).await;
+    }
+    if !is_room_manager(role_in_room(&room, &user_id)) {
+        return respond_error(state, session_id, 62, "Only admins can rename channels", req_id).await;
+    }
+    let Some(idx) = room.channels.iter().position(|c| c.id == channel_id) else {
+        return respond_error(state, session_id, 62, "Unknown channel", req_id).await;
+    };
+    if let Some(raw) = d.get("name").and_then(Value::as_str) {
+        let name = match validate_channel_name(raw) {
+            Ok(name) => name,
+            Err(msg) => return respond_error(state, session_id, 62, msg, req_id).await,
+        };
+        if room.channels.iter().any(|c| c.name == name && c.id != channel_id) {
+            return respond_error(state, session_id, 62, "A channel with this name already exists", req_id).await;
+        }
+        room.channels[idx].name = name;
+    }
+    if let Some(topic) = d.get("topic").and_then(Value::as_str) {
+        room.channels[idx].topic = topic.trim().chars().take(MAX_CHANNEL_TOPIC_CHARS).collect();
+    }
+    if let Some(cat) = d.get("categoryId") {
+        if cat.is_null() {
+            room.channels[idx].category_id = None;
+        } else if let Some(cat) = cat.as_str() {
+            let cat = cat.trim();
+            if cat.is_empty() {
+                room.channels[idx].category_id = None;
+            } else {
+                if !room.categories.iter().any(|c| c.id == cat) {
+                    return respond_error(state, session_id, 62, "Unknown category", req_id).await;
+                }
+                room.channels[idx].category_id = Some(cat.to_owned());
+            }
+        }
+    }
+    if let Some(pos) = d.get("position").and_then(Value::as_i64) {
+        room.channels[idx].position = pos.clamp(0, 1000);
+    }
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist channel update for {}: {}", room_id, err);
+        return respond_error(state, session_id, 62, "Failed to persist", req_id).await;
+    }
+    broadcast_room_record_to_members(state, &room_id, 62, None, true, room.clone()).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({ "op": 62, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
+    )
+    .await;
+    false
+}
+
+async fn channel_delete(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("channel_delete:session:{session_id}"), 10, 60_000).await {
+        return respond_error(state, session_id, 63, "Rate limit exceeded", req_id).await;
+    }
+    let Some((user_id, _)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 63, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str)).await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 63, &message, req_id).await,
+        };
+    let Some(channel_id) = d.get("channelId").and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()) else {
+        return respond_error(state, session_id, 63, "Missing channelId", req_id).await;
+    };
+    let channel_id = channel_id.to_owned();
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 63, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 63, "Not a community server", req_id).await;
+    }
+    if !is_room_manager(role_in_room(&room, &user_id)) {
+        return respond_error(state, session_id, 63, "Only admins can delete channels", req_id).await;
+    }
+    let Some(idx) = room.channels.iter().position(|c| c.id == channel_id) else {
+        return respond_error(state, session_id, 63, "Unknown channel", req_id).await;
+    };
+    let text_count = room.channels.iter().filter(|c| c.kind != ChannelKind::Voice).count();
+    if text_count <= 1 && room.channels[idx].kind != ChannelKind::Voice {
+        return respond_error(state, session_id, 63, "Cannot delete the last text channel", req_id).await;
+    }
+    room.channels.remove(idx);
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist channel delete for {}: {}", room_id, err);
+        return respond_error(state, session_id, 63, "Failed to persist", req_id).await;
+    }
+    // Purge l'historique RAM du salon supprimé.
+    {
+        let mut rooms = state.room_messages.write().await;
+        rooms.remove(&message_store_key(&room_id, Some(&channel_id)));
+    }
+    broadcast_room_record_to_members(state, &room_id, 63, None, true, room.clone()).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({ "op": 63, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
+    )
+    .await;
+    false
+}
+
+async fn category_create(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("cat_create:session:{session_id}"), 10, 60_000).await {
+        return respond_error(state, session_id, 64, "Rate limit exceeded", req_id).await;
+    }
+    let Some((user_id, _)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 64, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str)).await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 64, &message, req_id).await,
+        };
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 64, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 64, "Not a community server", req_id).await;
+    }
+    if !is_room_manager(role_in_room(&room, &user_id)) {
+        return respond_error(state, session_id, 64, "Only admins can create categories", req_id).await;
+    }
+    ensure_default_channels(&mut room);
+    if room.categories.len() >= MAX_CATEGORIES_PER_ROOM {
+        return respond_error(state, session_id, 64, "Too many categories", req_id).await;
+    }
+    let raw = d.get("name").and_then(Value::as_str).unwrap_or("");
+    let name = match validate_category_name(raw) {
+        Ok(name) => name,
+        Err(msg) => return respond_error(state, session_id, 64, msg, req_id).await,
+    };
+    let rid = crate::utils::random_message_id();
+    let id = format!("cat-{}", &rid[..8.min(rid.len())]);
+    // Évite les collisions (simple) : random suffit ici.
+    let category = ChannelCategory { id: id.clone(), name, position: next_category_position(&room) };
+    room.categories.push(category);
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist category for {}: {}", room_id, err);
+        return respond_error(state, session_id, 64, "Failed to persist", req_id).await;
+    }
+    broadcast_room_record_to_members(state, &room_id, 64, None, true, room.clone()).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({ "op": 64, "d": { "ok": true, "gameId": room_id, "categoryId": id, "room": room } }), req_id),
+    )
+    .await;
+    false
+}
+
+async fn category_update(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("category_update:session:{session_id}"), 15, 60_000).await {
+        return respond_error(state, session_id, 65, "Rate limit exceeded", req_id).await;
+    };
+    let Some((user_id, _)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 65, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str)).await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 65, &message, req_id).await,
+        };
+    let Some(cat_id) = d.get("categoryId").and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()) else {
+        return respond_error(state, session_id, 65, "Missing categoryId", req_id).await;
+    };
+    let cat_id = cat_id.to_owned();
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 65, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 65, "Not a community server", req_id).await;
+    }
+    if !is_room_manager(role_in_room(&room, &user_id)) {
+        return respond_error(state, session_id, 65, "Only admins can rename categories", req_id).await;
+    }
+    let Some(idx) = room.categories.iter().position(|c| c.id == cat_id) else {
+        return respond_error(state, session_id, 65, "Unknown category", req_id).await;
+    };
+    if let Some(raw) = d.get("name").and_then(Value::as_str) {
+        match validate_category_name(raw) {
+            Ok(name) => room.categories[idx].name = name,
+            Err(msg) => return respond_error(state, session_id, 65, msg, req_id).await,
+        }
+    }
+    if let Some(pos) = d.get("position").and_then(Value::as_i64) {
+        room.categories[idx].position = pos.clamp(0, 1000);
+    }
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist category update for {}: {}", room_id, err);
+        return respond_error(state, session_id, 65, "Failed to persist", req_id).await;
+    }
+    broadcast_room_record_to_members(state, &room_id, 65, None, true, room.clone()).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({ "op": 65, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
+    )
+    .await;
+    false
+}
+
+async fn category_delete(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("category_delete:session:{session_id}"), 10, 60_000).await {
+        return respond_error(state, session_id, 66, "Rate limit exceeded", req_id).await;
+    };
+    let Some((user_id, _)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 66, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str)).await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 66, &message, req_id).await,
+        };
+    let Some(cat_id) = d.get("categoryId").and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()) else {
+        return respond_error(state, session_id, 66, "Missing categoryId", req_id).await;
+    };
+    let cat_id = cat_id.to_owned();
+    let Some(mut room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 66, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 66, "Not a community server", req_id).await;
+    }
+    if !is_room_manager(role_in_room(&room, &user_id)) {
+        return respond_error(state, session_id, 66, "Only admins can delete categories", req_id).await;
+    }
+    let Some(idx) = room.categories.iter().position(|c| c.id == cat_id) else {
+        return respond_error(state, session_id, 66, "Unknown category", req_id).await;
+    };
+    room.categories.remove(idx);
+    // Les salons orphelins retombent hors catégorie (Discord-like).
+    for ch in room.channels.iter_mut() {
+        if ch.category_id.as_deref() == Some(&cat_id) {
+            ch.category_id = None;
+        }
+    }
+    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
+        error!("Failed to persist category delete for {}: {}", room_id, err);
+        return respond_error(state, session_id, 66, "Failed to persist", req_id).await;
+    }
+    broadcast_room_record_to_members(state, &room_id, 66, None, true, room.clone()).await;
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({ "op": 66, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
     )
     .await;
     false
@@ -4029,12 +4624,60 @@ async fn dispatch_room_history(
     state: &SharedState,
     session_id: &str,
     room_id: &str,
+    channel_id: Option<&str>,
     req_id: Option<String>,
 ) {
-    let messages = {
-        let room_messages = state.room_messages.read().await;
-        room_messages.get(room_id).cloned().unwrap_or_default()
+    // Si le serveur a des salons et qu'un channel est demandé (ou par défaut),
+    // on sert uniquement ce salon. Sinon on fusionne legacy + salons pour
+    // compatibilité avec les vieux clients.
+    let (keys, effective_channel) = {
+        let channel = channel_id.map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned);
+        match state.database.room_record(room_id).await {
+            Some(room) if room.kind == RoomKind::Community && !room.channels.is_empty() => {
+                let wanted = channel.or_else(|| default_channel_id(&room));
+                match wanted {
+                    Some(id) => (vec![message_store_key(room_id, Some(&id))], Some(id)),
+                    None => (vec![room_id.to_owned()], None),
+                }
+            }
+            _ => {
+                if let Some(id) = channel {
+                    (vec![message_store_key(room_id, Some(&id))], None)
+                } else {
+                    (vec![room_id.to_owned()], None)
+                }
+            }
+        }
     };
+    let mut messages = {
+        let room_messages = state.room_messages.read().await;
+        let mut out = Vec::new();
+        for key in &keys {
+            if let Some(list) = room_messages.get(key) {
+                out.extend(list.iter().cloned());
+            }
+        }
+        // Fallback : vieux messages stockés sous la clé legacy.
+        if keys.len() == 1 && keys[0] != room_id {
+            if let Some(list) = room_messages.get(room_id) {
+                out.extend(list.iter().cloned());
+            }
+        }
+        out.sort_by_key(|m| m.timestamp);
+        if out.len() > MAX_ROOM_MESSAGES {
+            let overflow = out.len() - MAX_ROOM_MESSAGES;
+            out.drain(0..overflow);
+        }
+        out
+    };
+    // Complète le channel_id manquant pour les vieux enregistrements.
+    if let Some(ref cid) = effective_channel {
+        for m in messages.iter_mut() {
+            if m.channel_id.is_none() {
+                m.channel_id = Some(cid.clone());
+            }
+        }
+    }
 
     let authors = messages
         .iter()
@@ -4063,6 +4706,7 @@ async fn dispatch_room_history(
                 "d": {
                     "ok": true,
                     "roomId": room_id,
+                    "channelId": effective_channel,
                     "messages": messages,
                     "profiles": profiles
                 }
@@ -4098,13 +4742,26 @@ async fn update_message_reactions(
     let mut rooms = state.room_messages.write().await;
 
     if let Some(room_id) = room_hint.map(str::trim).filter(|room| !room.is_empty()) {
-        if let Some(messages) = rooms.get_mut(room_id) {
-            if let Some(message) = messages
-                .iter_mut()
-                .find(|message| message.message_id == message_id)
-            {
-                toggle_reaction_in_message(message, emoji, username);
-                return Some((room_id.to_owned(), message.reactions.clone()));
+        // Clé exacte, puis clés `room:channel` (salons).
+        let keys: Vec<String> = {
+            let mut k = vec![room_id.to_owned()];
+            for key in rooms.keys() {
+                if key.starts_with(&format!("{room_id}:")) {
+                    k.push(key.clone());
+                }
+            }
+            k
+        };
+        for key in keys {
+            if let Some(messages) = rooms.get_mut(&key) {
+                if let Some(message) = messages
+                    .iter_mut()
+                    .find(|message| message.message_id == message_id)
+                {
+                    toggle_reaction_in_message(message, emoji, username);
+                    // Retourne le room_id (pas la clé de stockage) pour le broadcast.
+                    return Some((room_id.to_owned(), message.reactions.clone()));
+                }
             }
         }
     }
@@ -4375,6 +5032,9 @@ pub async fn sync_room_record(
     if room.title.trim().is_empty() {
         room.title = room_id.to_owned();
     }
+    // Migration douce : les anciens serveurs community sans salons
+    // reçoivent le salon par défaut (#news, annonce).
+    ensure_default_channels(&mut room);
     room.members = usernames;
     state.database.set_room_record(room_id, &room).await?;
     Ok(room)

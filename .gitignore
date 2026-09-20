@@ -47,3 +47,6 @@ serve.public
 files/qxp.sqlite
 files/uploads
 rust/files/qxp.sqlite
+
+# opencode browser verification screenshots (local only)
+.opencode/browser/

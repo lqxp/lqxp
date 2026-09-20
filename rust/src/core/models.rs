@@ -120,6 +120,137 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ChannelKind {
+    #[serde(rename = "text")]
+    #[default]
+    Text,
+    #[serde(rename = "announce")]
+    Announce,
+    #[serde(rename = "voice")]
+    Voice,
+}
+
+impl ChannelKind {
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "text" | "chat" | "community" => Some(ChannelKind::Text),
+            "announce" | "announcement" | "annonce" | "annonces" => Some(ChannelKind::Announce),
+            "voice" | "vocal" | "vocaux" | "audio" => Some(ChannelKind::Voice),
+            _ => None,
+        }
+    }
+}
+
+/// Nom de salon façon Discord : minuscules, 2..100, `[a-z0-9-_]` (+ espaces
+/// convertis en `-` côté normalisation).
+pub fn normalize_channel_name(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.trim().to_ascii_lowercase().chars() {
+        if ch == ' ' || ch == '_' {
+            out.push('-');
+        } else if ch.is_ascii_alphanumeric() || ch == '-' {
+            out.push(ch);
+        }
+        // tout le reste est ignoré (accents, emojis, ponctuation…)
+        if out.len() >= 100 {
+            break;
+        }
+    }
+    // Collapse les tirets répétés + trim.
+    let mut collapsed = String::with_capacity(out.len());
+    let mut prev_dash = false;
+    for ch in out.chars() {
+        if ch == '-' {
+            if prev_dash {
+                continue;
+            }
+            prev_dash = true;
+        } else {
+            prev_dash = false;
+        }
+        collapsed.push(ch);
+    }
+    collapsed.trim_matches('-').to_owned()
+}
+
+pub fn validate_channel_name(raw: &str) -> Result<String, &'static str> {
+    let name = normalize_channel_name(raw);
+    let len = name.chars().count();
+    if len < 2 {
+        return Err("Channel name must be at least 2 characters (a-z, 0-9, -, _)");
+    }
+    if len > 100 {
+        return Err("Channel name must be at most 100 characters");
+    }
+    if !name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err("Channel name must match Discord rules (a-z, 0-9, -, _)");
+    }
+    Ok(name)
+}
+
+pub fn validate_category_name(raw: &str) -> Result<String, &'static str> {
+    let name = raw.trim().to_owned();
+    let len = name.chars().count();
+    if len < 2 {
+        return Err("Category name must be at least 2 characters");
+    }
+    if len > 64 {
+        return Err("Category name must be at most 64 characters");
+    }
+    Ok(name)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerChannel {
+    #[serde(default, rename = "id")]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, rename = "kind")]
+    pub kind: ChannelKind,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "categoryId")]
+    pub category_id: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub topic: String,
+    #[serde(default)]
+    pub position: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty", rename = "createdBy")]
+    pub created_by: String,
+    #[serde(default, rename = "createdAt")]
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelCategory {
+    #[serde(default, rename = "id")]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub position: i64,
+}
+
+pub fn default_community_channels(owner_id: &str, now: u64) -> (Vec<ChannelCategory>, Vec<ServerChannel>) {
+    // Un serveur sans salon démarre avec un unique #news en mode annonce :
+    // seuls les admins / sous-admins peuvent y parler.
+    let categories = Vec::new();
+    let channels = vec![ServerChannel {
+        id: "news".to_owned(),
+        name: "news".to_owned(),
+        kind: ChannelKind::Announce,
+        category_id: None,
+        topic: String::new(),
+        position: 0,
+        created_by: owner_id.to_owned(),
+        created_at: now,
+    }];
+    (categories, channels)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomRecord {
     #[serde(rename = "roomId")]
@@ -148,6 +279,10 @@ pub struct RoomRecord {
     pub mod_permissions: ModeratorPermissions,
     #[serde(default = "default_true", rename = "callsEnabled")]
     pub calls_enabled: bool,
+    #[serde(default, rename = "channels")]
+    pub channels: Vec<ServerChannel>,
+    #[serde(default, rename = "categories")]
+    pub categories: Vec<ChannelCategory>,
 }
 
 impl Default for RoomRecord {
@@ -166,6 +301,8 @@ impl Default for RoomRecord {
             timeouts: BTreeMap::new(),
             mod_permissions: ModeratorPermissions::default(),
             calls_enabled: true,
+            channels: Vec::new(),
+            categories: Vec::new(),
         }
     }
 }
@@ -246,6 +383,8 @@ pub struct ChatMessageRecord {
     pub message_id: String,
     #[serde(rename = "roomId")]
     pub room_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "channelId")]
+    pub channel_id: Option<String>,
     pub user: String,
     pub username: String,
     #[serde(default, skip_serializing_if = "String::is_empty", rename = "userId")]
