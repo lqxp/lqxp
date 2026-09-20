@@ -136,6 +136,7 @@ async fn register_connection(
             rooms: HashSet::new(),
             is_voice_chat: false,
             call_room: None,
+            voice_channel_id: None,
             call_camera: false,
             call_screen: false,
             call_deafened: false,

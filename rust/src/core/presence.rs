@@ -114,6 +114,7 @@ pub struct PlayerSession {
     pub rooms: HashSet<String>,
     pub is_voice_chat: bool,
     pub call_room: Option<String>,
+    pub voice_channel_id: Option<String>,
     pub call_camera: bool,
     pub call_screen: bool,
     pub call_deafened: bool,

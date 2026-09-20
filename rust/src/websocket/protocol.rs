@@ -1874,6 +1874,12 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
+    let voice_channel_id = d
+        .get("voiceChannelId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
 
     let user_id = {
         let players = state.players.read().await;
@@ -1959,10 +1965,12 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
                     player.call_camera = media.1;
                     player.call_screen = media.2;
                     player.call_room = Some(room.to_owned());
+                    player.voice_channel_id = if is_voice_chat { voice_channel_id.clone() } else { None };
                     if !is_voice_chat {
                         player.call_camera = false;
                         player.call_screen = false;
                         player.call_room = None;
+                        player.voice_channel_id = None;
                         player.call_deafened = false;
                     }
                     Ok((
@@ -1976,6 +1984,7 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
                             player.call_camera,
                             player.call_screen,
                         ),
+                        player.voice_channel_id.clone(),
                     ))
                 }
             } else {
@@ -1988,6 +1997,7 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
                     player.call_deafened = false;
                 }
                 player.call_room = None;
+                player.voice_channel_id = None;
                 Ok((
                     player.username.clone(),
                     player.status,
@@ -1999,6 +2009,7 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
                         player.call_camera,
                         player.call_screen,
                     ),
+                    None,
                 ))
             }
         } else {
@@ -2006,7 +2017,7 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
         }
     };
 
-    let (username, status, client_id, platform, rooms, media_json) = match voice_result {
+    let (username, status, client_id, platform, rooms, media_json, vc_id) = match voice_result {
         Ok(values) => values,
         Err(message) => return respond_error(state, session_id, 98, message, req_id).await,
     };
@@ -2024,7 +2035,8 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
                     "isVoiceChat": is_voice_chat,
                     "clientId": client_id.clone(),
                     "platform": platform.clone(),
-                    "media": media_json.clone()
+                    "media": media_json.clone(),
+                    "voiceChannelId": vc_id
                 }
             }),
         )
@@ -2098,6 +2110,12 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
+    let voice_channel_id = d
+        .get("voiceChannelId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
 
     let update_result = {
         let mut players = state.players.write().await;
@@ -2128,10 +2146,12 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
                     player.call_camera = camera;
                     player.call_screen = screen;
                     player.call_room = Some(room.to_owned());
+                    player.voice_channel_id = if is_voice_chat { voice_channel_id.clone() } else { None };
                     if !is_voice_chat {
                         player.call_camera = false;
                         player.call_screen = false;
                         player.call_room = None;
+                        player.voice_channel_id = None;
                         player.call_deafened = false;
                     }
                     Ok((
@@ -2145,6 +2165,7 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
                             player.call_camera,
                             player.call_screen,
                         ),
+                        player.voice_channel_id.clone(),
                     ))
                 }
             } else {
@@ -2157,6 +2178,7 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
                     player.call_deafened = false;
                 }
                 player.call_room = None;
+                player.voice_channel_id = None;
                 Ok((
                     player.username.clone(),
                     player.status,
@@ -2168,6 +2190,7 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
                         player.call_camera,
                         player.call_screen,
                     ),
+                    None,
                 ))
             }
         } else {
@@ -2175,7 +2198,7 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
         }
     };
 
-    let (username, status, client_id, platform, rooms, media_json) = match update_result {
+    let (username, status, client_id, platform, rooms, media_json, vc_id) = match update_result {
         Ok(values) => values,
         Err(message) => {
             return respond_error(state, session_id, 110, message, req_id).await
@@ -2195,7 +2218,8 @@ async fn update_call_media_state(state: &SharedState, session_id: &str, d: Value
                     "isVoiceChat": is_voice_chat,
                     "clientId": client_id.clone(),
                     "platform": platform.clone(),
-                    "media": media_json.clone()
+                    "media": media_json.clone(),
+                    "voiceChannelId": vc_id
                 }
             }),
         )
@@ -4996,7 +5020,8 @@ pub async fn room_call_players(
                 "platform": player.platform,
                 "media": call_media_json(player.is_voice_chat, player.call_camera, player.call_screen),
                 "deafened": player.call_deafened,
-                "status": player.status
+                "status": player.status,
+                "voiceChannelId": player.voice_channel_id
             })
         })
         .collect()

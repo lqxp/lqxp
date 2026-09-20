@@ -173,7 +173,8 @@ pub async fn change_username(
                             "audio": player.is_voice_chat,
                             "camera": player.call_camera,
                             "screen": player.call_screen
-                        }
+                        },
+                        "voiceChannelId": player.voice_channel_id
                     })
                 })
                 .collect::<Vec<_>>();
