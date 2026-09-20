@@ -72,6 +72,8 @@ complete merely because the HTML/CSS/TypeScript looks correct.
 - [ ] Interaction verified (click/type/scroll) when behavior changed
 - [ ] No leftover test state (test rooms/channels removed, nav state sane)
 - [ ] No other scoped/global CSS trap introduced (see notes)
+- [ ] All user-facing strings go through `t()` — zero hardcoded text in
+      templates or script (see i18n section below)
 
 ### Project-specific verification notes (learned the hard way)
 
@@ -145,3 +147,58 @@ complete merely because the HTML/CSS/TypeScript looks correct.
   parallel (state can change between two tool calls). Prefer reload-driven
   state, keep clicks minimal, restore navigation afterwards, and clean up
   test rooms/channels/accounts created during verification.
+
+### i18n — mandatory, no exceptions
+
+**Every user-facing string must go through the i18n system.** Hardcoded
+text in templates or script is a bug, period.
+
+#### System overview
+
+- Custom composable (NOT vue-i18n): `web/src/composables/useI18n.ts`
+- Translation files: `web/src/i18n/{en,fr,es,ru}.json`
+- Locales: `en` (source), `fr`, `es`, `ru`
+- Interpolation syntax: `{variableName}` (curly braces, NOT vue-i18n)
+
+#### How to use in components
+
+```typescript
+const { t } = inject<ReturnType<typeof useI18n>>("i18n") ?? useI18n();
+```
+
+```html
+<template>
+  <p>{{ t('ban.roomMessage', { channel: channelLabel }) }}</p>
+</template>
+```
+
+#### Rules
+
+1. **Never hardcode** a user-facing string (button labels, error messages,
+   placeholders, aria-labels, tooltips, status text, toast messages, etc.).
+   If it appears on screen or is read aloud, it must be a `t()` call.
+2. **Add keys to `en.json` first**, then copy the same key structure to
+   `fr.json`, `es.json`, `ru.json`. All four files must stay in sync.
+3. **Use descriptive, namespaced keys** — follow the existing pattern:
+   `section.subsection.key`, e.g. `composer.muteRemaining`,
+   `capWidget.verify`, `settings.about.version`.
+4. **Never use brand names as hardcoded text** — if "QxChat" must appear,
+   add it as a translation key (e.g. `app.brand`).
+5. **Fallback strings in code are also forbidden** — patterns like
+   `t("key") || "fallback text"` must not contain user-visible text.
+   Use empty string or a dedicated i18n key for the fallback.
+6. **Accessibility strings count** — `aria-label`, `title`, `alt` attributes
+   must use `t()` or `:aria-label="t('...')"` binding.
+7. **Format strings (dates, durations)** must use locale-aware formatters
+   (`Intl.DateTimeFormat`, `Intl.RelativeTimeFormat`, etc.) or dedicated
+   i18n keys — not English-only templates like `"2h 15m"`.
+8. **When editing a file with hardcoded strings**, fix them all — don't
+   leave a mix of `t()` and raw text in the same component.
+
+#### Checklist for every PR touching UI
+
+- [ ] Grep for hardcoded strings in changed `.vue` and `.ts` files:
+      `grep -nE '"[A-Z][a-z].*"' --include="*.vue" --include="*.ts" src/`
+- [ ] All new keys added to all 4 locale files (`en`, `fr`, `es`, `ru`)
+- [ ] No `|| "fallback"` with English/French text after a `t()` call
+- [ ] Aria-labels, title attrs, and alt text use `t()`
