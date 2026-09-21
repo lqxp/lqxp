@@ -151,6 +151,7 @@ async fn register_connection(
             status: UserPresenceStatus::Online,
         },
     );
+    state.runtime.record_session_opened(players.len());
 }
 
 pub async fn disconnect_player(state: &SharedState, session_id: &str) {

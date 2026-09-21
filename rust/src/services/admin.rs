@@ -21,6 +21,8 @@ pub async fn admin_overview(
     }
 
     let accounts = state.accounts.user_stats().await?;
+    let signups = state.accounts.signups_per_day(30).await?;
+    let (messages_relayed, sessions_opened, peak_sessions) = state.runtime.snapshot();
     let features = state.accounts.feature_flags().await?;
     let default_room = state.accounts.get_default_room().await?;
 
@@ -113,6 +115,14 @@ pub async fn admin_overview(
             "version": state.config.network.latest_version,
             "uptimeMs": now_ms().saturating_sub(state.started_at_ms)
         },
+        // Counted in memory since the process came up, never written down.
+        "runtime": {
+            "messagesRelayed": messages_relayed,
+            "sessionsOpened": sessions_opened,
+            "peakSessions": peak_sessions,
+            "sinceMs": state.started_at_ms
+        },
+        "signupsPerDay": signups,
         "features": features,
         "defaultRoom": default_room,
         "rooms": rooms

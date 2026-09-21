@@ -61,6 +61,20 @@ pub struct AuthenticatedUser {
     pub created_at: u64,
 }
 
+/// One day of account creations, read back from `users.created_at`.
+///
+/// An aggregate over rows the table already holds: it counts, it does not
+/// record. Nothing new is written, no account is identifiable in the result,
+/// and the buckets are UTC days so the answer does not depend on where the
+/// server happens to run.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignupDay {
+    /// Midnight UTC of the day, in epoch milliseconds.
+    pub day: u64,
+    pub count: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserStats {
@@ -1319,6 +1333,53 @@ impl AccountDatabase {
             .await?
             .ok_or_else(|| ApiError::bad_request("Account not found."))?;
         Ok(self.public_user(updated))
+    }
+
+    /// Accounts created per day over the last `days` days, oldest first.
+    ///
+    /// Every day in the window comes back, quiet ones as zero, so a chart has
+    /// a continuous series instead of gaps it would have to invent a line
+    /// across. Bucketing is integer arithmetic rather than a date function,
+    /// because SQLite and Postgres do not spell those the same way.
+    pub async fn signups_per_day(&self, days: u32) -> ApiResult<Vec<SignupDay>> {
+        const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+        let span = days.clamp(1, 120) as i64;
+        let today = (now_ms() as i64 / DAY_MS) * DAY_MS;
+        let origin = today - (span - 1) * DAY_MS;
+        let rows: Vec<(i64, i64)> = match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query_as(
+                "SELECT (created_at - ?) / 86400000 AS bucket, COUNT(*) FROM users \
+                 WHERE created_at >= ? GROUP BY 1 ORDER BY 1",
+            )
+            .bind(origin)
+            .bind(origin)
+            .fetch_all(pool)
+            .await,
+            SqlBackend::Postgres(pool) => sqlx::query_as(
+                "SELECT (created_at - $1) / 86400000 AS bucket, CAST(COUNT(*) AS BIGINT) FROM users \
+                 WHERE created_at >= $2 GROUP BY 1 ORDER BY 1",
+            )
+            .bind(origin)
+            .bind(origin)
+            .fetch_all(pool)
+            .await,
+        }
+        .map_err(|err| ApiError::internal("Signup histogram query", err))?;
+
+        let mut counts = vec![0u64; span as usize];
+        for (bucket, count) in rows {
+            if bucket >= 0 && (bucket as usize) < counts.len() {
+                counts[bucket as usize] = count.max(0) as u64;
+            }
+        }
+        Ok(counts
+            .into_iter()
+            .enumerate()
+            .map(|(index, count)| SignupDay {
+                day: (origin + index as i64 * DAY_MS) as u64,
+                count,
+            })
+            .collect())
     }
 
     pub async fn user_stats(&self) -> ApiResult<UserStats> {

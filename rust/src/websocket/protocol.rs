@@ -1766,6 +1766,10 @@ async fn edit_message(state: &SharedState, session_id: &str, d: Value) -> bool {
     false
 }
 
+/// Calls one account may join in a minute. A person hopping between a couple
+/// of calls stays well under it; a client looping join and leave does not.
+const VOICE_JOINS_PER_MINUTE: u32 = 6;
+
 async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> bool {
     let req_id = request_id(&d);
     if rate_limit_hit(state.as_ref(), format!("voice_chat:session:{}", session_id), 10, 5_000).await {
@@ -1800,10 +1804,30 @@ async fn update_voice_chat(state: &SharedState, session_id: &str, d: Value) -> b
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
 
-    let user_id = {
+    let (user_id, already_in_voice) = {
         let players = state.players.read().await;
-        players.get(session_id).map(|p| p.user_id.clone()).unwrap_or_default()
+        players
+            .get(session_id)
+            .map(|p| (p.user_id.clone(), p.is_voice_chat))
+            .unwrap_or_default()
     };
+
+    // Joining a call is fanned out to every member of the room, and it is
+    // what their clients turn into a "started a call" line, so joins are
+    // limited on their own. Media changes inside a call are not joins and
+    // stay under the looser limit above. The key is the account, not the
+    // session: opening more tabs must not buy more joins. Like every bucket
+    // here it lives in memory for its window only.
+    if is_voice_chat && !already_in_voice {
+        let key = if user_id.is_empty() {
+            format!("voice_join:session:{session_id}")
+        } else {
+            format!("voice_join:user:{user_id}")
+        };
+        if rate_limit_hit(state.as_ref(), key, VOICE_JOINS_PER_MINUTE, 60_000).await {
+            return respond_error(state, session_id, 98, "Too many call joins, wait a moment", req_id).await;
+        }
+    }
 
     if is_voice_chat {
         if let Some(room_id) = call_room.as_deref() {
@@ -4104,6 +4128,7 @@ async fn store_room_message(
     room_id: &str,
     message: ChatMessageRecord,
 ) -> ChatMessageRecord {
+    state.runtime.record_message();
     let mut rooms = state.room_messages.write().await;
     let room = rooms.entry(room_id.to_owned()).or_default();
     room.push(message.clone());

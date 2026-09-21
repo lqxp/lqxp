@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 use axum::extract::ws::Message;
 use serde_json::{json, Value};
@@ -12,10 +15,44 @@ use crate::core::{
     models::{ChatMessageRecord, UserPresenceStatus, UserProfile},
 };
 
+/// Counters kept only in memory, for the life of the process.
+///
+/// Three integers with no identity, no timestamp and no content attached to
+/// any of them, gone when the process restarts. They answer "how busy is this
+/// server" without recording anything about anybody, which is where the
+/// zero-log rule draws its line: the server may count, it may not remember.
+#[derive(Debug, Default)]
+pub struct RuntimeCounters {
+    messages_relayed: AtomicU64,
+    sessions_opened: AtomicU64,
+    peak_sessions: AtomicU64,
+}
+
+impl RuntimeCounters {
+    pub fn record_message(&self) {
+        self.messages_relayed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `live` is the number of sessions held once this one was added.
+    pub fn record_session_opened(&self, live: usize) {
+        self.sessions_opened.fetch_add(1, Ordering::Relaxed);
+        self.peak_sessions.fetch_max(live as u64, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> (u64, u64, u64) {
+        (
+            self.messages_relayed.load(Ordering::Relaxed),
+            self.sessions_opened.load(Ordering::Relaxed),
+            self.peak_sessions.load(Ordering::Relaxed),
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub config: Config,
     pub started_at_ms: u64,
+    pub runtime: Arc<RuntimeCounters>,
     pub blocklist_terms: Arc<Vec<String>>,
     pub players: Arc<RwLock<HashMap<String, PlayerSession>>>,
     pub room_messages: Arc<RwLock<HashMap<String, Vec<ChatMessageRecord>>>>,
