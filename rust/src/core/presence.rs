@@ -61,6 +61,15 @@ pub struct AppState {
     pub rate_limits: Arc<Mutex<HashMap<String, RateLimitBucket>>>,
     pub public_profile_cache: Arc<Mutex<HashMap<String, CachedPublicProfile>>>,
     pub call_access_overrides: Arc<RwLock<HashSet<String>>>,
+    pub poll_tallies: Arc<Mutex<HashMap<String, PollTally>>>,
+}
+
+/// Anonymous poll tally: salted voter hashes stop a second vote, counts carry the result,
+/// and nothing links a voter to a choice. Memory only.
+#[derive(Debug, Default, Clone)]
+pub struct PollTally {
+    pub voters: HashSet<String>,
+    pub counts: Vec<u32>,
 }
 
 pub type SharedState = Arc<AppState>;

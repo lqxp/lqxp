@@ -283,7 +283,7 @@ async fn cap_challenge_handler(
     State(state): State<SharedState>,
     Query(query): Query<CapChallengeQuery>,
 ) -> ApiResult<impl IntoResponse> {
-    if crate::core::security::rate_limit_hit(&state, "auth:cap:challenge:global".to_string(), 60, 10_000).await {
+    if crate::core::security::rate_limit_hit(&state, "auth:cap:challenge:global".to_string(), 200, 10_000).await {
         return Err(ApiError::too_many_requests(
             "CAPTCHA challenge rate limit exceeded. Please wait a few seconds.",
         ));
@@ -300,7 +300,7 @@ async fn cap_redeem_handler(
     State(state): State<SharedState>,
     Json(body): Json<crate::core::cap::CapRedeemRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    if crate::core::security::rate_limit_hit(&state, "auth:cap:redeem:global".to_string(), 60, 10_000).await {
+    if crate::core::security::rate_limit_hit(&state, "auth:cap:redeem:global".to_string(), 200, 10_000).await {
         return Err(ApiError::too_many_requests(
             "CAPTCHA redeem rate limit exceeded. Please wait a few seconds.",
         ));
@@ -314,7 +314,7 @@ async fn auth_challenge_handler(
     State(state): State<SharedState>,
     Query(query): Query<ChallengeQuery>,
 ) -> ApiResult<impl IntoResponse> {
-    if crate::core::security::rate_limit_hit(&state, "auth:challenge:global".to_string(), 60, 10_000).await {
+    if crate::core::security::rate_limit_hit(&state, "auth:challenge:global".to_string(), 200, 10_000).await {
         return Err(ApiError::too_many_requests(
             "Security challenge rate limit exceeded. Please wait a few seconds.",
         ));

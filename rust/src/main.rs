@@ -55,6 +55,7 @@ async fn main() {
         rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         public_profile_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         call_access_overrides: Arc::new(RwLock::new(HashSet::new())),
+        poll_tallies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     });
 
     let app = build_router(state.clone());

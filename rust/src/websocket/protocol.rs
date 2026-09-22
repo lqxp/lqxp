@@ -53,8 +53,8 @@ const MAX_ROOM_ID_LEN: usize = 64;
 const MIN_BETWEEN_MESSAGE_INTERVAL: u64 = 400;
 const PUBLIC_PROFILE_CACHE_TTL_MS: u64 = 5 * 60 * 1000;
 const PUBLIC_PROFILE_RATE_LIMIT_WINDOW_MS: u64 = 15_000;
-const PUBLIC_PROFILE_RATE_LIMIT_MAX: u32 = 4;
-const PUBLIC_PROFILE_MAX_LOOKUPS: usize = 8;
+const PUBLIC_PROFILE_RATE_LIMIT_MAX: u32 = 20;
+const PUBLIC_PROFILE_MAX_LOOKUPS: usize = 32;
 const SYSTEM_USERNAME: &str = "system";
 const MAX_ROOM_DESCRIPTION_CHARS: usize = 140;
 const MAX_ROOM_MODERATORS: usize = 5;
@@ -120,6 +120,8 @@ pub async fn process_message(
         8 => update_client_settings(&state, &session_id, payload.d).await,
         18 => send_room_history(&state, &session_id, payload.d).await,
         19 => toggle_message_reaction(&state, &session_id, payload.d).await,
+        53 => vote_poll(&state, &session_id, payload.d).await,
+        55 => relay_room_signal(&state, &session_id, payload.d).await,
         21 => delete_message(&state, &session_id, payload.d).await,
         29 => edit_message(&state, &session_id, payload.d).await,
         28 => request_link_preview(&state, &session_id, payload.d).await,
@@ -554,7 +556,7 @@ async fn leave_game(state: &SharedState, session_id: &str, d: Value) -> bool {
 
 async fn update_client_settings(state: &SharedState, session_id: &str, d: Value) -> bool {
     let req_id = request_id(&d);
-    if rate_limit_hit(state.as_ref(), format!("settings:session:{}", session_id), 10, 10_000).await {
+    if rate_limit_hit(state.as_ref(), format!("settings:session:{}", session_id), 30, 10_000).await {
         return respond_error(state, session_id, 8, "Settings update rate limit exceeded", req_id).await;
     }
     let delete_messages_on_leave = d
@@ -1186,7 +1188,7 @@ async fn request_link_preview(state: &SharedState, session_id: &str, d: Value) -
         format!("link_preview:user:{}", user_id)
     };
 
-    if rate_limit_hit(state.as_ref(), rate_key, 10, 30_000).await {
+    if rate_limit_hit(state.as_ref(), rate_key, 40, 30_000).await {
         return respond_error(state, session_id, 28, "Rate limit exceeded", request_id(&d)).await;
     }
 
@@ -4104,6 +4106,25 @@ async fn dispatch_room_history(
         Err(err) => error!("Failed to hydrate room history profiles: {}", err),
     }
 
+    let viewer = {
+        let players = state.players.read().await;
+        players.get(session_id).map(|player| player.user_id.clone()).unwrap_or_default()
+    };
+    let mut messages = serde_json::to_value(&messages).unwrap_or_else(|_| json!([]));
+    {
+        let tallies = state.poll_tallies.lock().await;
+        if let Some(list) = messages.as_array_mut() {
+            for message in list.iter_mut() {
+                let Some(id) = message.get("messageId").and_then(Value::as_str).map(str::to_owned) else {
+                    continue;
+                };
+                if let Some(tally) = tallies.get(&id) {
+                    message["pollState"] = poll_state_for(&id, tally, &viewer);
+                }
+            }
+        }
+    }
+
     respond_to_sender(
         state,
         session_id,
@@ -4121,6 +4142,161 @@ async fn dispatch_room_history(
         ),
     )
     .await;
+}
+
+const MAX_POLL_OPTIONS: usize = 10;
+const MAX_ROOM_SIGNAL_BYTES: usize = 64 * 1024;
+
+/// Opaque, end-to-end encrypted payloads (whiteboard strokes) relayed to the other
+/// members of a room. Nothing is stored and nothing is read.
+async fn relay_room_signal(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("room_signal:session:{session_id}"), 60, 10_000).await {
+        return respond_error(state, session_id, 55, "Rate limit exceeded", req_id).await;
+    }
+    let Some(room_id) = d.get("gameId").and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned) else {
+        return respond_error(state, session_id, 55, "Missing gameId", req_id).await;
+    };
+    let Some(encrypted) = d.get("encrypted").filter(|v| v.is_object()).cloned() else {
+        return respond_error(state, session_id, 55, "Missing payload", req_id).await;
+    };
+    if encrypted.to_string().len() > MAX_ROOM_SIGNAL_BYTES {
+        return respond_error(state, session_id, 55, "Payload too large", req_id).await;
+    }
+    let (from, recipients) = {
+        let players = state.players.read().await;
+        let Some(sender) = players.get(session_id) else {
+            return respond_error(state, session_id, 55, "You need to be identified before", req_id).await;
+        };
+        if sender.username.is_empty() || !sender.rooms.contains(&room_id) {
+            return respond_error(state, session_id, 55, "Not a member of this room", req_id).await;
+        }
+        let recipients = players
+            .iter()
+            .filter(|(id, player)| id.as_str() != session_id && player.rooms.contains(&room_id))
+            .map(|(_, player)| player.tx.clone())
+            .collect::<Vec<_>>();
+        (sender.username.clone(), recipients)
+    };
+    let payload = json!({ "op": 56, "d": { "roomId": room_id, "from": from, "encrypted": encrypted } }).to_string();
+    for tx in recipients {
+        let _ = tx.send(Message::Text(payload.clone()));
+    }
+    false
+}
+
+fn poll_salt() -> &'static [u8; 32] {
+    static SALT: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    SALT.get_or_init(|| {
+        use rand::RngCore;
+        let mut salt = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut salt);
+        salt
+    })
+}
+
+fn poll_voter_hash(message_id: &str, user_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(poll_salt());
+    hasher.update(message_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(user_id.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Results only go to people who already voted.
+fn poll_state_for(message_id: &str, tally: &crate::core::presence::PollTally, user_id: &str) -> Value {
+    let voted = !user_id.is_empty() && tally.voters.contains(&poll_voter_hash(message_id, user_id));
+    if voted {
+        json!({ "total": tally.voters.len(), "voted": true, "counts": tally.counts })
+    } else {
+        json!({ "total": tally.voters.len(), "voted": false })
+    }
+}
+
+async fn vote_poll(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("poll_vote:session:{session_id}"), 10, 10_000).await {
+        return respond_error(state, session_id, 53, "Rate limit exceeded", req_id).await;
+    }
+    let Some(message_id) = d.get("messageId").and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned) else {
+        return respond_error(state, session_id, 53, "Missing messageId", req_id).await;
+    };
+    let mut choices = d
+        .get("choices")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(Value::as_u64).map(|v| v as usize).filter(|v| *v < MAX_POLL_OPTIONS).collect::<Vec<_>>())
+        .unwrap_or_default();
+    choices.sort_unstable();
+    choices.dedup();
+    if choices.is_empty() {
+        return respond_error(state, session_id, 53, "Missing choices", req_id).await;
+    }
+
+    let (user_id, user_rooms) = {
+        let players = state.players.read().await;
+        match players.get(session_id) {
+            Some(player) if !player.user_id.is_empty() => (player.user_id.clone(), player.rooms.clone()),
+            _ => return respond_error(state, session_id, 53, "You need to be identified before", req_id).await,
+        }
+    };
+
+    let room_id = {
+        let rooms = state.room_messages.read().await;
+        rooms
+            .iter()
+            .find(|(room, messages)| {
+                user_rooms.contains(*room)
+                    && messages.iter().any(|message| message.message_id == message_id && !message.deleted)
+            })
+            .map(|(room, _)| room.clone())
+    };
+    let Some(room_id) = room_id else {
+        return respond_error(state, session_id, 53, "Unknown messageId", req_id).await;
+    };
+
+    let voter = poll_voter_hash(&message_id, &user_id);
+    let tally = {
+        let mut tallies = state.poll_tallies.lock().await;
+        let tally = tallies.entry(message_id.clone()).or_default();
+        if tally.voters.contains(&voter) {
+            return respond_error(state, session_id, 53, "Already voted", req_id).await;
+        }
+        tally.voters.insert(voter);
+        let needed = choices.iter().max().map(|max| max + 1).unwrap_or(0);
+        if tally.counts.len() < needed {
+            tally.counts.resize(needed, 0);
+        }
+        for choice in &choices {
+            tally.counts[*choice] += 1;
+        }
+        tally.clone()
+    };
+
+    let recipients = {
+        let players = state.players.read().await;
+        players
+            .values()
+            .filter(|player| player.rooms.contains(&room_id))
+            .map(|player| (player.tx.clone(), player.user_id.clone()))
+            .collect::<Vec<_>>()
+    };
+    for (tx, recipient) in recipients {
+        let payload = json!({
+            "op": 54,
+            "d": { "roomId": room_id, "messageId": message_id, "pollState": poll_state_for(&message_id, &tally, &recipient) }
+        });
+        let _ = tx.send(Message::Text(payload.to_string()));
+    }
+
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({ "op": 53, "d": { "ok": true, "messageId": message_id } }), req_id),
+    )
+    .await;
+    false
 }
 
 async fn store_room_message(
@@ -4718,11 +4894,39 @@ async fn parse_user_profile(
         current.pronouns.clone()
     };
 
+    let links = if obj.contains_key("links") {
+        obj.get("links")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(|item| {
+                        let url = item.get("url").and_then(Value::as_str)?.trim();
+                        if !url.starts_with("https://") || url.chars().count() > 200 || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                            return None;
+                        }
+                        let label = sanitize_profile_text(item.get("label").and_then(Value::as_str).unwrap_or(""), 32);
+                        Some(crate::core::models::ProfileLink { label, url: url.to_owned() })
+                    })
+                    .take(4)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        current.links.clone()
+    };
+    let custom_status = if obj.contains_key("customStatus") {
+        sanitize_profile_text(obj.get("customStatus").and_then(Value::as_str).unwrap_or(""), 60)
+    } else {
+        current.custom_status.clone()
+    };
+
     Ok(UserProfile {
         avatar,
         banner,
         description,
         pronouns,
+        links,
+        custom_status,
     })
 }
 
