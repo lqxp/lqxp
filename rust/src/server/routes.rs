@@ -91,6 +91,49 @@ fn cors_layer(state: &SharedState) -> CorsLayer {
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
 }
 
+/// The desktop shell's own origins. It has no network host, and these are the
+/// values its webview reports on each platform, so they are allowed wherever
+/// the server runs.
+fn is_shell_origin(origin: &str) -> bool {
+    matches!(
+        origin,
+        "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost"
+    )
+}
+
+/// Whether `origin` is a development origin: the app served from a loopback
+/// address or from a private network address.
+///
+/// Both schemes are accepted, because browsers only expose WebCrypto on a
+/// secure context and refusing `https` would force developers onto an origin
+/// where the app cannot run.
+fn is_local_dev_origin(origin: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(origin) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => v4.is_private() || v4.is_loopback(),
+        Ok(IpAddr::V6(v6)) => v6.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+/// Development origins are a convenience for a machine you already control.
+/// A deployed server has no reason to answer them, so they are switched off
+/// whenever `PRODUCTION` is set, the same signal `load_config` reads.
+fn dev_origins_allowed() -> bool {
+    std::env::var("PRODUCTION").is_err()
+}
+
 fn allowed_cors_origins(state: &SharedState) -> AllowOrigin {
     let configured_origins: Vec<HeaderValue> = [
         state.config.api.public_domain.trim(),
@@ -107,46 +150,22 @@ fn allowed_cors_origins(state: &SharedState) -> AllowOrigin {
     })
     .filter_map(|o| o.parse().ok())
     .collect();
+    let allow_dev = dev_origins_allowed();
 
     AllowOrigin::predicate(move |origin: &HeaderValue, _parts: &axum::http::request::Parts| {
-        let s = origin.to_str().unwrap_or("");
-
-        if configured_origins.iter().any(|o| o.as_bytes() == origin.as_bytes()) {
-            return true;
-        }
-
-        if s == "tauri://localhost"
-            || s == "http://tauri.localhost"
-            || s == "https://tauri.localhost"
+        if configured_origins
+            .iter()
+            .any(|o| o.as_bytes() == origin.as_bytes())
         {
             return true;
         }
-
-        if s.starts_with("http://localhost:")
-            || s.starts_with("http://127.0.0.1:")
-            || s.starts_with("http://[::1]:")
-        {
+        let Ok(value) = origin.to_str() else {
+            return false;
+        };
+        if is_shell_origin(value) {
             return true;
         }
-
-        // Allow any HTTP origin from a private / loopback IP
-        if let Ok(parsed) = url::Url::parse(s) {
-            if parsed.scheme() == "http" {
-                if let Some(host) = parsed.host_str() {
-                    if host.eq_ignore_ascii_case("localhost") {
-                        return true;
-                    }
-                    if let Ok(ip) = host.parse::<IpAddr>() {
-                        return match ip {
-                            IpAddr::V4(v4) => v4.is_private() || v4.is_loopback(),
-                            IpAddr::V6(v6) => v6.is_loopback(),
-                        };
-                    }
-                }
-            }
-        }
-
-        false
+        allow_dev && is_local_dev_origin(value)
     })
 }
 
@@ -264,7 +283,7 @@ async fn cap_challenge_handler(
     State(state): State<SharedState>,
     Query(query): Query<CapChallengeQuery>,
 ) -> ApiResult<impl IntoResponse> {
-    if crate::core::security::rate_limit_hit(&state, "auth:cap:challenge:global".to_string(), 60, 10_000).await {
+    if crate::core::security::rate_limit_hit(&state, "auth:cap:challenge:global".to_string(), 200, 10_000).await {
         return Err(ApiError::too_many_requests(
             "CAPTCHA challenge rate limit exceeded. Please wait a few seconds.",
         ));
@@ -281,7 +300,7 @@ async fn cap_redeem_handler(
     State(state): State<SharedState>,
     Json(body): Json<crate::core::cap::CapRedeemRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    if crate::core::security::rate_limit_hit(&state, "auth:cap:redeem:global".to_string(), 60, 10_000).await {
+    if crate::core::security::rate_limit_hit(&state, "auth:cap:redeem:global".to_string(), 200, 10_000).await {
         return Err(ApiError::too_many_requests(
             "CAPTCHA redeem rate limit exceeded. Please wait a few seconds.",
         ));
@@ -295,7 +314,7 @@ async fn auth_challenge_handler(
     State(state): State<SharedState>,
     Query(query): Query<ChallengeQuery>,
 ) -> ApiResult<impl IntoResponse> {
-    if crate::core::security::rate_limit_hit(&state, "auth:challenge:global".to_string(), 60, 10_000).await {
+    if crate::core::security::rate_limit_hit(&state, "auth:challenge:global".to_string(), 200, 10_000).await {
         return Err(ApiError::too_many_requests(
             "Security challenge rate limit exceeded. Please wait a few seconds.",
         ));
@@ -534,11 +553,31 @@ async fn room_icon_upload_handler(
         .map(Json)
 }
 
+/// Administration endpoints are low-traffic and high-impact: a stolen admin
+/// token should not be able to walk or empty the user table at machine speed.
+/// The bucket is per admin account, so one admin cannot throttle the other.
+async fn admin_rate_limit(
+    state: &SharedState,
+    action: &str,
+    admin_id: &str,
+    limit: u32,
+    window_ms: u64,
+) -> ApiResult<()> {
+    let key = format!("admin:{action}:user:{admin_id}");
+    if crate::core::security::rate_limit_hit(state, key, limit, window_ms).await {
+        return Err(ApiError::too_many_requests(
+            "Too many administration requests. Please wait a moment.",
+        ));
+    }
+    Ok(())
+}
+
 async fn admin_overview_handler(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
     let admin = authenticated_user(&state, &headers).await?;
+    admin_rate_limit(&state, "overview", &admin.id, 60, 60_000).await?;
     admin::admin_overview(&state, &admin).await.map(Json)
 }
 
@@ -570,6 +609,7 @@ async fn admin_features_handler(
     Json(body): Json<FeatureRequest>,
 ) -> ApiResult<impl IntoResponse> {
     let admin = authenticated_user(&state, &headers).await?;
+    admin_rate_limit(&state, "features", &admin.id, 30, 60_000).await?;
     admin::set_feature(&state, &admin, &body.key, body.enabled)
         .await
         .map(Json)
@@ -581,6 +621,7 @@ async fn admin_default_room_handler(
     Json(body): Json<DefaultRoomRequest>,
 ) -> ApiResult<impl IntoResponse> {
     let admin = authenticated_user(&state, &headers).await?;
+    admin_rate_limit(&state, "default-room", &admin.id, 30, 60_000).await?;
     if body.clear {
         admin::clear_default_room(&state, &admin).await.map(Json)
     } else {
@@ -600,6 +641,7 @@ async fn admin_user_disabled_handler(
     Json(body): Json<DisabledRequest>,
 ) -> ApiResult<impl IntoResponse> {
     let admin = authenticated_user(&state, &headers).await?;
+    admin_rate_limit(&state, "users:disabled", &admin.id, 60, 60_000).await?;
     admin::set_user_disabled(&state, &admin, &user_id, body.disabled)
         .await
         .map(Json)
@@ -612,6 +654,7 @@ async fn admin_user_banned_handler(
     Json(body): Json<BannedRequest>,
 ) -> ApiResult<impl IntoResponse> {
     let admin = authenticated_user(&state, &headers).await?;
+    admin_rate_limit(&state, "users:banned", &admin.id, 60, 60_000).await?;
     admin::set_user_banned(&state, &admin, &user_id, body.banned)
         .await
         .map(Json)
@@ -623,6 +666,7 @@ async fn admin_user_delete_handler(
     AxumPath(user_id): AxumPath<String>,
 ) -> ApiResult<impl IntoResponse> {
     let admin = authenticated_user(&state, &headers).await?;
+    admin_rate_limit(&state, "users:delete", &admin.id, 10, 60_000).await?;
     admin::delete_user_account(&state, &admin, &user_id)
         .await
         .map(Json)
@@ -635,6 +679,7 @@ async fn admin_user_badges_handler(
     Json(body): Json<BadgesRequest>,
 ) -> ApiResult<impl IntoResponse> {
     let admin = authenticated_user(&state, &headers).await?;
+    admin_rate_limit(&state, "users:badges", &admin.id, 60, 60_000).await?;
     admin::set_user_badges(&state, &admin, &user_id, &body.badges)
         .await
         .map(Json)

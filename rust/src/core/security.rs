@@ -126,6 +126,40 @@ pub fn normalize_username(username: &str) -> String {
     username.trim().to_lowercase()
 }
 
+fn unleet(ch: char) -> char {
+    match ch {
+        '0' => 'o',
+        '1' | '!' | '|' => 'i',
+        '3' => 'e',
+        '4' => 'a',
+        '5' | '$' => 's',
+        '7' => 't',
+        '@' => 'a',
+        other => other,
+    }
+}
+
+fn reserved_username_keys(username: &str) -> [String; 2] {
+    let lowered = username.trim().to_lowercase();
+    let dropped: String = lowered.chars().filter(|ch| ch.is_alphanumeric()).collect();
+    let substituted: String = lowered
+        .chars()
+        .map(unleet)
+        .filter(|ch| ch.is_alphanumeric())
+        .collect();
+    [dropped, substituted]
+}
+
+fn hits_reserved_username(username: &str) -> bool {
+    reserved_username_keys(username).iter().any(|key| {
+        !key.is_empty()
+            && (RESERVED_USERNAMES.contains(&key.as_str())
+                || RESERVED_USERNAME_SUBSTRINGS
+                    .iter()
+                    .any(|token| key.contains(token)))
+    })
+}
+
 pub fn normalize_recovery_phrase(words: &str) -> String {
     words
         .split_whitespace()
@@ -151,14 +185,7 @@ fn validate_username_with_max(username: &str, max: usize) -> ApiResult<String> {
         )));
     }
 
-    let normalized = normalize_username(trimmed);
-    if RESERVED_USERNAMES.contains(&normalized.as_str()) {
-        return Err(ApiError::bad_request("Username is reserved."));
-    }
-    if RESERVED_USERNAME_SUBSTRINGS
-        .iter()
-        .any(|token| normalized.contains(token))
-    {
+    if hits_reserved_username(trimmed) {
         return Err(ApiError::bad_request("Username is reserved."));
     }
 

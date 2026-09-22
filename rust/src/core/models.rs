@@ -188,6 +188,16 @@ pub struct UserProfile {
     pub description: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pronouns: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<ProfileLink>,
+    #[serde(default, skip_serializing_if = "String::is_empty", rename = "customStatus")]
+    pub custom_status: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileLink {
+    pub label: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

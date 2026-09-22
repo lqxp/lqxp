@@ -28,9 +28,6 @@ const MAX_USER_BADGE_LEN: usize = 32;
 const MAX_BLOCKS_PER_ACCOUNT: usize = 512;
 pub const MAX_SOCIAL_BLOB_BYTES: usize = 64 * 1024;
 
-const USER_SELECT_BY_CREATED_DESC: &str =
-    "SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users ORDER BY created_at DESC";
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicUser {
@@ -42,6 +39,11 @@ pub struct PublicUser {
     pub banned: bool,
     pub admin: bool,
     pub badges: Vec<String>,
+    /// The badges actually stored on the account, as opposed to the ones the
+    /// server derives (`admin` from the admin list, `early` from the account
+    /// rank). The admin panel needs the difference to know which badges it can
+    /// take away. Only the account itself and admins ever receive this.
+    pub custom_badges: Vec<String>,
     pub created_at: u64,
 }
 
@@ -55,7 +57,32 @@ pub struct AuthenticatedUser {
     pub banned: bool,
     pub admin: bool,
     pub badges: Vec<String>,
+    pub custom_badges: Vec<String>,
     pub created_at: u64,
+}
+
+/// One day of account creations, read back from `users.created_at`.
+///
+/// An aggregate over rows the table already holds: it counts, it does not
+/// record. Nothing new is written, no account is identifiable in the result,
+/// and the buckets are UTC days so the answer does not depend on where the
+/// server happens to run.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignupDay {
+    /// Midnight UTC of the day, in epoch milliseconds.
+    pub day: u64,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserStats {
+    pub total: u64,
+    pub disabled: u64,
+    pub banned: u64,
+    pub new_last_day: u64,
+    pub new_last_week: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -698,6 +725,7 @@ impl AccountDatabase {
             banned: user.banned,
             admin: self.is_admin(&user.id),
             badges,
+            custom_badges: user.custom_badges.clone(),
             created_at: user.created_at,
         }))
     }
@@ -1056,6 +1084,11 @@ impl AccountDatabase {
         Ok(None)
     }
 
+    /// Bulk account removal, filtered in SQL.
+    ///
+    /// The date window and the username pattern are pushed down to the
+    /// database so only candidate rows are loaded; the length check and the
+    /// admin exclusion then run over that much smaller set.
     pub async fn purge_accounts(
         &self,
         created_after_ms: Option<u64>,
@@ -1065,40 +1098,49 @@ impl AccountDatabase {
         username_contains: Option<&str>,
         exclude_admin: bool,
     ) -> ApiResult<usize> {
-        let users = self.list_users().await?;
+        let after = created_after_ms.map(|value| value as i64).unwrap_or(i64::MIN);
+        let before = created_before_ms.map(|value| value as i64).unwrap_or(i64::MAX);
+        let like = username_contains
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("%{}%", escape_like_pattern(&value.to_lowercase())))
+            .unwrap_or_else(|| "%".to_owned());
+
+        let candidates: Vec<(String, String)> = match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query_as(
+                "SELECT id, username FROM users WHERE created_at >= ? AND created_at <= ? AND LOWER(username) LIKE ? ESCAPE '\\'",
+            )
+            .bind(after)
+            .bind(before)
+            .bind(&like)
+            .fetch_all(pool)
+            .await,
+            SqlBackend::Postgres(pool) => sqlx::query_as(
+                "SELECT id, username FROM users WHERE created_at >= $1 AND created_at <= $2 AND LOWER(username) LIKE $3 ESCAPE '\\'",
+            )
+            .bind(after)
+            .bind(before)
+            .bind(&like)
+            .fetch_all(pool)
+            .await,
+        }
+        .map_err(|err| ApiError::internal("Purge candidate query", err))?;
+
         let mut count = 0usize;
-        for user in users {
-            if exclude_admin && user.admin {
+        for (id, username) in candidates {
+            if exclude_admin && self.is_admin(&id) {
                 continue;
             }
-            if let Some(after) = created_after_ms {
-                if user.created_at < after {
-                    continue;
-                }
+            let char_len = username.chars().count();
+            if min_username_len.is_some_and(|min| char_len < min) {
+                continue;
             }
-            if let Some(before) = created_before_ms {
-                if user.created_at > before {
-                    continue;
-                }
+            if max_username_len.is_some_and(|max| char_len > max) {
+                continue;
             }
-            let char_len = user.username.chars().count();
-            if let Some(min_len) = min_username_len {
-                if char_len < min_len {
-                    continue;
-                }
+            if self.delete_user_account(&id).await.is_ok() {
+                count += 1;
             }
-            if let Some(max_len) = max_username_len {
-                if char_len > max_len {
-                    continue;
-                }
-            }
-            if let Some(pat) = username_contains {
-                if !pat.is_empty() && !user.username.to_lowercase().contains(&pat.to_lowercase()) {
-                    continue;
-                }
-            }
-            let _ = self.delete_user_account(&user.id).await;
-            count += 1;
         }
         Ok(count)
     }
@@ -1118,6 +1160,7 @@ impl AccountDatabase {
                 banned: user.banned,
                 admin: user.admin,
                 badges: user.badges,
+                custom_badges: user.custom_badges,
                 created_at: user.created_at,
             },
             token.to_owned(),
@@ -1292,38 +1335,89 @@ impl AccountDatabase {
         Ok(self.public_user(updated))
     }
 
-    pub async fn list_users(&self) -> ApiResult<Vec<PublicUser>> {
-        let rows = match &self.backend {
-            SqlBackend::Sqlite(pool) => {
-                sqlx::query_as::<_, RawStoredUser>(USER_SELECT_BY_CREATED_DESC)
-                    .fetch_all(pool)
-                    .await
-            }
-            SqlBackend::Postgres(pool) => {
-                sqlx::query_as::<_, RawStoredUser>(USER_SELECT_BY_CREATED_DESC)
-                    .fetch_all(pool)
-                    .await
+    /// Accounts created per day over the last `days` days, oldest first.
+    ///
+    /// Every day in the window comes back, quiet ones as zero, so a chart has
+    /// a continuous series instead of gaps it would have to invent a line
+    /// across. Bucketing is integer arithmetic rather than a date function,
+    /// because SQLite and Postgres do not spell those the same way.
+    pub async fn signups_per_day(&self, days: u32) -> ApiResult<Vec<SignupDay>> {
+        const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+        let span = days.clamp(1, 120) as i64;
+        let today = (now_ms() as i64 / DAY_MS) * DAY_MS;
+        let origin = today - (span - 1) * DAY_MS;
+        let rows: Vec<(i64, i64)> = match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query_as(
+                "SELECT (created_at - ?) / 86400000 AS bucket, COUNT(*) FROM users \
+                 WHERE created_at >= ? GROUP BY 1 ORDER BY 1",
+            )
+            .bind(origin)
+            .bind(origin)
+            .fetch_all(pool)
+            .await,
+            SqlBackend::Postgres(pool) => sqlx::query_as(
+                "SELECT (created_at - $1) / 86400000 AS bucket, CAST(COUNT(*) AS BIGINT) FROM users \
+                 WHERE created_at >= $2 GROUP BY 1 ORDER BY 1",
+            )
+            .bind(origin)
+            .bind(origin)
+            .fetch_all(pool)
+            .await,
+        }
+        .map_err(|err| ApiError::internal("Signup histogram query", err))?;
+
+        let mut counts = vec![0u64; span as usize];
+        for (bucket, count) in rows {
+            if bucket >= 0 && (bucket as usize) < counts.len() {
+                counts[bucket as usize] = count.max(0) as u64;
             }
         }
-        .map_err(|err| ApiError::internal("List users query", err))?;
-        rows.into_iter()
-            .map(|row| self.stored_from_raw(row).map(|user| self.public_user(user)))
-            .collect()
+        Ok(counts
+            .into_iter()
+            .enumerate()
+            .map(|(index, count)| SignupDay {
+                day: (origin + index as i64 * DAY_MS) as u64,
+                count,
+            })
+            .collect())
     }
 
-    pub async fn count_users(&self) -> ApiResult<u64> {
-        let count = match &self.backend {
-            SqlBackend::Sqlite(pool) => sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
-                .fetch_one(pool)
-                .await,
-            SqlBackend::Postgres(pool) => {
-                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
-                    .fetch_one(pool)
-                    .await
-            }
+    pub async fn user_stats(&self) -> ApiResult<UserStats> {
+        let now = now_ms() as i64;
+        let day_ago = now - 24 * 60 * 60 * 1000;
+        let week_ago = now - 7 * 24 * 60 * 60 * 1000;
+        let row: (i64, i64, i64, i64, i64) = match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query_as(
+                "SELECT COUNT(*), \
+                 COALESCE(SUM(CASE WHEN disabled != 0 THEN 1 ELSE 0 END), 0), \
+                 COALESCE(SUM(CASE WHEN banned != 0 THEN 1 ELSE 0 END), 0), \
+                 COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0), \
+                 COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0) FROM users",
+            )
+            .bind(day_ago)
+            .bind(week_ago)
+            .fetch_one(pool)
+            .await,
+            SqlBackend::Postgres(pool) => sqlx::query_as(
+                "SELECT COUNT(*), \
+                 CAST(COALESCE(SUM(CASE WHEN disabled != 0 THEN 1 ELSE 0 END), 0) AS BIGINT), \
+                 CAST(COALESCE(SUM(CASE WHEN banned != 0 THEN 1 ELSE 0 END), 0) AS BIGINT), \
+                 CAST(COALESCE(SUM(CASE WHEN created_at >= $1 THEN 1 ELSE 0 END), 0) AS BIGINT), \
+                 CAST(COALESCE(SUM(CASE WHEN created_at >= $2 THEN 1 ELSE 0 END), 0) AS BIGINT) FROM users",
+            )
+            .bind(day_ago)
+            .bind(week_ago)
+            .fetch_one(pool)
+            .await,
         }
-        .map_err(|err| ApiError::internal("Count users query", err))?;
-        Ok(count.max(0) as u64)
+        .map_err(|err| ApiError::internal("User stats query", err))?;
+        Ok(UserStats {
+            total: row.0.max(0) as u64,
+            disabled: row.1.max(0) as u64,
+            banned: row.2.max(0) as u64,
+            new_last_day: row.3.max(0) as u64,
+            new_last_week: row.4.max(0) as u64,
+        })
     }
 
     /// Admin username search: never loads the whole table. Bounded SQL
@@ -1613,28 +1707,40 @@ impl AccountDatabase {
             banned: user.banned,
             admin: is_admin,
             badges,
+            custom_badges: user.custom_badges,
             created_at: user.created_at,
         }
     }
 }
 
+/// Badges no admin can hand out: `admin` comes from the configured admin list,
+/// `staff` and `system` mark the product's own people and its official
+/// account. Any of them worn by a member would pass for staff, so only the
+/// server grants and removes them. Mirrors `RESERVED_BADGE_IDS` in the client.
+///
+/// `early` is deliberately absent: the server grants it to the first accounts,
+/// and an admin may hand it out afterwards.
+const RESERVED_BADGES: &[&str] = &["admin", "staff", "system"];
+
 fn sanitize_custom_badges(badges: &[String]) -> Vec<String> {
-    let mut cleaned = Vec::new();
+    let mut cleaned: Vec<String> = Vec::new();
     for badge in badges {
-        let trimmed = badge.trim().to_lowercase();
-        if trimmed.is_empty() || trimmed == "admin" {
-            continue;
-        }
-        let sanitized: String = trimmed
+        let sanitized: String = badge
+            .trim()
+            .to_lowercase()
             .chars()
             .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
             .take(MAX_USER_BADGE_LEN)
             .collect();
-        if !sanitized.is_empty() && !cleaned.contains(&sanitized) {
-            cleaned.push(sanitized);
-            if cleaned.len() >= MAX_USER_BADGES {
-                break;
-            }
+        if sanitized.is_empty()
+            || RESERVED_BADGES.contains(&sanitized.as_str())
+            || cleaned.contains(&sanitized)
+        {
+            continue;
+        }
+        cleaned.push(sanitized);
+        if cleaned.len() >= MAX_USER_BADGES {
+            break;
         }
     }
     cleaned
