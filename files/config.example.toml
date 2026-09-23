@@ -3,7 +3,6 @@
 domain = ""
 publicDomain = "qxp.example.com"
 port = 4560
-adminPassword = ""
 
 [network]
 

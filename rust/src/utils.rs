@@ -8,8 +8,9 @@ pub use crate::{
     services::user::store_uploaded_bytes,
 };
 
-pub fn send_json(tx: &mpsc::UnboundedSender<Message>, payload: Value) {
-    let _ = tx.send(Message::Text(payload.to_string()));
+pub fn send_json(tx: &mpsc::Sender<Message>, payload: Value) {
+    
+    let _ = tx.try_send(Message::Text(payload.to_string()));
 }
 
 pub fn request_id(value: &Value) -> Option<String> {

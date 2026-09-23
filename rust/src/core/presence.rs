@@ -76,7 +76,7 @@ pub type SharedState = Arc<AppState>;
 
 impl AppState {
     pub async fn evict_user(self: &Arc<Self>, user_id: &str, reason: &str) {
-        let sessions: Vec<(String, mpsc::UnboundedSender<Message>)> = {
+        let sessions: Vec<(String, mpsc::Sender<Message>)> = {
             let players = self.players.read().await;
             players
                 .values()
@@ -91,14 +91,14 @@ impl AppState {
         })
         .to_string();
         for (session_id, tx) in sessions {
-            let _ = tx.send(Message::Text(payload.clone()));
-            let _ = tx.send(Message::Close(None));
+            let _ = tx.try_send(Message::Text(payload.clone()));
+            let _ = tx.try_send(Message::Close(None));
             crate::websocket::disconnect_player(self, &session_id).await;
         }
     }
 
     pub async fn disconnect_user_sessions(self: &Arc<Self>, user_id: &str, reason: &str) {
-        let sessions: Vec<(String, mpsc::UnboundedSender<Message>)> = {
+        let sessions: Vec<(String, mpsc::Sender<Message>)> = {
             let players = self.players.read().await;
             players
                 .values()
@@ -113,8 +113,8 @@ impl AppState {
         })
         .to_string();
         for (session_id, tx) in sessions {
-            let _ = tx.send(Message::Text(payload.clone()));
-            let _ = tx.send(Message::Close(None));
+            let _ = tx.try_send(Message::Text(payload.clone()));
+            let _ = tx.try_send(Message::Close(None));
             crate::websocket::disconnect_player(self, &session_id).await;
         }
     }
@@ -157,7 +157,7 @@ pub struct PlayerSession {
     pub is_admin: bool,
     pub badges: Vec<String>,
     pub username: String,
-    pub tx: mpsc::UnboundedSender<Message>,
+    pub tx: mpsc::Sender<Message>,
     pub rooms: HashSet<String>,
     pub is_voice_chat: bool,
     pub call_room: Option<String>,
@@ -174,6 +174,8 @@ pub struct PlayerSession {
     pub delete_messages_on_leave: bool,
     pub profile: UserProfile,
     pub status: UserPresenceStatus,
+    pub identified_at_ms: u64,
+    pub last_revalidation_ms: u64,
 }
 
 impl PlayerSession {

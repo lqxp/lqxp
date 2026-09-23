@@ -218,6 +218,22 @@ pub async fn store_uploaded_bytes(
     bytes: &[u8],
     mime_type: &str,
 ) -> ApiResult<crate::core::models::StoredFile> {
+    {
+        let mut total: u64 = 0;
+        if let Ok(entries) = std::fs::read_dir(&state.config.network.upload_dir) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    total = total.saturating_add(meta.len());
+                    if total > 10 * 1024 * 1024 * 1024 {
+                        return Err(ApiError::new(
+                            axum::http::StatusCode::INSUFFICIENT_STORAGE,
+                            "Upload storage full.",
+                        ));
+                    }
+                }
+            }
+        }
+    }
     let clean_bytes = strip_image_metadata(bytes, mime_type);
     let file_id = if extension.trim().is_empty() {
         uuid::Uuid::new_v4().simple().to_string()

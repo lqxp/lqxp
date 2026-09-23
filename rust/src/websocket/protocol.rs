@@ -69,13 +69,21 @@ fn is_reserved_system_username(username: &str) -> bool {
 pub async fn process_message(
     state: SharedState,
     session_id: String,
-    tx: mpsc::UnboundedSender<Message>,
+    tx: mpsc::Sender<Message>,
     raw: String,
 ) -> bool {
     let payload = match serde_json::from_str::<SocketPayload>(&raw) {
         Ok(payload) => payload,
         Err(_) => return false,
     };
+
+    if !matches!(payload.op, 0 | 1 | 2 | 6) && !revalidate_session(&state, &session_id).await {
+        send_json(
+            &tx,
+            json!({ "op": 999, "d": { "reason": "Session expired." } }),
+        );
+        return true;
+    }
 
     match payload.op {
         0 => {
@@ -254,6 +262,8 @@ async fn identify_player(state: &SharedState, session_id: &str, d: Value) -> boo
         player.is_secure = d.get("isSecure").and_then(Value::as_bool);
         player.profile = account.profile.clone();
         player.status = requested_status;
+        player.identified_at_ms = crate::core::models::now_ms();
+        player.last_revalidation_ms = player.identified_at_ms;
 
         (
             player.username.clone(),
@@ -1303,7 +1313,7 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
         return respond_error(state, session_id, 19, "Invalid reaction", req_id).await;
     };
 
-    let (username, user_rooms) = {
+    let (username, user_id, user_rooms) = {
         let players = state.players.read().await;
         if let Some(player) = players.get(session_id) {
             if player.username.is_empty() {
@@ -1316,7 +1326,7 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
                 )
                 .await;
             }
-            (player.username.clone(), player.rooms.clone())
+            (player.username.clone(), player.user_id.clone(), player.rooms.clone())
         } else {
             return respond_error(
                 state,
@@ -1330,6 +1340,50 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
     };
 
     let room_hint = d.get("gameId").and_then(Value::as_str);
+    let target_room = {
+        let rooms = state.room_messages.read().await;
+        if let Some(hint) = room_hint.map(str::trim).filter(|v| !v.is_empty()) {
+            if let Some(messages) = rooms.get(hint) {
+                if messages.iter().any(|m| m.message_id == message_id) {
+                    Some(hint.to_owned())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            rooms
+                .iter()
+                .find(|(_, messages)| messages.iter().any(|m| m.message_id == message_id))
+                .map(|(room_id, _)| room_id.clone())
+        }
+    };
+    let Some(target_room) = target_room else {
+        return respond_error(state, session_id, 19, "Unknown messageId", req_id).await;
+    };
+    if !user_rooms.contains(&target_room) {
+        return respond_error(
+            state,
+            session_id,
+            19,
+            "Not a member of this room",
+            req_id,
+        )
+        .await;
+    }
+    if let Some(room) = state.database.room_record(&target_room).await {
+        if room.kind == RoomKind::Community && !can_speak(&room, &user_id) {
+            return respond_error(
+                state,
+                session_id,
+                19,
+                "You are not allowed to speak in this room",
+                req_id,
+            )
+            .await;
+        }
+    }
     let (room_id, reactions) =
         match update_message_reactions(state, message_id, emoji.as_str(), &username, room_hint)
             .await
@@ -1340,17 +1394,6 @@ async fn toggle_message_reaction(state: &SharedState, session_id: &str, d: Value
                     .await
             }
         };
-
-    if !user_rooms.contains(&room_id) {
-        return respond_error(
-            state,
-            session_id,
-            19,
-            "Not a member of this room",
-            req_id,
-        )
-        .await;
-    }
 
     broadcast_to_room(
         state,
@@ -1433,6 +1476,7 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
 
     let timestamp = now_ms();
     let mut deleted_by_moderator = false;
+    let mut deleted_attachment_id: Option<String> = None;
     let result = {
         let mut rooms = state.room_messages.write().await;
 
@@ -1494,7 +1538,9 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
                         .await;
                     }
                     message.text.clear();
-                    message.attachment = None;
+                    if let Some(att) = message.attachment.take() {
+                        deleted_attachment_id = Some(att.id);
+                    }
                     message.encrypted = None;
                     message.preview = None;
                     message.reactions.clear();
@@ -1551,6 +1597,13 @@ async fn delete_message(state: &SharedState, session_id: &str, d: Value) -> bool
         ),
     )
     .await;
+    if let Some(file_id) = deleted_attachment_id {
+        let still_live = crate::services::messaging::upload_is_live(state, &file_id).await;
+        if !still_live {
+            let path = std::path::Path::new(&state.config.network.upload_dir).join(&file_id);
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
     false
 }
 
@@ -2264,10 +2317,12 @@ async fn relay_call_signal(state: &SharedState, session_id: &str, d: Value) -> b
         clean["sdp"] = json!(sdp.chars().take(128_000).collect::<String>());
     }
     if let Some(candidate) = d.get("candidate").filter(|value| value.is_object()) {
-        clean["candidate"] = candidate.clone();
+        if candidate.to_string().len() <= 64 * 1024 {
+            clean["candidate"] = candidate.clone();
+        }
     }
 
-    let _ = target_tx.send(Message::Text(
+    let _ = target_tx.try_send(Message::Text(
         json!({ "op": 111, "d": clean }).to_string(),
     ));
     false
@@ -2343,9 +2398,13 @@ async fn update_call_deafened_state(state: &SharedState, session_id: &str, d: Va
 }
 
 async fn update_mute_state(state: &SharedState, session_id: &str, d: Value) -> bool {
-    let Some(username) = d.get("user").and_then(Value::as_str) else {
+    let Some(raw_username) = d.get("user").and_then(Value::as_str) else {
         return respond_error(state, session_id, 100, "Malformed request", request_id(&d)).await;
     };
+    let username: String = raw_username.trim().chars().take(32).collect();
+    if username.is_empty() {
+        return respond_error(state, session_id, 100, "Malformed request", request_id(&d)).await;
+    }
     let Some(is_muted) = d.get("isMuted").and_then(Value::as_bool) else {
         return respond_error(state, session_id, 100, "Malformed request", request_id(&d)).await;
     };
@@ -2353,15 +2412,17 @@ async fn update_mute_state(state: &SharedState, session_id: &str, d: Value) -> b
     let (did_update, too_many) = {
         let mut players = state.players.write().await;
         if let Some(player) = players.get_mut(session_id) {
-            if is_muted {
-                if player.muted_users.len() >= MAX_MUTED_USERS_PER_PLAYER && !player.muted_users.contains(username) {
+            if player.username.is_empty() {
+                (false, false)
+            } else if is_muted {
+                if player.muted_users.len() >= MAX_MUTED_USERS_PER_PLAYER && !player.muted_users.contains(&username) {
                     (false, true)
                 } else {
-                    player.muted_users.insert(username.to_owned());
+                    player.muted_users.insert(username.clone());
                     (true, false)
                 }
             } else {
-                player.muted_users.remove(username);
+                player.muted_users.remove(&username);
                 (true, false)
             }
         } else {
@@ -2450,6 +2511,10 @@ async fn admin_broadcast(state: &SharedState, session_id: &str, d: Value) -> boo
     let Some(msg) = d.get("msg").and_then(Value::as_str) else {
         return respond_error(state, session_id, 104, "Missing msg", request_id(&d)).await;
     };
+    let msg: String = msg.trim().chars().take(2000).collect();
+    if msg.is_empty() {
+        return respond_error(state, session_id, 104, "Missing msg", request_id(&d)).await;
+    }
     let x = d.get("x").and_then(Value::as_i64).unwrap_or(0);
 
     let recipients = {
@@ -2464,12 +2529,12 @@ async fn admin_broadcast(state: &SharedState, session_id: &str, d: Value) -> boo
     let payload = json!({
         "op": 87,
         "d": {
-            "msg": msg
+            "msg": msg.clone()
         }
     });
     let encoded = payload.to_string();
     for recipient in recipients {
-        let _ = recipient.send(Message::Text(encoded.clone()));
+        let _ = recipient.try_send(Message::Text(encoded.clone()));
     }
 
     respond_to_sender(
@@ -2796,6 +2861,43 @@ async fn session_identity(state: &SharedState, session_id: &str) -> Option<(Stri
     Some((player.user_id.clone(), player.username.clone()))
 }
 
+async fn revalidate_session(state: &SharedState, session_id: &str) -> bool {
+    let now = crate::core::models::now_ms();
+    let (user_id, identified_at, last_reval) = {
+        let players = state.players.read().await;
+        let Some(p) = players.get(session_id) else {
+            return true;
+        };
+        if p.user_id.is_empty() {
+            return true;
+        }
+        (p.user_id.clone(), p.identified_at_ms, p.last_revalidation_ms)
+    };
+    if identified_at != 0 && now.saturating_sub(identified_at) > 30 * 24 * 60 * 60 * 1000 {
+        return false;
+    }
+    if now.saturating_sub(last_reval) < 5 * 60 * 1000 {
+        return true;
+    }
+    let reval = match state.accounts.session_revalidation(&user_id).await {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    let Some((_, _, is_admin, badges, username)) = reval else {
+        return false;
+    };
+    {
+        let mut players = state.players.write().await;
+        if let Some(p) = players.get_mut(session_id) {
+            p.is_admin = is_admin;
+            p.badges = badges;
+            p.username = username;
+            p.last_revalidation_ms = now;
+        }
+    }
+    true
+}
+
 async fn username_for_user_id(state: &SharedState, user_id: &str) -> Option<String> {
     let players = state.players.read().await;
     players
@@ -2853,7 +2955,7 @@ async fn remove_user_from_room(state: &SharedState, room_id: &str, user_id: &str
     })
     .to_string();
     for (_, tx) in sessions {
-        let _ = tx.send(Message::Text(payload.clone()));
+        let _ = tx.try_send(Message::Text(payload.clone()));
     }
 }
 
@@ -3022,9 +3124,32 @@ async fn create_room(state: &SharedState, session_id: &str, d: Value) -> bool {
         calls_enabled: true,
     };
 
-    if let Err(err) = state.database.set_room_record(&room_id, &room).await {
-        error!("Failed to persist community room {}: {}", room_id, err);
-        return respond_error(state, session_id, 40, "Failed to persist room", req_id).await;
+    if state.database.room_record(room_id).await.is_some() {
+        return respond_error(
+            state,
+            session_id,
+            40,
+            "This room name is already taken",
+            req_id,
+        )
+        .await;
+    }
+    match state.database.create_room_if_absent(room_id, &room).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return respond_error(
+                state,
+                session_id,
+                40,
+                "This room name is already taken",
+                req_id,
+            )
+            .await;
+        }
+        Err(err) => {
+            error!("Failed to persist community room {}: {}", room_id, err);
+            return respond_error(state, session_id, 40, "Failed to persist room", req_id).await;
+        }
     }
 
     if let Ok(Some(icon)) = store_room_icon_from_payload(state, &d, &room_id).await {
@@ -3938,8 +4063,10 @@ fn string_array_field(d: &Value, key: &str) -> Vec<String> {
         .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
+                .take(64)
                 .filter_map(Value::as_str)
-                .map(|s| s.trim().to_owned())
+                .map(|s| s.trim().chars().take(128).collect::<String>())
+                .filter(|s| !s.is_empty())
                 .collect()
         })
         .unwrap_or_default()
@@ -4180,7 +4307,7 @@ async fn relay_room_signal(state: &SharedState, session_id: &str, d: Value) -> b
     };
     let payload = json!({ "op": 56, "d": { "roomId": room_id, "from": from, "encrypted": encrypted } }).to_string();
     for tx in recipients {
-        let _ = tx.send(Message::Text(payload.clone()));
+        let _ = tx.try_send(Message::Text(payload.clone()));
     }
     false
 }
@@ -4287,7 +4414,7 @@ async fn vote_poll(state: &SharedState, session_id: &str, d: Value) -> bool {
             "op": 54,
             "d": { "roomId": room_id, "messageId": message_id, "pollState": poll_state_for(&message_id, &tally, &recipient) }
         });
-        let _ = tx.send(Message::Text(payload.to_string()));
+        let _ = tx.try_send(Message::Text(payload.to_string()));
     }
 
     respond_to_sender(
@@ -4654,7 +4781,7 @@ pub async fn broadcast_to_room(state: &SharedState, game_id: &str, payload: Valu
 
     let encoded = payload.to_string();
     for recipient in recipients {
-        let _ = recipient.send(Message::Text(encoded.clone()));
+        let _ = recipient.try_send(Message::Text(encoded.clone()));
     }
 }
 

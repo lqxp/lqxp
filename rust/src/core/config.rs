@@ -5,6 +5,7 @@ use tracing::{error, warn};
 
 #[derive(Debug, Clone, Deserialize)]
 #[derive(Default)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub api: ApiConfig,
@@ -20,6 +21,7 @@ pub struct Config {
 
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApiConfig {
     #[serde(default)]
     pub domain: String,
@@ -27,6 +29,8 @@ pub struct ApiConfig {
     pub public_domain: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    #[serde(default, rename = "adminPassword")]
+    pub admin_password_deprecated: String,
 }
 
 impl Default for ApiConfig {
@@ -35,11 +39,13 @@ impl Default for ApiConfig {
             domain: String::new(),
             public_domain: String::new(),
             port: default_port(),
+            admin_password_deprecated: String::new(),
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
     #[serde(default = "default_heartbeat_interval", rename = "heartbeatInterval")]
     pub heartbeat_interval: u64,
@@ -69,6 +75,7 @@ impl Default for NetworkConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnServer {
     #[serde(default)]
     pub id: String,
@@ -85,6 +92,7 @@ pub struct TurnServer {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RtcConfig {
     #[serde(default = "default_relay_only", rename = "relayOnly")]
     pub relay_only: bool,
@@ -154,6 +162,7 @@ impl Default for RtcConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DatabaseConfig {
     #[serde(default = "default_database_kind")]
     pub kind: String,
@@ -171,6 +180,7 @@ impl Default for DatabaseConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SecurityConfig {
     #[serde(default, rename = "adminIds")]
     pub admin_ids: Vec<String>,
@@ -267,6 +277,12 @@ pub async fn load_config() -> Config {
     match fs::read_to_string(&config_path).await {
         Ok(raw) => match toml::from_str::<Config>(&raw) {
             Ok(mut config) => {
+                if !config.api.admin_password_deprecated.trim().is_empty() {
+                    warn!(
+                        "Config {} sets [api].adminPassword, which is ignored (use [security].adminIds). Remove it.",
+                        config_path.display()
+                    );
+                }
                 config.network.public_dir = resolve_project_path(&config.network.public_dir)
                     .to_string_lossy()
                     .into_owned();

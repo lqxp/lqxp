@@ -294,9 +294,20 @@ pub async fn fetch_preview(raw_url: &str) -> Option<LinkPreview> {
             if attempt.previous().len() >= 3 {
                 return attempt.stop();
             }
-            match validate_and_pin_url(attempt.url().as_str()) {
-                Some(_) => attempt.follow(),
-                None => attempt.stop(),
+            let prev_host = attempt
+                .previous()
+                .last()
+                .and_then(|u| u.host_str().map(str::to_owned));
+            let next_host = attempt
+                .url()
+                .host_str()
+                .map(str::to_owned);
+            match (prev_host, next_host) {
+                (Some(a), Some(b)) if a.eq_ignore_ascii_case(&b) => match validate_and_pin_url(attempt.url().as_str()) {
+                    Some(_) => attempt.follow(),
+                    None => attempt.stop(),
+                },
+                _ => attempt.stop(),
             }
         }))
         .user_agent(NEUTRAL_USER_AGENT)

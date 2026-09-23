@@ -22,7 +22,8 @@ const MAX_ENV_PER_SLOT: usize = 16;
 const MAX_TOTAL_ENVELOPES: usize = 100_000;
 const MAX_SLOTS_PER_POLL: usize = 64;
 const MAX_WANT: usize = 8;
-const MAX_CT_LEN: usize = 96 * 1024;
+const MAX_CT_LEN: usize = 8 * 1024;
+const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_GATE_TOKEN_LEN: usize = 4096;
 const VALID_BUCKETS: &[u32] = &[4096, 16384, 65536];
 
@@ -98,6 +99,22 @@ impl DeadDropStore {
 
     pub fn live_count(&self) -> usize {
         self.slots.values().map(VecDeque::len).sum()
+    }
+
+    pub fn live_bytes(&self) -> usize {
+        self.slots
+            .values()
+            .flat_map(|queue| queue.iter())
+            .map(|entry| entry.envelope.ct.len())
+            .sum()
+    }
+
+    pub fn try_deposit(&mut self, envelope: PhantomEnvelope, now: u64) -> bool {
+        if self.live_bytes().saturating_add(envelope.ct.len()) > MAX_TOTAL_BYTES {
+            return false;
+        }
+        self.deposit(envelope, now);
+        true
     }
 
     pub fn sweep_expired(&mut self, now: u64) -> usize {
@@ -231,7 +248,15 @@ pub async fn deposit(state: &SharedState, req: PhantomDepositRequest) -> ApiResu
         }
     }
 
-    get_store().lock().await.deposit(req.envelope, now_ms());
+    if !get_store()
+        .lock()
+        .await
+        .try_deposit(req.envelope, now_ms())
+    {
+        return Err(ApiError::too_many_requests(
+            "Dead-drop memory budget reached.",
+        ));
+    }
     Ok(())
 }
 

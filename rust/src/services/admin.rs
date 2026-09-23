@@ -343,7 +343,7 @@ async fn broadcast_badge_update(state: &SharedState, user: &PublicUser) {
     }
 
     for tx in txs {
-        let _ = tx.send(axum::extract::ws::Message::Text(
+        let _ = tx.try_send(axum::extract::ws::Message::Text(
             json!({
                 "op": 34,
                 "d": {
@@ -369,7 +369,7 @@ async fn broadcast_badge_update(state: &SharedState, user: &PublicUser) {
                 .collect::<Vec<_>>()
         };
         for tx in room_txs {
-            let _ = tx.send(axum::extract::ws::Message::Text(
+            let _ = tx.try_send(axum::extract::ws::Message::Text(
                 json!({
                     "op": 34,
                     "d": {

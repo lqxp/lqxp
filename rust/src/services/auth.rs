@@ -58,6 +58,9 @@ pub async fn recover(
         .accounts
         .recover(username, recovery_words, new_password)
         .await?;
+    state
+        .disconnect_user_sessions(&user.id, "Password reset.")
+        .await;
     Ok(user_response(user, token))
 }
 
@@ -70,7 +73,14 @@ pub async fn me(state: &SharedState, token: &str) -> ApiResult<serde_json::Value
 }
 
 pub async fn logout(state: &SharedState, token: &str) -> ApiResult<()> {
-    state.accounts.logout(token).await
+    let user = state.accounts.authenticate_token(token).await?;
+    state.accounts.logout(token).await?;
+    if let Some(user) = user {
+        state
+            .disconnect_user_sessions(&user.id, "Session revoked.")
+            .await;
+    }
+    Ok(())
 }
 
 pub async fn delete_account(state: &SharedState, token: &str, password: &str) -> ApiResult<()> {
@@ -204,7 +214,7 @@ pub async fn change_username(
         };
 
         for tx in room_txs {
-            let _ = tx.send(axum::extract::ws::Message::Text(payload.to_string()));
+            let _ = tx.try_send(axum::extract::ws::Message::Text(payload.to_string()));
         }
     }
 

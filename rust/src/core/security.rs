@@ -177,20 +177,20 @@ pub fn validate_registration_username(username: &str) -> ApiResult<String> {
 }
 
 fn validate_username_with_max(username: &str, max: usize) -> ApiResult<String> {
-    let trimmed = username.trim();
-    let char_count = trimmed.chars().count();
+    let normalized = normalize_username(username);
+    let char_count = normalized.chars().count();
     if !(USERNAME_MIN..=max).contains(&char_count) {
         return Err(ApiError::bad_request(format!(
             "Username must be between {USERNAME_MIN} and {max} characters."
         )));
     }
 
-    if hits_reserved_username(trimmed) {
+    if hits_reserved_username(&normalized) {
         return Err(ApiError::bad_request("Username is reserved."));
     }
 
-    let valid = trimmed.chars().all(|ch| {
-        ch.is_alphanumeric()
+    let valid = normalized.chars().all(|ch| {
+        ch.is_ascii_alphanumeric()
             || matches!(
                 ch,
                 '_' | '.' | '-' | ' ' | '#' | '@' | '\'' | '\"' | '(' | ')' | '[' | ']' | '!' | '?'
@@ -202,7 +202,7 @@ fn validate_username_with_max(username: &str, max: usize) -> ApiResult<String> {
         ));
     }
 
-    Ok(trimmed.to_owned())
+    Ok(normalized)
 }
 
 pub fn validate_password(password: &str) -> ApiResult<()> {

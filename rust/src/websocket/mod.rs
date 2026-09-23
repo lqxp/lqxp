@@ -17,14 +17,19 @@ use crate::{
     utils::{random_session_id, send_json},
 };
 
+pub const MAX_CONCURRENT_SESSIONS: usize = 5_000;
+pub const PER_SESSION_QUEUE: usize = 512;
+
 pub async fn handle_socket(state: SharedState, socket: WebSocket) {
     let session_id = random_session_id();
     let (ws_sender, mut ws_receiver) = socket.split();
-    let (tx, rx) = mpsc::unbounded_channel::<Message>();
+    let (tx, rx) = mpsc::channel::<Message>(PER_SESSION_QUEUE);
 
     let writer = spawn_writer_task(ws_sender, rx);
 
-    register_connection(&state, &session_id, tx.clone()).await;
+    if !register_connection(&state, &session_id, tx.clone()).await {
+        return;
+    }
 
     send_json(
         &tx,
@@ -70,7 +75,7 @@ pub async fn handle_socket(state: SharedState, socket: WebSocket) {
                 )
                 .await;
                 if should_close {
-                    let _ = tx.send(Message::Close(None));
+                    let _ = tx.try_send(Message::Close(None));
                     break;
                 }
             }
@@ -88,7 +93,7 @@ pub async fn handle_socket(state: SharedState, socket: WebSocket) {
                 )
                 .await;
                 if should_close {
-                    let _ = tx.send(Message::Close(None));
+                    let _ = tx.try_send(Message::Close(None));
                     break;
                 }
             }
@@ -107,7 +112,7 @@ pub async fn handle_socket(state: SharedState, socket: WebSocket) {
 
 fn spawn_writer_task(
     mut ws_sender: futures_util::stream::SplitSink<WebSocket, Message>,
-    mut rx: mpsc::UnboundedReceiver<Message>,
+    mut rx: mpsc::Receiver<Message>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
@@ -121,9 +126,16 @@ fn spawn_writer_task(
 async fn register_connection(
     state: &SharedState,
     session_id: &str,
-    tx: mpsc::UnboundedSender<Message>,
-) {
+    tx: mpsc::Sender<Message>,
+) -> bool {
     let mut players = state.players.write().await;
+    if players.len() >= MAX_CONCURRENT_SESSIONS {
+        warn!(
+            "Connection refused: global session cap reached ({})",
+            MAX_CONCURRENT_SESSIONS
+        );
+        return false;
+    }
     players.insert(
         session_id.to_owned(),
         PlayerSession {
@@ -149,9 +161,12 @@ async fn register_connection(
             delete_messages_on_leave: false,
             profile: UserProfile::default(),
             status: UserPresenceStatus::Online,
+            identified_at_ms: 0,
+            last_revalidation_ms: 0,
         },
     );
     state.runtime.record_session_opened(players.len());
+    true
 }
 
 pub async fn disconnect_player(state: &SharedState, session_id: &str) {

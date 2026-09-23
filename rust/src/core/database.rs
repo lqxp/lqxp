@@ -23,6 +23,7 @@ use crate::core::{
 };
 
 const SESSION_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+const SESSION_ABSOLUTE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 const MAX_USER_BADGES: usize = 16;
 const MAX_USER_BADGE_LEN: usize = 32;
 const MAX_BLOCKS_PER_ACCOUNT: usize = 512;
@@ -289,7 +290,160 @@ impl AccountDatabase {
             "social_blob_ver BIGINT NOT NULL DEFAULT 0",
         )
         .await?;
+    
+        self.normalize_legacy_usernames().await;
+        match &self.backend {
+            SqlBackend::Sqlite(_) => {
+                let _ = self
+                    .execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS users_username_nocase ON users (username COLLATE NOCASE)",
+                    )
+                    .await;
+            }
+            SqlBackend::Postgres(_) => {
+                let _ = self
+                    .execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower ON users (LOWER(username))",
+                    )
+                    .await;
+            }
+        }
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS username_reservations (username TEXT PRIMARY KEY, expires_at BIGINT NOT NULL)",
+        )
+        .await?;
         Ok(())
+    }
+
+    async fn is_username_reserved(&self, username: &str) -> bool {
+        let normalized = normalize_username(username);
+        let now = now_ms() as i64;
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                let _ = sqlx::query("DELETE FROM username_reservations WHERE expires_at <= ?")
+                    .bind(now)
+                    .execute(pool)
+                    .await;
+                sqlx::query("SELECT 1 FROM username_reservations WHERE username = ? COLLATE NOCASE")
+                    .bind(&normalized)
+                    .fetch_optional(pool)
+                    .await
+                    .map(|row| row.is_some())
+                    .unwrap_or(false)
+            }
+            SqlBackend::Postgres(pool) => {
+                let _ = sqlx::query("DELETE FROM username_reservations WHERE expires_at <= $1")
+                    .bind(now)
+                    .execute(pool)
+                    .await;
+                sqlx::query("SELECT 1 FROM username_reservations WHERE LOWER(username) = LOWER($1)")
+                    .bind(&normalized)
+                    .fetch_optional(pool)
+                    .await
+                    .map(|row| row.is_some())
+                    .unwrap_or(false)
+            }
+        }
+    }
+
+    async fn reserve_username(&self, username: &str, ttl_ms: u64) {
+        let normalized = normalize_username(username);
+        if normalized.is_empty() {
+            return;
+        }
+        let expires_at = (now_ms() + ttl_ms) as i64;
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                let _ = sqlx::query(
+                    "INSERT INTO username_reservations (username, expires_at) VALUES (?, ?) ON CONFLICT(username) DO UPDATE SET expires_at = excluded.expires_at",
+                )
+                .bind(&normalized)
+                .bind(expires_at)
+                .execute(pool)
+                .await;
+            }
+            SqlBackend::Postgres(pool) => {
+                let _ = sqlx::query(
+                    "INSERT INTO username_reservations (username, expires_at) VALUES ($1, $2) ON CONFLICT(username) DO UPDATE SET expires_at = excluded.expires_at",
+                )
+                .bind(&normalized)
+                .bind(expires_at)
+                .execute(pool)
+                .await;
+            }
+        }
+    }
+    async fn normalize_legacy_usernames(&self) {
+        let rows: Vec<(String, String, i64)> = match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query_as::<_, (String, String, i64)>(
+                "SELECT id, username, created_at FROM users",
+            )
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default(),
+            SqlBackend::Postgres(pool) => sqlx::query_as::<_, (String, String, i64)>(
+                "SELECT id, username, created_at FROM users",
+            )
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default(),
+        };
+        let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut ordered = rows;
+        ordered.sort_by_key(|(_, _, created_at)| *created_at);
+        for (id, username, _) in ordered {
+            let normalized = normalize_username(&username);
+            if normalized == username {
+                seen.entry(normalized).or_insert(id);
+                continue;
+            }
+            if let Some(_keeper) = seen.get(&normalized) {
+                let mut suffix = 1u32;
+                let candidate = loop {
+                    let c = format!("{normalized}~{suffix}");
+                    if !seen.contains_key(&c) {
+                        break c;
+                    }
+                    suffix += 1;
+                    if suffix > 9999 {
+                        break format!("{normalized}~{id}");
+                    }
+                };
+                let _ = self.rename_username_raw(&id, &candidate).await;
+                seen.insert(candidate, id);
+            } else {
+                if self.rename_username_raw(&id, &normalized).await.is_ok() {
+                    seen.insert(normalized, id);
+                } else {
+                    seen.entry(username).or_insert(id);
+                }
+            }
+        }
+    }
+
+    async fn rename_username_raw(&self, user_id: &str, new_username: &str) -> ApiResult<()> {
+        let now = now_ms() as i64;
+        match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query(
+                "UPDATE users SET username = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(new_username)
+            .bind(now)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .map(|_| ()),
+            SqlBackend::Postgres(pool) => sqlx::query(
+                "UPDATE users SET username = $1, updated_at = $2 WHERE id = $3",
+            )
+            .bind(new_username)
+            .bind(now)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .map(|_| ()),
+        }
+        .map_err(|err| ApiError::internal("Username normalization", err))
     }
 
     async fn execute(&self, sql: &str) -> ApiResult<()> {
@@ -494,7 +648,7 @@ impl AccountDatabase {
     ) -> ApiResult<(PublicUser, String, Vec<String>)> {
         let username = validate_registration_username(username)?;
         validate_password(password)?;
-        if self.user_by_username(&username).await?.is_some() {
+        if self.user_by_username(&username).await?.is_some() || self.is_username_reserved(&username).await {
             let _ = verify_secret_constant_time(password, None);
             return Err(ApiError::bad_request("Registration request could not be processed."));
         }
@@ -682,33 +836,46 @@ impl AccountDatabase {
     ) -> ApiResult<Option<AuthenticatedUser>> {
         let hash = token_hash(token);
         let now = now_ms() as i64;
-        let user_id = match &self.backend {
+        let session: Option<(String, i64)> = match &self.backend {
             SqlBackend::Sqlite(pool) => {
                 let row = sqlx::query(
-                    "SELECT user_id FROM sessions WHERE token_hash = ? AND expires_at > ?",
+                    "SELECT user_id, created_at FROM sessions WHERE token_hash = ? AND expires_at > ?",
                 )
                 .bind(&hash)
                 .bind(now)
                 .fetch_optional(pool)
                 .await
                 .map_err(|err| ApiError::internal("Session authentication", err))?;
-                row.map(|row| row.get::<String, _>("user_id"))
+                row.map(|row| {
+                    (
+                        row.get::<String, _>("user_id"),
+                        row.get::<i64, _>("created_at"),
+                    )
+                })
             }
             SqlBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT user_id FROM sessions WHERE token_hash = $1 AND expires_at > $2",
+                    "SELECT user_id, created_at FROM sessions WHERE token_hash = $1 AND expires_at > $2",
                 )
                 .bind(&hash)
                 .bind(now)
                 .fetch_optional(pool)
                 .await
                 .map_err(|err| ApiError::internal("Session authentication", err))?;
-                row.map(|row| row.get::<String, _>("user_id"))
+                row.map(|row| {
+                    (
+                        row.get::<String, _>("user_id"),
+                        row.get::<i64, _>("created_at"),
+                    )
+                })
             }
         };
-        let Some(user_id) = user_id else {
+        let Some((user_id, created_at)) = session else {
             return Ok(None);
         };
+        if (now as u64).saturating_sub(created_at as u64) > SESSION_ABSOLUTE_TTL_MS {
+            return Ok(None);
+        }
         let Some(user) = self.user_by_id(&user_id).await? else {
             return Ok(None);
         };
@@ -732,7 +899,27 @@ impl AccountDatabase {
 
     pub async fn touch_session(&self, token: &str) -> ApiResult<()> {
         let hash = token_hash(token);
-        let expires_at = (now_ms() + SESSION_TTL_MS) as i64;
+        let now = now_ms();
+        let created_at: Option<i64> = match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query("SELECT created_at FROM sessions WHERE token_hash = ?")
+                .bind(&hash)
+                .fetch_optional(pool)
+                .await
+                .map_err(|err| ApiError::internal("Session update", err))?
+                .map(|row| row.get::<i64, _>("created_at")),
+            SqlBackend::Postgres(pool) => sqlx::query("SELECT created_at FROM sessions WHERE token_hash = $1")
+                .bind(&hash)
+                .fetch_optional(pool)
+                .await
+                .map_err(|err| ApiError::internal("Session update", err))?
+                .map(|row| row.get::<i64, _>("created_at")),
+        };
+        let Some(created_at) = created_at else {
+            return Ok(());
+        };
+        let absolute_cap = (created_at as u64).saturating_add(SESSION_ABSOLUTE_TTL_MS) as i64;
+        let sliding = (now + SESSION_TTL_MS) as i64;
+        let expires_at = sliding.min(absolute_cap);
         match &self.backend {
             SqlBackend::Sqlite(pool) => sqlx::query("UPDATE sessions SET expires_at = ? WHERE token_hash = ?")
                 .bind(expires_at)
@@ -1286,7 +1473,7 @@ impl AccountDatabase {
             .await?
             .ok_or_else(|| ApiError::bad_request("Account not found."))?;
 
-        if user.username == username {
+        if normalize_username(&user.username) == username {
             return Ok(self.public_user(user));
         }
 
@@ -1305,7 +1492,12 @@ impl AccountDatabase {
                 return Err(ApiError::bad_request("Username is not available."));
             }
         }
+        if self.is_username_reserved(&username).await {
+            let _ = verify_secret_constant_time("dummy_check_prevent_timing", None);
+            return Err(ApiError::bad_request("Username is not available."));
+        }
 
+        let old_username = user.username.clone();
         user.username_changes.push(now);
         let changes_json = serde_json::to_string(&user.username_changes)
             .map_err(|err| ApiError::internal("Username changes encoding", err))?;
@@ -1328,6 +1520,7 @@ impl AccountDatabase {
                 .map(|_| ()),
         }
         .map_err(|err| ApiError::internal("Username update", err))?;
+        self.reserve_username(&old_username, 90 * 24 * 60 * 60 * 1000).await;
         let updated = self
             .user_by_id(user_id)
             .await?
@@ -1574,6 +1767,21 @@ impl AccountDatabase {
         Ok(self.public_user(updated))
     }
 
+    pub async fn session_revalidation(
+        &self,
+        user_id: &str,
+    ) -> ApiResult<Option<(bool, bool, bool, Vec<String>, String)>> {
+        let Some(user) = self.user_by_id(user_id).await? else {
+            return Ok(None);
+        };
+        if user.disabled || user.banned {
+            return Ok(None);
+        }
+        let is_admin = self.is_admin(&user.id);
+        let badges = self.user_badges(&user);
+        Ok(Some((user.disabled, user.banned, is_admin, badges, user.username)))
+    }
+
     async fn user_by_id(&self, user_id: &str) -> ApiResult<Option<StoredUser>> {
         let raw = match &self.backend {
             SqlBackend::Sqlite(pool) => {
@@ -1603,7 +1811,7 @@ impl AccountDatabase {
         let raw = match &self.backend {
             SqlBackend::Sqlite(pool) => {
                 sqlx::query_as::<_, RawStoredUser>(
-                    "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) WHERE username = ?",
+                    "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) WHERE username = ? COLLATE NOCASE",
                 )
                 .bind(&normalized)
                 .fetch_optional(pool)
@@ -1611,7 +1819,7 @@ impl AccountDatabase {
             }
             SqlBackend::Postgres(pool) => {
                 sqlx::query_as::<_, RawStoredUser>(
-                    "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) ranked_users WHERE username = $1",
+                    "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) ranked_users WHERE LOWER(username) = LOWER($1)",
                 )
                 .bind(&normalized)
                 .fetch_optional(pool)
@@ -1993,6 +2201,86 @@ impl RoomDatabase {
             mod_permissions,
             calls_enabled,
         })
+    }
+
+    pub async fn create_room_if_absent(&self, room_id: &str, room: &RoomRecord) -> ApiResult<bool> {
+        let icon_json: Option<String> = room
+            .icon
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|err| ApiError::internal("Icon json serialize", err))?;
+        let members_json = serde_json::to_string(&room.members)
+            .map_err(|err| ApiError::internal("Members json serialize", err))?;
+        let roles_json = serde_json::to_string(&room.roles)
+            .map_err(|err| ApiError::internal("Roles json serialize", err))?;
+        let bans_json = serde_json::to_string(&room.banned)
+            .map_err(|err| ApiError::internal("Bans json serialize", err))?;
+        let timeouts_json = serde_json::to_string(&room.timeouts)
+            .map_err(|err| ApiError::internal("Timeouts json serialize", err))?;
+        let mod_permissions_json = serde_json::to_string(&room.mod_permissions)
+            .map_err(|err| ApiError::internal("Moderator permissions json serialize", err))?;
+        let kind = match room.kind {
+            RoomKind::Classic => "classic",
+            RoomKind::Community => "community",
+        };
+        let updated_at = now_ms() as i64;
+        let chat_locked = if room.chat_locked { 1i64 } else { 0i64 };
+        let calls_enabled = if room.calls_enabled { 1i64 } else { 0i64 };
+
+        let created = match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                let result = sqlx::query(
+                    "INSERT INTO rooms (room_id, title, icon_json, members_json, updated_at, kind, description, owner_id, roles_json, bans_json, timeouts_json, chat_locked, mod_permissions_json, calls_enabled) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                     ON CONFLICT(room_id) DO NOTHING",
+                )
+                .bind(room_id)
+                .bind(&room.title)
+                .bind(icon_json)
+                .bind(members_json)
+                .bind(updated_at)
+                .bind(kind)
+                .bind(&room.description)
+                .bind(room.owner_id.as_deref())
+                .bind(roles_json)
+                .bind(bans_json)
+                .bind(timeouts_json)
+                .bind(chat_locked)
+                .bind(mod_permissions_json)
+                .bind(calls_enabled)
+                .execute(pool)
+                .await
+                .map_err(|err| ApiError::internal("Create room", err))?;
+                result.rows_affected() == 1
+            }
+            SqlBackend::Postgres(pool) => {
+                let result = sqlx::query(
+                    "INSERT INTO rooms (room_id, title, icon_json, members_json, updated_at, kind, description, owner_id, roles_json, bans_json, timeouts_json, chat_locked, mod_permissions_json, calls_enabled) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) \
+                     ON CONFLICT(room_id) DO NOTHING",
+                )
+                .bind(room_id)
+                .bind(&room.title)
+                .bind(icon_json)
+                .bind(members_json)
+                .bind(updated_at)
+                .bind(kind)
+                .bind(&room.description)
+                .bind(room.owner_id.as_deref())
+                .bind(roles_json)
+                .bind(bans_json)
+                .bind(timeouts_json)
+                .bind(chat_locked)
+                .bind(mod_permissions_json)
+                .bind(calls_enabled)
+                .execute(pool)
+                .await
+                .map_err(|err| ApiError::internal("Create room", err))?;
+                result.rows_affected() == 1
+            }
+        };
+        Ok(created)
     }
 
     pub async fn set_room_record(&self, room_id: &str, room: &RoomRecord) -> ApiResult<()> {

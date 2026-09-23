@@ -31,7 +31,7 @@ Options:
   --bind-host <host>          TCP bind host for qxp (default: 0.0.0.0)
   --public-domain <domain>    Public qxp domain used for runtime metadata
   --app-port <port>           qxp port (default: 4560)
-  --admin-password <value>    Optional qxp admin password
+  --admin-password <value>    Deprecated: ignored (admins come from [security].adminIds)
   --turn-domain <domain>      TURN realm / DNS name (required)
   --turn-username <value>     TURN long-term auth username (default: qxp-turn)
   --turn-credential <value>   TURN long-term auth password (generated if omitted)
@@ -116,11 +116,9 @@ cat > "$CONFIG_OUT" <<EOF
 domain = "$BIND_HOST"
 publicDomain = "$PUBLIC_DOMAIN"
 port = $APP_PORT
-adminPassword = "$ADMIN_PASSWORD"
 
 [network]
 heartbeatInterval = 3000
-maxConnectionsPerIp = 3
 latestVersion = ""
 publicDir = "web/dist"
 webchatIndex = "index.html"

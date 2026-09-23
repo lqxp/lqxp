@@ -68,6 +68,7 @@ pub fn build_router(state: SharedState) -> Router {
             post(admin_user_badges_handler),
         )
         .route("/api/admin/users/purge", post(admin_users_purge_handler))
+        .route("/api/rtc/credentials", get(rtc_credentials_handler))
         .route("/api/release", get(latest_release_handler))
         .route("/api/pass/redeem", post(pass_redeem_handler))
         .route("/api/phantom/deposit", post(phantom_deposit_handler))
@@ -224,6 +225,11 @@ struct AuthRecoverRequest {
     new_password: String,
     #[serde(alias = "cap_token")]
     cap_token: Option<String>,
+    vdf_challenge: Option<crate::core::vdf::VdfChallenge>,
+    vdf_proof: Option<crate::core::vdf::VdfProof>,
+    quota_token: Option<crate::core::rln::EpochQuotaToken>,
+    nullifier: Option<String>,
+    pqc_ciphertext: Option<crate::core::pqc::PqcCiphertext>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -451,6 +457,13 @@ async fn auth_recover_handler(
     State(state): State<SharedState>,
     Json(body): Json<AuthRecoverRequest>,
 ) -> ApiResult<impl IntoResponse> {
+    if crate::core::security::rate_limit_hit(&state, "recover:global".to_string(), 20, 10_000)
+        .await
+    {
+        return Err(ApiError::too_many_requests(
+            "Too many recovery attempts. Please wait a few seconds.",
+        ));
+    }
     let clean_user = crate::core::security::normalize_username(&body.username);
     let rate_key = format!("recover:user:{}", clean_user);
     if crate::core::security::rate_limit_hit(&state, rate_key, 3, 30_000).await {
@@ -461,6 +474,26 @@ async fn auth_recover_handler(
 
     if let Some(token) = &body.cap_token {
         crate::core::cap::verify_and_consume_cap_token(token, "recover").await?;
+    } else {
+        let quota_token = body.quota_token.as_ref().ok_or_else(|| {
+            ApiError::bad_request("Missing CAPTCHA or quota token. Please solve the security verification.")
+        })?;
+        let nullifier = body.nullifier.as_deref().ok_or_else(|| {
+            ApiError::bad_request("Missing rate-limiting nullifier.")
+        })?;
+        crate::core::rln::verify_and_consume_nullifier(quota_token, nullifier, "recover").await?;
+        let (vdf_c, vdf_p) = match (&body.vdf_challenge, &body.vdf_proof) {
+            (Some(c), Some(p)) => (c, p),
+            _ => {
+                return Err(ApiError::bad_request(
+                    "Missing Verifiable Delay Function (VDF) proof. Please solve the security verification.",
+                ))
+            }
+        };
+        crate::core::vdf::verify_and_consume_vdf(vdf_c, vdf_p, Some(&body.username)).await?;
+        if let Some(ct) = &body.pqc_ciphertext {
+            let _pqc_shared_secret = crate::core::pqc::verify_and_decapsulate_pqc(ct).await?;
+        }
     }
 
     auth::recover(
@@ -721,7 +754,10 @@ struct CachedRelease {
 static RELEASE_CACHE: tokio::sync::Mutex<Option<CachedRelease>> = tokio::sync::Mutex::const_new(None);
 static RELEASE_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
 
-async fn latest_release_handler() -> Response {
+async fn latest_release_handler(State(state): State<SharedState>) -> Response {
+    if crate::core::security::rate_limit_hit(&state, "release:global".to_string(), 30, 60_000).await {
+        return ApiError::new(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded.").into_response();
+    }
     let now = std::time::Instant::now();
     {
         let cache = RELEASE_CACHE.lock().await;
@@ -760,10 +796,15 @@ async fn latest_release_handler() -> Response {
         Err(_) => return ApiError::new(StatusCode::BAD_GATEWAY, "Failed to read release response.").into_response(),
     };
 
-    if status.is_success() {
+    {
+        let ttl = if status.is_success() {
+            std::time::Duration::from_secs(15 * 60)
+        } else {
+            std::time::Duration::from_secs(90)
+        };
         let mut cache = RELEASE_CACHE.lock().await;
         *cache = Some(CachedRelease {
-            expires_at: now + std::time::Duration::from_secs(15 * 60),
+            expires_at: now + ttl,
             status,
             body: body.clone(),
         });
@@ -810,13 +851,39 @@ async fn app_asset(
     serve_file(&full_path).await
 }
 
+fn is_valid_upload_file_id(raw_path: &str) -> bool {
+    let file_name = std::path::Path::new(raw_path.trim_start_matches('/'))
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let stem = file_name.split('.').next().unwrap_or("");
+    let ext = file_name.split('.').nth(1);
+    if stem.len() != 32 || !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return false;
+    }
+    match ext {
+        None => true,
+        Some(e) => !e.is_empty() && e.len() <= 10 && e.bytes().all(|b| b.is_ascii_alphanumeric()),
+    }
+}
+
 async fn upload_asset(
     State(state): State<SharedState>,
     AxumPath(path): AxumPath<String>,
 ) -> impl IntoResponse {
+    if crate::core::security::rate_limit_hit(&state, "uploads:global".to_string(), 60, 10_000).await
+    {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
     let Some(full_path) = safe_child_path(&state.config.network.upload_dir, &path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if !is_valid_upload_file_id(&path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if !full_path.exists() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !messaging::upload_is_live(&state, &path).await {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -850,11 +917,24 @@ async fn serve_file(path: &Path) -> Response {
     }
 }
 
+fn escape_for_inline_script(json: &str) -> String {
+    json.replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+const APP_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+
 async fn serve_webchat_index(path: &Path, origin: Option<&str>, state: &SharedState) -> Response {
     match fs::read_to_string(path).await {
         Ok(mut html) => {
             let runtime = runtime_config_payload(origin, state);
-            let bootstrap = format!("<script>window.__QXP_RUNTIME__ = {};</script>", runtime);
+            let bootstrap = format!(
+                "<script>window.__QXP_RUNTIME__ = {};</script>",
+                escape_for_inline_script(&runtime.to_string())
+            );
             if html.contains("</head>") {
                 html = html.replacen("</head>", &format!("{bootstrap}</head>"), 1);
             } else {
@@ -863,6 +943,14 @@ async fn serve_webchat_index(path: &Path, origin: Option<&str>, state: &SharedSt
             Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "text/html; charset=utf-8")
+                .header("content-security-policy", APP_CSP)
+                .header("x-frame-options", "DENY")
+                .header("x-content-type-options", "nosniff")
+                .header("referrer-policy", "no-referrer")
+                .header(
+                    "strict-transport-security",
+                    "max-age=31536000; includeSubDomains",
+                )
                 .body(axum::body::Body::from(html))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
@@ -906,8 +994,8 @@ fn runtime_config_payload(origin: Option<&str>, state: &SharedState) -> serde_js
                 "label": s.label,
                 "hint": s.hint,
                 "urls": s.urls,
-                "username": s.username,
-                "credential": s.credential
+                "username": "",
+                "credential": ""
             })
         })
         .collect();
@@ -926,8 +1014,8 @@ fn runtime_config_payload(origin: Option<&str>, state: &SharedState) -> serde_js
             "servers": servers,
             "defaultTurnServer": default_server,
             "turnUrls": rtc.turn_urls,
-            "turnUsername": rtc.turn_username,
-            "turnCredential": rtc.turn_credential,
+            "turnUsername": "",
+            "turnCredential": "",
             "callsEnabled": calls_enabled,
             "callsUnavailableReason": calls_unavailable_reason
         },
@@ -954,7 +1042,27 @@ fn runtime_config_payload(origin: Option<&str>, state: &SharedState) -> serde_js
     payload
 }
 
+fn is_valid_public_host(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    host.chars().all(|ch| {
+        ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | ':' | '[' | ']')
+    })
+}
+
 fn public_origin(headers: &HeaderMap, configured_domain: &str) -> Option<String> {
+    fn configured_fallback(configured_domain: &str) -> Option<String> {
+        let configured = configured_domain.trim();
+        if configured.is_empty() {
+            return None;
+        }
+        if !is_valid_public_host(configured) {
+            return None;
+        }
+        Some(format!("https://{configured}"))
+    }
+
     let host = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
@@ -962,15 +1070,27 @@ fn public_origin(headers: &HeaderMap, configured_domain: &str) -> Option<String>
         .filter(|value| !value.is_empty());
 
     if let Some(host) = host {
+        if !is_valid_public_host(host) {
+            return configured_fallback(configured_domain);
+        }
         let forwarded_proto = headers
             .get("x-forwarded-proto")
             .and_then(|value| value.to_str().ok())
             .map(str::trim)
-            .filter(|value| !value.is_empty());
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                value
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase()
+            })
+            .filter(|value| value == "http" || value == "https");
 
-        let proto = match forwarded_proto {
-            Some(p) => p,
-            None => {
+        let proto: &str = match forwarded_proto.as_deref() {
+            Some("http") | Some("https") => forwarded_proto.as_deref().unwrap_or("https"),
+            _ => {
                 let host_part = host.split(':').next().unwrap_or("");
                 let is_local = host_part.eq_ignore_ascii_case("localhost")
                     || host_part == "127.0.0.1"
@@ -988,11 +1108,7 @@ fn public_origin(headers: &HeaderMap, configured_domain: &str) -> Option<String>
         return Some(format!("{proto}://{host}"));
     }
 
-    let configured = configured_domain.trim();
-    if configured.is_empty() {
-        return None;
-    }
-    Some(format!("https://{configured}"))
+    configured_fallback(configured_domain)
 }
 
 async fn pass_redeem_handler(
@@ -1041,6 +1157,49 @@ async fn phantom_prekey_handler(
         Some(bundle) => Ok(Json(bundle)),
         None => Err(ApiError::new(StatusCode::NOT_FOUND, "Prekey not found.")),
     }
+}
+
+async fn rtc_credentials_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> ApiResult<impl IntoResponse> {
+    let _user = authenticated_user(&state, &headers).await?;
+    if crate::core::security::rate_limit_hit(&state, "rtc:credentials:global".to_string(), 120, 60_000)
+        .await
+    {
+        return Err(ApiError::too_many_requests(
+            "Too many credential requests. Please wait a minute.",
+        ));
+    }
+    let rtc = &state.config.rtc;
+    let servers: Vec<serde_json::Value> = rtc
+        .resolved_servers()
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "label": s.label,
+                "hint": s.hint,
+                "urls": s.urls,
+                "username": s.username,
+                "credential": s.credential
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "relayOnly": rtc.relay_only,
+        "servers": servers,
+        "defaultTurnServer": if !rtc.default_turn_server.is_empty() {
+            rtc.default_turn_server.clone()
+        } else if let Some(first) = rtc.resolved_servers().first() {
+            first.id.clone()
+        } else {
+            String::new()
+        },
+        "turnUrls": rtc.turn_urls,
+        "turnUsername": rtc.turn_username,
+        "turnCredential": rtc.turn_credential,
+    })))
 }
 
 async fn social_blob_get_handler(
@@ -1105,5 +1264,8 @@ async fn ws_upgrade_handler(
     State(state): State<SharedState>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(state, socket))
+    ws.max_message_size(36 * 1024 * 1024)
+        .max_frame_size(1024 * 1024)
+        .max_write_buffer_size(4 * 1024 * 1024)
+        .on_upgrade(move |socket| handle_socket(state, socket))
 }

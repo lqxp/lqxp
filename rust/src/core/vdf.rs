@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use hmac::{Hmac, Mac};
-use num_bigint::{BigUint, RandBigInt};
+use num_bigint::BigUint;
 use num_traits::{One, Zero};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -132,14 +132,22 @@ pub fn hash_to_prime(x: &BigUint, y: &BigUint) -> BigUint {
     }
 }
 
-// Miller-Rabin primality test
-fn is_probable_prime(n: &BigUint, rounds: usize) -> bool {
+fn is_probable_prime(n: &BigUint, _rounds: usize) -> bool {
+    const BASES: [u32; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
+    const SMALL_PRIMES: [u32; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
+
     let two = BigUint::from(2u32);
-    if n <= &two {
-        return n == &two;
-    }
-    if n % &two == BigUint::zero() {
+    if n < &two {
         return false;
+    }
+    for small in SMALL_PRIMES {
+        let small_bn = BigUint::from(small);
+        if n == &small_bn {
+            return true;
+        }
+        if n % &small_bn == BigUint::zero() {
+            return false;
+        }
     }
 
     let one = BigUint::one();
@@ -151,22 +159,24 @@ fn is_probable_prime(n: &BigUint, rounds: usize) -> bool {
         s += 1;
     }
 
-    let mut rng = OsRng;
-    for _ in 0..rounds {
-        let a = rng.gen_biguint_range(&two, &(n - &one));
+    for base in BASES {
+        let a = BigUint::from(base);
+        if &a >= n {
+            continue;
+        }
         let mut x = a.modpow(&d, n);
         if x == one || x == n_minus_one {
             continue;
         }
-        let mut composite = true;
-        for _ in 0..(s - 1) {
+        let mut witness = true;
+        for _ in 1..s {
             x = x.modpow(&two, n);
             if x == n_minus_one {
-                composite = false;
+                witness = false;
                 break;
             }
         }
-        if composite {
+        if witness {
             return false;
         }
     }

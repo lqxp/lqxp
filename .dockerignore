@@ -1,0 +1,11 @@
+files/qxp.sqlite
+files/*.sqlite
+files/*.sqlite-shm
+files/*.sqlite-wal
+files/uploads/
+files/config.custom.toml
+files/config.prod.toml
+target/
+web/node_modules/
+web/dist/
+.git/
