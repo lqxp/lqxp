@@ -117,6 +117,12 @@ domain = "$BIND_HOST"
 publicDomain = "$PUBLIC_DOMAIN"
 port = $APP_PORT
 
+[web]
+repo = "https://github.com/lqxp/client.git"
+directory = "web"
+fresh = true
+tag = ""
+
 [network]
 heartbeatInterval = 3000
 latestVersion = ""

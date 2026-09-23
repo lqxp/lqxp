@@ -14,13 +14,13 @@ else
     ls -la files/qxp.sqlite
 fi
 
-git pull --recurse-submodules
-git submodule update --init --recursive
-
-cd web
-bun install
-bun run build
-cd ..
+BRANCH="$(git branch --show-current)"
+if [[ -z "$BRANCH" ]]; then
+    echo "Refus de mettre à jour un checkout serveur en HEAD détachée." >&2
+    exit 1
+fi
+git fetch --prune origin
+git reset --hard "origin/$BRANCH"
 
 cargo build --release
 

@@ -1,10 +1,12 @@
-use std::path::{Path, PathBuf};
 use serde::Deserialize;
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 use tokio::fs;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
-#[derive(Debug, Clone, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
@@ -17,8 +19,186 @@ pub struct Config {
     pub database: DatabaseConfig,
     #[serde(default)]
     pub security: SecurityConfig,
+    pub web: WebConfig,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebConfig {
+    pub repo: String,
+    pub directory: String,
+    pub fresh: bool,
+    #[serde(default)]
+    pub tag: String,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            repo: "https://github.com/lqxp/client.git".to_owned(),
+            directory: "web".to_owned(),
+            fresh: true,
+            tag: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebRevision {
+    Fresh,
+    Tag(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigError(String);
+
+impl ConfigError {
+    fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+impl WebConfig {
+    pub fn revision(&self) -> Result<WebRevision, ConfigError> {
+        validate_web_repo(&self.repo)?;
+        match (self.fresh, self.tag.trim()) {
+            (true, "") => Ok(WebRevision::Fresh),
+            (false, tag) if !tag.is_empty() => Ok(WebRevision::Tag(tag.to_owned())),
+            (true, _) => Err(ConfigError::new(
+                "[web].tag must be empty when [web].fresh is true",
+            )),
+            (false, _) => Err(ConfigError::new(
+                "[web].tag is required when [web].fresh is false",
+            )),
+        }
+    }
+
+    pub fn checkout_path(&self, root: &Path) -> Result<PathBuf, ConfigError> {
+        let relative = Path::new(&self.directory);
+        let components: Vec<_> = relative.components().collect();
+        if components.is_empty()
+            || components
+                .iter()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(ConfigError::new(
+                "[web].directory must be a non-empty relative path without '.' or '..'",
+            ));
+        }
+
+        let first = components[0].as_os_str().to_string_lossy();
+        const PROTECTED: &[&str] = &[
+            ".codex",
+            ".dockerignore",
+            ".git",
+            ".gitattributes",
+            ".github",
+            ".gitignore",
+            ".superpowers",
+            "Cargo.lock",
+            "Cargo.toml",
+            "Dockerfile",
+            "LICENSE",
+            "README.md",
+            "deploy",
+            "docker-compose.yml",
+            "docs",
+            "explain",
+            "files",
+            "nginx.conf",
+            "placeholder.xcf",
+            "pm2.config.cjs",
+            "rust",
+            "scripts",
+            "serve.public",
+            "target",
+            "update.sh",
+        ];
+        if PROTECTED.contains(&first.as_ref()) {
+            return Err(ConfigError::new(format!(
+                "[web].directory cannot target protected path {first}"
+            )));
+        }
+
+        let canonical_root = std::fs::canonicalize(root).map_err(|err| {
+            ConfigError::new(format!("cannot resolve QXP_ROOT {}: {err}", root.display()))
+        })?;
+        let mut current = canonical_root.clone();
+        for component in &components {
+            current.push(component.as_os_str());
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(ConfigError::new(format!(
+                        "[web].directory crosses symlink {}",
+                        current.display()
+                    )));
+                }
+                Ok(_) => {
+                    let resolved = std::fs::canonicalize(&current).map_err(|err| {
+                        ConfigError::new(format!(
+                            "cannot resolve web path {}: {err}",
+                            current.display()
+                        ))
+                    })?;
+                    if !resolved.starts_with(&canonical_root) || resolved == canonical_root {
+                        return Err(ConfigError::new(
+                            "[web].directory must remain strictly below QXP_ROOT",
+                        ));
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(ConfigError::new(format!(
+                        "cannot inspect web path {}: {err}",
+                        current.display()
+                    )));
+                }
+            }
+        }
+
+        Ok(root.join(relative))
+    }
+}
+
+fn validate_web_repo(repo: &str) -> Result<(), ConfigError> {
+    let path = if let Some(path) = repo.strip_prefix("https://github.com/") {
+        path
+    } else if let Some(path) = repo.strip_prefix("git@github.com:") {
+        path
+    } else {
+        return Err(ConfigError::new(
+            "[web].repo must use GitHub HTTPS or SSH syntax",
+        ));
+    };
+
+    let mut parts = path.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let repository = parts.next().unwrap_or_default();
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    };
+    if parts.next().is_some()
+        || !valid_part(owner)
+        || !repository.ends_with(".git")
+        || !valid_part(repository.trim_end_matches(".git"))
+    {
+        return Err(ConfigError::new(
+            "[web].repo must identify OWNER/REPOSITORY.git on GitHub",
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -249,7 +429,7 @@ pub fn init_tracing() {
         .init();
 }
 
-fn project_root() -> PathBuf {
+pub fn project_root() -> PathBuf {
     if let Some(root) = std::env::var_os("QXP_ROOT") {
         let root = PathBuf::from(root);
         if !root.as_os_str().is_empty() {
@@ -268,7 +448,7 @@ fn resolve_project_path(path: impl AsRef<Path>) -> PathBuf {
     }
 }
 
-pub async fn load_config() -> Config {
+pub async fn load_config() -> Result<Config, ConfigError> {
     let env = if std::env::var("PRODUCTION").is_ok() {
         "prod"
     } else {
@@ -286,6 +466,7 @@ pub async fn load_config() -> Config {
     match fs::read_to_string(&config_path).await {
         Ok(raw) => match toml::from_str::<Config>(&raw) {
             Ok(mut config) => {
+                config.web.revision()?;
                 if !config.api.admin_password_deprecated.trim().is_empty() {
                     warn!(
                         "Config {} sets [api].adminPassword, which is ignored (use [security].adminIds). Remove it.",
@@ -300,10 +481,8 @@ pub async fn load_config() -> Config {
                     .into_owned();
                 if let Some(path) = config.database.url.strip_prefix("sqlite://") {
                     if !path.is_empty() && !Path::new(path).is_absolute() {
-                        config.database.url = format!(
-                            "sqlite://{}",
-                            resolve_project_path(path).to_string_lossy()
-                        );
+                        config.database.url =
+                            format!("sqlite://{}", resolve_project_path(path).to_string_lossy());
                     }
                 }
 
@@ -323,25 +502,17 @@ pub async fn load_config() -> Config {
                         config.database.url
                     );
                 }
-                config
+                Ok(config)
             }
-            Err(err) => {
-                error!(
-                    "Configuration {} illisible ({err}) : démarrage sur les valeurs par défaut. \
-                     Aucun fichier de base ne sera créé tant que le chemin n'est pas corrigé.",
-                    config_path.display()
-                );
-                Config::default()
-            }
-        },
-        Err(err) => {
-            error!(
-                "Configuration {} introuvable ou illisible ({err}) : démarrage sur les valeurs \
-                 par défaut. Vérifiez la racine (QXP_ROOT) — aucun fichier de base ne sera créé.",
+            Err(err) => Err(ConfigError::new(format!(
+                "configuration {} illisible: {err}",
                 config_path.display()
-            );
-            Config::default()
-        }
+            ))),
+        },
+        Err(err) => Err(ConfigError::new(format!(
+            "configuration {} introuvable ou illisible: {err}",
+            config_path.display()
+        ))),
     }
 }
 
@@ -350,5 +521,111 @@ pub async fn load_blocklist_terms() -> Vec<String> {
     match fs::read_to_string(path).await {
         Ok(contents) => serde_json::from_str::<Vec<String>>(&contents).unwrap_or_default(),
         Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temporary_root(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("lqxp-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("create temporary root");
+        path
+    }
+
+    fn web_config(directory: &str) -> WebConfig {
+        WebConfig {
+            repo: "https://github.com/lqxp/client.git".into(),
+            directory: directory.into(),
+            fresh: true,
+            tag: String::new(),
+        }
+    }
+
+    #[test]
+    fn web_mode_requires_exactly_fresh_or_tag() {
+        let cases = [
+            (true, "", true),
+            (false, "v1.20.5", true),
+            (true, "v1.20.5", false),
+            (false, "", false),
+        ];
+        for (fresh, tag, valid) in cases {
+            let web = WebConfig {
+                repo: "https://github.com/lqxp/client.git".into(),
+                directory: "web".into(),
+                fresh,
+                tag: tag.into(),
+            };
+            assert_eq!(web.revision().is_ok(), valid);
+        }
+    }
+
+    #[test]
+    fn web_repo_accepts_only_github_https_and_ssh_conventions() {
+        for repo in [
+            "https://github.com/lqxp/client.git",
+            "git@github.com:lqxp/client.git",
+        ] {
+            assert!(validate_web_repo(repo).is_ok(), "{repo}");
+        }
+        for repo in [
+            "https://token@github.com/lqxp/client.git",
+            "https://gitlab.com/lqxp/client.git",
+            "file:///tmp/client.git",
+            "git@github.com:lqxp/client",
+        ] {
+            assert!(validate_web_repo(repo).is_err(), "{repo}");
+        }
+    }
+
+    #[test]
+    fn checkout_path_never_targets_or_escapes_server_owned_paths() {
+        let root = temporary_root("checkout-paths");
+        assert_eq!(
+            web_config("web").checkout_path(&root).unwrap(),
+            root.join("web")
+        );
+        assert_eq!(
+            web_config("generated/web").checkout_path(&root).unwrap(),
+            root.join("generated/web")
+        );
+        for unsafe_path in [
+            ".",
+            "../web",
+            "/tmp/web",
+            ".git",
+            "files/web",
+            "rust/web",
+            "target/web",
+            "docs/web",
+            "deploy/web",
+            "scripts/web",
+            ".github/web",
+            "Cargo.toml",
+            "README.md",
+            "Dockerfile",
+            "update.sh",
+        ] {
+            assert!(
+                web_config(unsafe_path).checkout_path(&root).is_err(),
+                "{unsafe_path}"
+            );
+        }
+        std::fs::remove_dir_all(root).expect("remove temporary root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_path_rejects_existing_symlink_components() {
+        let root = temporary_root("checkout-symlink");
+        let outside = temporary_root("checkout-outside");
+        std::os::unix::fs::symlink(&outside, root.join("link")).expect("create symlink");
+
+        assert!(web_config("link/web").checkout_path(&root).is_err());
+
+        std::fs::remove_dir_all(root).expect("remove temporary root");
+        std::fs::remove_dir_all(outside).expect("remove outside root");
     }
 }

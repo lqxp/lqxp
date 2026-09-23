@@ -5,6 +5,13 @@ publicDomain = ""
 port = 4560
 adminPassword = ""
 
+[web]
+
+repo = "https://github.com/lqxp/client.git"
+directory = "web"
+fresh = true
+tag = ""
+
 [network]
 
 heartbeatInterval = 3000

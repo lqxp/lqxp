@@ -8,6 +8,7 @@ name = "qxprotocol"
 path = "rust/src/main.rs"
 
 [dependencies]
+async-trait = "0.1"
 argon2 = "0.5"
 axum = { version = "0.7", features = ["multipart", "ws"] }
 base64 = "0.22"

@@ -2,7 +2,8 @@
 
 ## What this package includes
 
-- multi-stage Docker build for the Rust server and web client
+- multi-stage Docker build for the Rust server
+- Git and Bun in the runtime image for startup-managed web builds
 - `docker-compose.yml` for local or single-host deployment
 - persistent mounts for `files/config.custom.toml` and `files/qxp.sqlite`
 
@@ -24,6 +25,7 @@ cp files/config.example.toml files/config.custom.toml
 Set at least:
 
 - `api.publicDomain`
+- `web.repo`, `web.directory`, and either fresh or tag mode
 - `rtc.turnUrls`
 - `rtc.turnUsername`
 - `rtc.turnCredential`
@@ -53,7 +55,11 @@ docker compose up -d --build
 ## Notes
 
 - The app listens on port `4560` in the container.
-- The web client static files are built into the image and served by the Rust server.
+- The image does not contain a prebuilt web client. Every container startup fetches and rebuilds it before the server listens.
+- The container needs outbound access to the configured GitHub repository and the Bun package registry.
+- `/app` must be writable so LQXP can replace the disposable checkout configured by `web.directory`.
+- `fresh = true` with an empty tag follows `origin/HEAD`; `fresh = false` requires an exact tag.
+- Local checkout corruption is recloned once. Network/authentication, permissions/storage, missing Git/Bun, install/build, invalid configuration, or missing output stop the container.
 - SQLite and JSON data remain on the host through the mounted files.
 - If you also want TURN relay in production, keep using the documented host-level setup in `docs/turn-deployment.md`.
 

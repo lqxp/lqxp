@@ -4,6 +4,13 @@ domain = ""
 publicDomain = "qxp.example.com"
 port = 4560
 
+[web]
+
+repo = "https://github.com/lqxp/client.git"
+directory = "web"
+fresh = true
+tag = ""
+
 [network]
 
 heartbeatInterval = 3000

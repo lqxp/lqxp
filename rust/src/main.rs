@@ -2,31 +2,38 @@ mod core;
 mod linkpreview;
 mod server;
 mod services;
+mod startup;
 mod utils;
+mod web;
 mod websocket;
 
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use tokio::{net::TcpListener, sync::RwLock};
 use tracing::info;
 
 use crate::{
     core::{
-        config::{init_tracing, load_blocklist_terms, load_config},
+        config::{init_tracing, load_blocklist_terms, load_config, project_root},
         database::{AccountDatabase, RoomDatabase},
         presence::AppState,
     },
     server::routes::build_router,
+    startup::startup_preflight,
+    web::SystemCommandRunner,
 };
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
-    let config = load_config().await;
+    let config = load_config().await?;
+    let config = startup_preflight(config, &project_root(), &SystemCommandRunner).await?;
     let blocklist_terms = load_blocklist_terms().await;
-    std::fs::create_dir_all(&config.network.upload_dir)
-        .expect("failed to create upload directory");
+    std::fs::create_dir_all(&config.network.upload_dir).expect("failed to create upload directory");
 
     let database = Arc::new(
         RoomDatabase::connect(&config.database)
@@ -81,4 +88,6 @@ async fn main() {
     )
     .await
     .expect("server exited unexpectedly");
+
+    Ok(())
 }

@@ -6,6 +6,5 @@ files/uploads/
 files/config.custom.toml
 files/config.prod.toml
 target/
-web/node_modules/
-web/dist/
+web/
 .git/
