@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, path::Path, str::FromStr};
+use std::{
+    collections::BTreeMap,
+    path::{PathBuf},
+    str::FromStr,
+};
 
 use serde::{Deserialize, Serialize};
 use sqlx::{
@@ -180,10 +184,10 @@ impl AccountDatabase {
                     .map_err(|err| ApiError::internal("PostgreSQL connection", err))?,
             )
         } else {
-            prepare_sqlite_path(&config.url).await?;
+            ensure_sqlite_database(&config.url, config.create_if_missing).await?;
             let options = SqliteConnectOptions::from_str(&config.url)
                 .map_err(|err| ApiError::internal("SQLite URL invalid", err))?
-                .create_if_missing(true);
+                .create_if_missing(config.create_if_missing);
             SqlBackend::Sqlite(
                 SqlitePoolOptions::new()
                     .max_connections(5)
@@ -289,7 +293,58 @@ impl AccountDatabase {
             "social_blob_ver BIGINT NOT NULL DEFAULT 0",
         )
         .await?;
+
+        // La casse n'est pas une identité : deux comptes ne doivent jamais
+        // pouvoir ne différer que par elle, sinon le second rend le premier
+        // inatteignable (toutes les lectures passent par `normalize_username`).
+        // L'écriture normalise déjà (`security::validate_username_with_max`) ;
+        // cet index couvre les chemins hors application (SQL manuel,
+        // restauration de sauvegarde, outillage).
+        //
+        // Non bloquant et sans renommage : si des variantes de casse héritées
+        // empêchent l'index, on le signale au lieu d'empêcher le démarrage.
+        let uniqueness_guard = match &self.backend {
+            SqlBackend::Sqlite(_) => {
+                "CREATE UNIQUE INDEX IF NOT EXISTS users_username_nocase ON users (username COLLATE NOCASE)"
+            }
+            SqlBackend::Postgres(_) => {
+                "CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower ON users (LOWER(username))"
+            }
+        };
+        if let Err(err) = self.execute(uniqueness_guard).await {
+            tracing::warn!("Case-insensitive username uniqueness is not enforced: {err}");
+        }
+        self.warn_about_legacy_username_casing().await;
+
         Ok(())
+    }
+
+    /// Signale les comptes dont le pseudonyme n'est pas en minuscules.
+    ///
+    /// Ces lignes sont inatteignables : `login` et `recover` cherchent la forme
+    /// minuscule. Aucun renommage automatique n'est effectué ici — renommer un
+    /// compte est une décision d'exploitant, pas un effet de bord de démarrage —
+    /// mais l'anomalie ne doit pas rester silencieuse.
+    async fn warn_about_legacy_username_casing(&self) {
+        let query = "SELECT COUNT(*) FROM users WHERE username <> LOWER(username)";
+        let count = match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query(query)
+                .fetch_one(pool)
+                .await
+                .map(|row| row.get::<i64, _>(0)),
+            SqlBackend::Postgres(pool) => sqlx::query(query)
+                .fetch_one(pool)
+                .await
+                .map(|row| row.get::<i64, _>(0)),
+        };
+        match count {
+            Ok(0) => {}
+            Ok(count) => tracing::warn!(
+                "{count} account(s) have a username that is not lowercase and cannot be \
+                 reached by login or recovery; rename them to their lowercase form."
+            ),
+            Err(err) => tracing::warn!("Could not check username casing: {err}"),
+        }
     }
 
     async fn execute(&self, sql: &str) -> ApiResult<()> {
@@ -1807,10 +1862,10 @@ impl RoomDatabase {
                     .map_err(|err| ApiError::internal("PostgreSQL connection", err))?,
             )
         } else {
-            prepare_sqlite_path(&config.url).await?;
+            ensure_sqlite_database(&config.url, config.create_if_missing).await?;
             let options = SqliteConnectOptions::from_str(&config.url)
                 .map_err(|err| ApiError::internal("Invalid SQLite room database URL", err))?
-                .create_if_missing(true);
+                .create_if_missing(config.create_if_missing);
             SqlBackend::Sqlite(
                 SqlitePoolOptions::new()
                     .max_connections(5)
@@ -2207,18 +2262,53 @@ impl RoomDatabase {
     }
 }
 
-async fn prepare_sqlite_path(url: &str) -> ApiResult<()> {
-    let Some(raw_path) = url
+/// Chemin du fichier désigné par une URL SQLite, s'il y en a un.
+///
+/// `None` pour `sqlite::memory:` et pour les URL qui ne désignent pas de
+/// fichier.
+fn sqlite_file_path(url: &str) -> Option<PathBuf> {
+    let raw = url
         .strip_prefix("sqlite://")
-        .or_else(|| url.strip_prefix("sqlite:"))
-    else {
+        .or_else(|| url.strip_prefix("sqlite:"))?;
+    let raw = raw.split('?').next().unwrap_or(raw).trim();
+    if raw.is_empty() || raw == ":memory:" {
+        return None;
+    }
+    Some(PathBuf::from(raw))
+}
+
+async fn ensure_sqlite_database(url: &str, create_if_missing: bool) -> ApiResult<()> {
+    let Some(path) = sqlite_file_path(url) else {
         return Ok(());
     };
-    if raw_path == ":memory:" || raw_path.trim().is_empty() {
+
+    if fs::try_exists(&path).await.unwrap_or(false) {
+        tracing::info!("Base SQLite: {}", path.display());
         return Ok(());
     }
-    if let Some(parent) = Path::new(raw_path).parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        fs::create_dir_all(parent).await.map_err(|err| ApiError::internal("Prepare sqlite directory", err))?;
+
+    if !create_if_missing {
+        return Err(ApiError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "Fichier de base SQLite introuvable: {}. Démarrage refusé : ouvrir une base \
+                 vide ferait disparaître tous les comptes aux yeux des utilisateurs. \
+                 Corrigez [database].url, ou fixez la racine de déploiement avec la variable \
+                 d'environnement QXP_ROOT, ou — pour un premier déploiement uniquement — \
+                 ajoutez [database].createIfMissing = true.",
+                path.display()
+            ),
+        ));
     }
+
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|err| ApiError::internal("Prepare sqlite directory", err))?;
+    }
+    tracing::warn!(
+        "Création d'une base SQLite **vide** (createIfMissing = true): {}",
+        path.display()
+    );
     Ok(())
 }

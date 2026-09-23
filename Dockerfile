@@ -25,6 +25,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV PRODUCTION=1
+
+ENV QXP_ROOT=/app
 COPY --from=server-build /app/target/release/qxprotocol /usr/local/bin/qxprotocol
 RUN mkdir -p /app/files/uploads
 COPY --from=server-build /app/web/dist ./web/dist

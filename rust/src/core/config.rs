@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use tokio::fs;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Clone, Deserialize)]
 #[derive(Default)]
@@ -168,6 +168,8 @@ pub struct DatabaseConfig {
     pub kind: String,
     #[serde(default = "default_database_url")]
     pub url: String,
+    #[serde(default, rename = "createIfMissing")]
+    pub create_if_missing: bool,
 }
 
 impl Default for DatabaseConfig {
@@ -175,6 +177,7 @@ impl Default for DatabaseConfig {
         Self {
             kind: default_database_kind(),
             url: default_database_url(),
+            create_if_missing: false,
         }
     }
 }
@@ -247,6 +250,12 @@ pub fn init_tracing() {
 }
 
 fn project_root() -> PathBuf {
+    if let Some(root) = std::env::var_os("QXP_ROOT") {
+        let root = PathBuf::from(root);
+        if !root.as_os_str().is_empty() {
+            return root;
+        }
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
@@ -297,15 +306,40 @@ pub async fn load_config() -> Config {
                         );
                     }
                 }
+
+                info!(
+                    "Configuration: {} (racine: {}, PRODUCTION: {})",
+                    config_path.display(),
+                    project_root().display(),
+                    std::env::var("PRODUCTION").is_ok()
+                );
+                if config.database.url.starts_with("sqlite") {
+                    info!("Base de données: {}", config.database.url);
+                }
+                if config.database.create_if_missing {
+                    warn!(
+                        "createIfMissing = true : si le fichier est absent, une base **vide** \
+                         sera créée à {}. À réserver au premier déploiement.",
+                        config.database.url
+                    );
+                }
                 config
             }
             Err(err) => {
-                error!("Failed to parse {}: {}", config_path.display(), err);
+                error!(
+                    "Configuration {} illisible ({err}) : démarrage sur les valeurs par défaut. \
+                     Aucun fichier de base ne sera créé tant que le chemin n'est pas corrigé.",
+                    config_path.display()
+                );
                 Config::default()
             }
         },
         Err(err) => {
-            warn!("Failed to read {}: {}", config_path.display(), err);
+            error!(
+                "Configuration {} introuvable ou illisible ({err}) : démarrage sur les valeurs \
+                 par défaut. Vérifiez la racine (QXP_ROOT) — aucun fichier de base ne sera créé.",
+                config_path.display()
+            );
             Config::default()
         }
     }

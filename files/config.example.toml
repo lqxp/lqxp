@@ -60,6 +60,22 @@ turnCredential = "change-me"
 kind = "sqlite"
 url = "sqlite://files/qxp.sqlite"
 
+# Création de la base SQLite si le fichier est absent.
+#
+# Par défaut `false` : le serveur REFUSE de démarrer et affiche le chemin
+# absolu attendu. C'est volontaire — créer la base en silence revient à
+# démarrer « comme si plus aucun compte n'existait » : tous les logins
+# répondent « Invalid Credentials » et les nouveaux comptes reçoivent le
+# badge `early` (moins de 200 lignes dans `users`).
+#
+# Mettre `true` **uniquement** pour un premier déploiement (ou après une
+# restauration volontaire), puis repasser à `false`.
+#
+# Les chemins relatifs sont résolus depuis la racine de déploiement, fixée
+# par la variable d'environnement `QXP_ROOT` (recommandé), sinon depuis le
+# dossier de compilation gravé dans le binaire.
+createIfMissing = false
+
 [security]
 
 # Snowflake-like account IDs with administrator access.
