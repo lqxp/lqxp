@@ -16,7 +16,6 @@ module.exports = {
       env: {
         PRODUCTION: "1",
         RUST_LOG: "info",
-
         QXP_ROOT: projectRoot,
       },
       error_file: path.join(require("os").homedir(), ".pm2/logs/qxchat-error.log"),

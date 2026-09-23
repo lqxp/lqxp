@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::{
     fmt,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 use tokio::fs;
 use tracing::{info, warn};
@@ -83,18 +83,45 @@ impl WebConfig {
 
     pub fn checkout_path(&self, root: &Path) -> Result<PathBuf, ConfigError> {
         let relative = Path::new(&self.directory);
-        let components: Vec<_> = relative.components().collect();
-        if components.is_empty()
-            || components
-                .iter()
-                .any(|component| !matches!(component, std::path::Component::Normal(_)))
-        {
+        if relative.as_os_str().is_empty() || relative.is_absolute() {
             return Err(ConfigError::new(
-                "[web].directory must be a non-empty relative path without '.' or '..'",
+                "[web].directory must be a non-empty relative path",
             ));
         }
 
-        let first = components[0].as_os_str().to_string_lossy();
+        let canonical_root = std::fs::canonicalize(root).map_err(|err| {
+            ConfigError::new(format!("cannot resolve QXP_ROOT {}: {err}", root.display()))
+        })?;
+        let boundary = canonical_root.parent().ok_or_else(|| {
+            ConfigError::new("QXP_ROOT has no parent available for web checkout validation")
+        })?;
+        let mut target = canonical_root.clone();
+        for component in relative.components() {
+            match component {
+                Component::Normal(part) => target.push(part),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if !target.pop() {
+                        return Err(ConfigError::new(
+                            "[web].directory cannot traverse beyond the filesystem root",
+                        ));
+                    }
+                }
+                Component::RootDir | Component::Prefix(_) => {
+                    return Err(ConfigError::new("[web].directory must be a relative path"));
+                }
+            }
+        }
+
+        if !target.starts_with(boundary)
+            || target == boundary
+            || canonical_root.starts_with(&target)
+        {
+            return Err(ConfigError::new(
+                "[web].directory may target QXP_ROOT or one of its siblings, but not a parent",
+            ));
+        }
+
         const PROTECTED: &[&str] = &[
             ".codex",
             ".dockerignore",
@@ -122,17 +149,22 @@ impl WebConfig {
             "target",
             "update.sh",
         ];
-        if PROTECTED.contains(&first.as_ref()) {
-            return Err(ConfigError::new(format!(
-                "[web].directory cannot target protected path {first}"
-            )));
+        if let Ok(within_root) = target.strip_prefix(&canonical_root) {
+            if let Some(Component::Normal(first)) = within_root.components().next() {
+                let first = first.to_string_lossy();
+                if PROTECTED.contains(&first.as_ref()) {
+                    return Err(ConfigError::new(format!(
+                        "[web].directory cannot target protected path {first}"
+                    )));
+                }
+            }
         }
 
-        let canonical_root = std::fs::canonicalize(root).map_err(|err| {
-            ConfigError::new(format!("cannot resolve QXP_ROOT {}: {err}", root.display()))
+        let relative_target = target.strip_prefix(boundary).map_err(|_| {
+            ConfigError::new("[web].directory escapes the allowed checkout boundary")
         })?;
-        let mut current = canonical_root.clone();
-        for component in &components {
+        let mut current = boundary.to_path_buf();
+        for component in relative_target.components() {
             current.push(component.as_os_str());
             match std::fs::symlink_metadata(&current) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -141,19 +173,7 @@ impl WebConfig {
                         current.display()
                     )));
                 }
-                Ok(_) => {
-                    let resolved = std::fs::canonicalize(&current).map_err(|err| {
-                        ConfigError::new(format!(
-                            "cannot resolve web path {}: {err}",
-                            current.display()
-                        ))
-                    })?;
-                    if !resolved.starts_with(&canonical_root) || resolved == canonical_root {
-                        return Err(ConfigError::new(
-                            "[web].directory must remain strictly below QXP_ROOT",
-                        ));
-                    }
-                }
+                Ok(_) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                 Err(err) => {
                     return Err(ConfigError::new(format!(
@@ -164,7 +184,7 @@ impl WebConfig {
             }
         }
 
-        Ok(root.join(relative))
+        Ok(target)
     }
 }
 
@@ -581,8 +601,10 @@ mod tests {
     }
 
     #[test]
-    fn checkout_path_never_targets_or_escapes_server_owned_paths() {
-        let root = temporary_root("checkout-paths");
+    fn checkout_path_allows_a_sibling_but_not_a_parent_or_absolute_path() {
+        let workspace = temporary_root("checkout-paths");
+        let root = workspace.join("lqxp");
+        std::fs::create_dir(&root).expect("create project root");
         assert_eq!(
             web_config("web").checkout_path(&root).unwrap(),
             root.join("web")
@@ -591,9 +613,19 @@ mod tests {
             web_config("generated/web").checkout_path(&root).unwrap(),
             root.join("generated/web")
         );
+        assert_eq!(
+            web_config("../web").checkout_path(&root).unwrap(),
+            workspace.join("web")
+        );
+        assert_eq!(
+            web_config("../client/web").checkout_path(&root).unwrap(),
+            workspace.join("client/web")
+        );
         for unsafe_path in [
             ".",
-            "../web",
+            "..",
+            "../lqxp",
+            "../../web",
             "/tmp/web",
             ".git",
             "files/web",
@@ -613,19 +645,26 @@ mod tests {
                 "{unsafe_path}"
             );
         }
-        std::fs::remove_dir_all(root).expect("remove temporary root");
+        std::fs::remove_dir_all(workspace).expect("remove temporary workspace");
     }
 
     #[cfg(unix)]
     #[test]
     fn checkout_path_rejects_existing_symlink_components() {
-        let root = temporary_root("checkout-symlink");
+        let workspace = temporary_root("checkout-symlink");
+        let root = workspace.join("lqxp");
+        std::fs::create_dir(&root).expect("create project root");
         let outside = temporary_root("checkout-outside");
         std::os::unix::fs::symlink(&outside, root.join("link")).expect("create symlink");
+        std::os::unix::fs::symlink(&outside, workspace.join("sibling-link"))
+            .expect("create sibling symlink");
 
         assert!(web_config("link/web").checkout_path(&root).is_err());
+        assert!(web_config("../sibling-link/web")
+            .checkout_path(&root)
+            .is_err());
 
-        std::fs::remove_dir_all(root).expect("remove temporary root");
+        std::fs::remove_dir_all(workspace).expect("remove temporary workspace");
         std::fs::remove_dir_all(outside).expect("remove outside root");
     }
 }
