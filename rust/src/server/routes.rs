@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use tokio::fs;
-use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use crate::{
     core::{
@@ -25,12 +25,14 @@ use crate::{
         presence::SharedState,
         result::{ApiError, ApiResult},
     },
+    server::download::{download_handler, download_options_handler},
     services::{admin, auth, messaging, phantom, privacy_pass, room, user},
     websocket::handle_socket,
 };
 
 pub fn build_router(state: SharedState) -> Router {
-    Router::new()
+    // Routes privées : CORS restreint (domaines configurés + shell Tauri + dev local).
+    let private = Router::new()
         .route("/app", get(webchat_page))
         .route("/app/", get(webchat_page))
         .route("/app/uploads/*path", get(upload_asset))
@@ -69,7 +71,6 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/api/admin/users/purge", post(admin_users_purge_handler))
         .route("/api/rtc/credentials", get(rtc_credentials_handler))
-        .route("/api/release", get(latest_release_handler))
         .route("/api/pass/redeem", post(pass_redeem_handler))
         .route("/api/phantom/deposit", post(phantom_deposit_handler))
         .route("/api/phantom/poll", post(phantom_poll_handler))
@@ -82,7 +83,45 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/*path", get(public_asset_handler))
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
         .layer(cors_layer(&state))
-        .with_state(state)
+        .with_state(state.clone());
+
+    // Routes publiques pour le site vitrine : CORS ouvert (`*`) car le
+    // domaine de la vitrine n'est pas connu à l'avance.
+    // `GET /api/download` agrège tag, release, commits, checksums,
+    // binaires de la dernière release et historique des versions.
+    let public = Router::new()
+        .route(
+            "/api/release",
+            get(latest_release_handler).options(release_options_handler),
+        )
+        .route(
+            "/api/download",
+            get(download_handler).options(download_options_handler),
+        )
+        .layer(public_cors_layer())
+        .with_state(state);
+
+    Router::new().merge(private).merge(public)
+}
+
+async fn release_options_handler() -> Response {
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            "GET, OPTIONS",
+        )
+        .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "Content-Type")
+        .body(axum::body::Body::empty())
+        .unwrap_or_else(|_| StatusCode::NO_CONTENT.into_response())
+}
+
+fn public_cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE])
 }
 
 fn cors_layer(state: &SharedState) -> CorsLayer {
