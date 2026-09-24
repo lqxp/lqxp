@@ -7,7 +7,7 @@ use axum::{
     extract::{
         ws::WebSocketUpgrade, DefaultBodyLimit, Multipart, Path as AxumPath, Query, State,
     },
-    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use tokio::fs;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     core::{
@@ -31,7 +31,9 @@ use crate::{
 };
 
 pub fn build_router(state: SharedState) -> Router {
-    // Routes privées : CORS restreint (domaines configurés + shell Tauri + dev local).
+    // Routes privées : CORS ouvert (`*`, toutes méthodes / headers).
+    // L'auth se fait par Bearer token (pas de cookies), donc `Any` suffit
+    // et le shell Tauri, le dev local et n'importe quel domaine passent.
     let private = Router::new()
         .route("/app", get(webchat_page))
         .route("/app/", get(webchat_page))
@@ -82,7 +84,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/ws", get(ws_upgrade_handler))
         .route("/*path", get(public_asset_handler))
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
-        .layer(cors_layer(&state))
+        .layer(cors_layer())
         .with_state(state.clone());
 
     // Routes publiques pour le site vitrine : CORS ouvert (`*`) car le
@@ -124,89 +126,12 @@ fn public_cors_layer() -> CorsLayer {
         .allow_headers([header::CONTENT_TYPE])
 }
 
-fn cors_layer(state: &SharedState) -> CorsLayer {
+fn cors_layer() -> CorsLayer {
     CorsLayer::new()
-        .allow_origin(allowed_cors_origins(state))
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
-}
-
-/// The desktop shell's own origins. It has no network host, and these are the
-/// values its webview reports on each platform, so they are allowed wherever
-/// the server runs.
-fn is_shell_origin(origin: &str) -> bool {
-    matches!(
-        origin,
-        "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost"
-    )
-}
-
-/// Whether `origin` is a development origin: the app served from a loopback
-/// address or from a private network address.
-///
-/// Both schemes are accepted, because browsers only expose WebCrypto on a
-/// secure context and refusing `https` would force developers onto an origin
-/// where the app cannot run.
-fn is_local_dev_origin(origin: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(origin) else {
-        return false;
-    };
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return false;
-    }
-    let Some(host) = parsed.host_str() else {
-        return false;
-    };
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    match host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
-        Ok(IpAddr::V4(v4)) => v4.is_private() || v4.is_loopback(),
-        Ok(IpAddr::V6(v6)) => v6.is_loopback(),
-        Err(_) => false,
-    }
-}
-
-/// Development origins are a convenience for a machine you already control.
-/// A deployed server has no reason to answer them, so they are switched off
-/// whenever `PRODUCTION` is set, the same signal `load_config` reads.
-fn dev_origins_allowed() -> bool {
-    std::env::var("PRODUCTION").is_err()
-}
-
-fn allowed_cors_origins(state: &SharedState) -> AllowOrigin {
-    let configured_origins: Vec<HeaderValue> = [
-        state.config.api.public_domain.trim(),
-        state.config.api.domain.trim(),
-    ]
-    .into_iter()
-    .filter(|o| !o.is_empty())
-    .flat_map(|o| {
-        if o.starts_with("http://") || o.starts_with("https://") {
-            vec![o.to_owned()]
-        } else {
-            vec![format!("https://{o}"), format!("http://{o}")]
-        }
-    })
-    .filter_map(|o| o.parse().ok())
-    .collect();
-    let allow_dev = dev_origins_allowed();
-
-    AllowOrigin::predicate(move |origin: &HeaderValue, _parts: &axum::http::request::Parts| {
-        if configured_origins
-            .iter()
-            .any(|o| o.as_bytes() == origin.as_bytes())
-        {
-            return true;
-        }
-        let Ok(value) = origin.to_str() else {
-            return false;
-        };
-        if is_shell_origin(value) {
-            return true;
-        }
-        allow_dev && is_local_dev_origin(value)
-    })
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any)
+        .expose_headers(Any)
 }
 
 #[derive(Debug, Deserialize)]
