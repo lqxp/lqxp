@@ -22,7 +22,13 @@ const MAX_ENV_PER_SLOT: usize = 16;
 const MAX_TOTAL_ENVELOPES: usize = 100_000;
 const MAX_SLOTS_PER_POLL: usize = 64;
 const MAX_WANT: usize = 8;
-const MAX_CT_LEN: usize = 8 * 1024;
+/// Plafond par enveloppe (base64 du ct) : doit couvrir le plus grand bucket.
+/// Bucket 65536 → 1088 (ML-KEM-768) + 12 (IV) + 65536 + 16 (tag) = 66652
+/// octets → ~88872 en base64. Un plafond plus bas (ex. 8 Ko) rejetterait
+/// TOUTES les demandes signées (la seule signature ML-DSA-65 fait déjà
+/// 3309 octets). Le budget mémoire global reste borné par MAX_TOTAL_BYTES.
+/// (INV : toute intro/welcome signée dépasse le bucket 4096.)
+const MAX_CT_LEN: usize = 96 * 1024;
 const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_GATE_TOKEN_LEN: usize = 4096;
 const VALID_BUCKETS: &[u32] = &[4096, 16384, 65536];

@@ -35,7 +35,7 @@ pub fn build_router(state: SharedState) -> Router {
     // L'auth se fait par Bearer token (pas de cookies), donc `Any` suffit
     // et le shell Tauri, le dev local et n'importe quel domaine passent.
     let private = Router::new()
-        .route("/app", get(webchat_page))
+        .route("/app", get(app_index_redirect))
         .route("/app/", get(webchat_page))
         .route("/app/uploads/*path", get(upload_asset))
         .route("/app/*path", get(app_asset))
@@ -781,6 +781,14 @@ async fn latest_release_handler(State(state): State<SharedState>) -> Response {
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
+/// Le build client utilise une base relative (`./`) : sans slash final, les
+/// assets se résolvent vers `/assets/*` au lieu de `/app/assets/*` et l'app
+/// reste blanche. Redirige `/app` vers `/app/` (le fragment `#/...` du
+/// routeur est conservé par le navigateur).
+async fn app_index_redirect() -> impl IntoResponse {
+    axum::response::Redirect::permanent("/app/")
+}
+
 async fn webchat_page(State(state): State<SharedState>, headers: HeaderMap) -> impl IntoResponse {
     let path =
         PathBuf::from(&state.config.network.public_dir).join(&state.config.network.webchat_index);
@@ -889,7 +897,7 @@ fn escape_for_inline_script(json: &str) -> String {
         .replace('\u{2029}', "\\u2029")
 }
 
-const APP_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+const APP_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; object-src 'self' blob:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 async fn serve_webchat_index(path: &Path, origin: Option<&str>, state: &SharedState) -> Response {
     match fs::read_to_string(path).await {
