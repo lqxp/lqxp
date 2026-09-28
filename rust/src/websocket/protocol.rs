@@ -130,6 +130,7 @@ pub async fn process_message(
         19 => toggle_message_reaction(&state, &session_id, payload.d).await,
         53 => vote_poll(&state, &session_id, payload.d).await,
         55 => relay_room_signal(&state, &session_id, payload.d).await,
+        60 => relay_cloud_sync_op(&state, &session_id, payload.d).await,
         21 => delete_message(&state, &session_id, payload.d).await,
         29 => edit_message(&state, &session_id, payload.d).await,
         28 => request_link_preview(&state, &session_id, payload.d).await,
@@ -4273,6 +4274,59 @@ async fn dispatch_room_history(
 
 const MAX_POLL_OPTIONS: usize = 10;
 const MAX_ROOM_SIGNAL_BYTES: usize = 64 * 1024;
+const MAX_CLOUD_SYNC_BYTES: usize = 64 * 1024;
+
+/// QxCloudSync: opaque, end-to-end encrypted sync payloads relayed to the other
+/// sessions of the SAME user_id. Nothing is stored, nothing is read, nothing is
+/// logged. The server only checks: identified session, rate limit, opaque object
+/// shape and byte cap, then fan-outs to sibling sessions. All authentication
+/// (recovery-word derived HMAC) and confidentiality (syncEpochKey) are verified
+/// and enforced client-side only.
+async fn relay_cloud_sync_op(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("cloud_sync:session:{session_id}"), 30, 10_000).await {
+        return respond_error(state, session_id, 60, "Rate limit exceeded", req_id).await;
+    }
+    let Some(encrypted) = d.get("encrypted").filter(|v| v.is_object()).cloned() else {
+        return respond_error(state, session_id, 60, "Missing payload", req_id).await;
+    };
+    if encrypted.to_string().len() > MAX_CLOUD_SYNC_BYTES {
+        return respond_error(state, session_id, 60, "Payload too large", req_id).await;
+    }
+    let to_client_id = sanitize_client_id(d.get("toClientId").and_then(Value::as_str));
+    let (from_client_id, recipients) = {
+        let players = state.players.read().await;
+        let Some(sender) = players.get(session_id) else {
+            return respond_error(state, session_id, 60, "You need to be identified before", req_id).await;
+        };
+        if sender.user_id.trim().is_empty() || sender.username.is_empty() {
+            return respond_error(state, session_id, 60, "You need to be identified before", req_id).await;
+        }
+        let recipients = players
+            .iter()
+            .filter(|(id, player)| {
+                id.as_str() != session_id
+                    && player.user_id == sender.user_id
+                    && (to_client_id.is_empty() || player.client_id == to_client_id)
+            })
+            .map(|(_, player)| player.tx.clone())
+            .collect::<Vec<_>>();
+        (sender.client_id.clone(), recipients)
+    };
+    let payload = json!({ "op": 61, "d": { "fromClientId": from_client_id, "toClientId": to_client_id, "encrypted": encrypted } }).to_string();
+    for tx in recipients {
+        let _ = tx.try_send(Message::Text(payload.clone()));
+    }
+    if req_id.is_some() {
+        respond_to_sender(
+            state,
+            session_id,
+            with_request_id(json!({ "op": 60, "d": { "ok": true } }), req_id),
+        )
+        .await;
+    }
+    false
+}
 
 /// Opaque, end-to-end encrypted payloads (whiteboard strokes) relayed to the other
 /// members of a room. Nothing is stored and nothing is read.
