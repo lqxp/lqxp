@@ -449,6 +449,83 @@ pub fn init_tracing() {
         .init();
 }
 
+
+/// Surcouches d'environnement pour `[rtc]`.
+///
+/// `files/config.custom.toml` est volontairement gitignoré (il contient le
+/// secret TURN) : les images Docker / CI n'en ont donc jamais. Sans ces
+/// variables, un déploiement frais retombe sur `config.{dev,prod}.toml` sans
+/// TURN et les clients affichent "Calls are disabled until TURN URLs are
+/// configured". Les variables (jamais journalisées en valeur) :
+/// - `QXP_TURN_URLS` : liste séparée par des virgules, promeut un serveur
+///   "legacy" (ex. `turn:host:3478?transport=udp,turns:host:5349?transport=tcp`)
+/// - `QXP_TURN_USERNAME` / `QXP_TURN_CREDENTIAL` : credential du serveur legacy
+/// - `QXP_RELAY_ONLY` : `1`/`true` ou `0`/`false`
+fn apply_rtc_env_overrides(rtc: &mut RtcConfig) {
+    let urls: Vec<String> = std::env::var("QXP_TURN_URLS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !urls.is_empty() {
+        rtc.turn_urls = urls;
+    }
+    if let Ok(username) = std::env::var("QXP_TURN_USERNAME") {
+        if !username.trim().is_empty() {
+            rtc.turn_username = username;
+        }
+    }
+    if let Ok(credential) = std::env::var("QXP_TURN_CREDENTIAL") {
+        if !credential.trim().is_empty() {
+            rtc.turn_credential = credential;
+        }
+    }
+    if let Ok(raw) = std::env::var("QXP_RELAY_ONLY") {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" => rtc.relay_only = true,
+            "0" | "false" | "no" => rtc.relay_only = false,
+            _ => {}
+        }
+    }
+}
+
+/// Résumé RTC au démarrage : comptes et ids uniquement, jamais les secrets.
+/// Visible en `info`, donc aussi en `RUST_LOG=debug` (mode debug demandé).
+fn log_rtc_summary(rtc: &RtcConfig) {
+    let servers = rtc.resolved_servers();
+    let ids: Vec<String> = servers
+        .iter()
+        .map(|s| {
+            let kinds: Vec<&str> = s
+                .urls
+                .iter()
+                .map(|u| {
+                    if u.starts_with("turns:") {
+                        "turns"
+                    } else if u.starts_with("turn:") {
+                        "turn"
+                    } else if u.starts_with("stun:") {
+                        "stun"
+                    } else {
+                        "?"
+                    }
+                })
+                .collect();
+            format!("{}(urls:{})", s.id, kinds.join("+"))
+        })
+        .collect();
+    info!(
+        "RTC: {} serveur(s) [{}], relayOnly={}, credentials={} (env QXP_TURN_*: {})",
+        servers.len(),
+        ids.join(", "),
+        rtc.relay_only,
+        !rtc.turn_credential.is_empty()
+            || servers.iter().any(|s| !s.credential.is_empty()),
+        !std::env::var("QXP_TURN_URLS").unwrap_or_default().is_empty()
+    );
+}
+
 pub fn project_root() -> PathBuf {
     if let Some(root) = std::env::var_os("QXP_ROOT") {
         let root = PathBuf::from(root);
@@ -477,16 +554,33 @@ pub async fn load_config() -> Result<Config, ConfigError> {
 
     let default_path = resolve_project_path(format!("files/config.{}.toml", env));
     let custom_path = resolve_project_path("files/config.custom.toml");
-    let config_path = if custom_path.exists() {
-        custom_path
+    let example_path = resolve_project_path("files/config.example.toml");
+    // Chaîne de repli : custom (gitignoré, secrets) → config.{dev,prod}.toml →
+    // config.example.toml (dernier recours, typique des images Docker qui ne
+    // contiennent qu'elle ; les secrets arrivent alors par QXP_TURN_*).
+    // Seule l'absence des trois fichiers est une erreur dure.
+    let (config_path, is_example_fallback) = if custom_path.exists() {
+        (custom_path, false)
+    } else if default_path.exists() {
+        (default_path, false)
     } else {
-        default_path
+        warn!(
+            "Ni {} ni {} : repli sur {} (pensez QXP_TURN_* pour le TURN)",
+            custom_path.display(),
+            default_path.display(),
+            example_path.display()
+        );
+        (example_path, true)
     };
+    if is_example_fallback {
+        warn!("Configuration d'exemple : ne pas utiliser en production sans QXP_TURN_* ni [security].adminIds.");
+    }
 
     match fs::read_to_string(&config_path).await {
         Ok(raw) => match toml::from_str::<Config>(&raw) {
             Ok(mut config) => {
                 config.web.revision()?;
+                apply_rtc_env_overrides(&mut config.rtc);
                 if !config.api.admin_password_deprecated.trim().is_empty() {
                     warn!(
                         "Config {} sets [api].adminPassword, which is ignored (use [security].adminIds). Remove it.",
@@ -512,6 +606,7 @@ pub async fn load_config() -> Result<Config, ConfigError> {
                     project_root().display(),
                     std::env::var("PRODUCTION").is_ok()
                 );
+                log_rtc_summary(&config.rtc);
                 if config.database.url.starts_with("sqlite") {
                     info!("Base de données: {}", config.database.url);
                 }

@@ -84,10 +84,32 @@ lives in client IndexedDB (`qxcloudsync-v1`), beyond the 500/room
 localStorage cap. Sync pauses under client-lock, RAM-only OPSEC, or decoy.
 
 ## 9.4 Event propagation
-
 Snapshots are full-state and idempotent, but they are not only periodic:
 `persist()` itself notifies subscribers (internal mutation calls included),
 coalesced into one push 2.5 s after the last change. Out-of-band stores
 (custom theme, locale) are observed with synchronous watchers. Applying a
 remote snapshot never re-notifies (internal guard), so there is no echo loop.
 The 90 s timer remains as a safety net.
+
+## 9.5 Security properties (audited)
+
+- **Quantum-proof (hybrid):** KEX = ECDH P-256 + 2× ML-KEM-768 (FIPS 203),
+  safe via the ML-KEM component; identity = ECDSA P-256 + SLH-DSA-SHA2-128f
+  (FIPS 205), both required; session data = AES-256-GCM (≈128-bit PQ margin).
+- **Transcript integrity:** the KDF transcript is hashed over canonical JSON
+  (sorted keys), never `JSON.stringify` — the server re-serializes in sorted
+  order, so a naive hash would diverge per side.
+- **Anti-replay:** per-peer `(syncId, epoch)` window with monotonic high-water
+  (tolerance 5000 for reordering) plus a bounded dedup set (6000 entries,
+  pruned). Survives restarts via the persisted `sendN`; LWW merge makes
+  residual replays harmless.
+- **At rest:** without client lock, session blobs are AES-GCM under a
+  syncRoot-derived key (device boundary, same as the stored recovery words).
+  With client lock active, sessions and the SLH-DSA identity rest only under
+  AES-GCM envelopes keyed by the lock key; locking wipes all RAM secrets
+  (masters, epoch keys, syncRoot, SLH cache) and never downgrades envelopes.
+- **Residual (accepted):** hello replay is a bounded nuisance (server rate
+  30/10 s, 5 recent pendings max, 120 s sweep); the server observes timing,
+  frame counts and approximate sizes (no padding to fixed buckets, unlike
+  PHANTOM); PBKDF2-100k for the master follows the pre-existing PHANTOM
+  parameters.

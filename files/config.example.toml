@@ -24,6 +24,17 @@ uploadPublicBase = "/app/uploads"
 
 relayOnly = true
 
+# ── TURN via environment (Docker / CI friendly) ──────────────────────
+# files/config.custom.toml is gitignored on purpose (TURN credential inside),
+# so images never carry it. As an alternative to the file below, export:
+#   QXP_TURN_URLS="turn:relay.example:3478?transport=udp,turns:relay.example:5349?transport=tcp"
+#   QXP_TURN_USERNAME="user"
+#   QXP_TURN_CREDENTIAL="secret"
+#   QXP_RELAY_ONLY="1"
+# Env vars win over the file. Without either source the server serves an
+# empty TURN list and clients display
+# "Calls are disabled until TURN URLs are configured."
+
 # ── Multi-server TURN (recommended) ──────────────────────────────────
 # Define one [[rtc.servers]] block per relay.  The client can choose
 # which server to use per call from the Settings > Calls panel.

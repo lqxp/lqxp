@@ -9,6 +9,12 @@ services:
     environment:
       PRODUCTION: "1"
       RUST_LOG: info
+      # TURN without files/config.custom.toml (gitignored): uncomment and fill
+      # from your secrets manager. Env wins over the [rtc] file values.
+      # QXP_TURN_URLS: "turn:relay.example:3478?transport=udp,turns:relay.example:5349?transport=tcp"
+      # QXP_TURN_USERNAME: "user"
+      # QXP_TURN_CREDENTIAL: "secret"
+      # QXP_RELAY_ONLY: "1"
     volumes:
       - ./files/config.custom.toml:/app/files/config.custom.toml:ro
       - ./files/qxp.sqlite:/app/files/qxp.sqlite

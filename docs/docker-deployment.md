@@ -33,6 +33,24 @@ Set at least:
 
 The container starts with `PRODUCTION=1`, so the server prefers `files/config.custom.toml` when present.
 
+### TURN without the custom file (env vars)
+
+`files/config.custom.toml` is gitignored (it holds the TURN credential), so
+fresh checkouts and CI builds never contain it. If the file is absent you can
+pass TURN through the environment instead — this is what prevents the client
+message "Calls are disabled until TURN URLs are configured.":
+
+```bash
+QXP_TURN_URLS="turn:relay.example:3478?transport=udp,turns:relay.example:5349?transport=tcp"
+QXP_TURN_USERNAME="user"
+QXP_TURN_CREDENTIAL="secret"
+QXP_RELAY_ONLY="1"
+```
+
+Env vars override the `[rtc]` file values. Startup logs a secret-free
+summary (`RTC: N serveur(s) [...]`) — check it with `docker compose logs
+lqxp | grep RTC` (visible also with `RUST_LOG=debug`).
+
 ## 2. Build and start
 
 ```bash
