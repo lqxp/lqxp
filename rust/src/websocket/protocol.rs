@@ -5531,3 +5531,367 @@ fn jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32), &'static str> {
     }
     Err("JPEG dimensions are invalid")
 }
+
+#[cfg(test)]
+mod sync_relay_tests {
+    use super::*;
+    use crate::core::config::{Config, DatabaseConfig};
+    use crate::core::database::{AccountDatabase, RoomDatabase};
+    use crate::core::models::{now_ms, UserPresenceStatus, UserProfile};
+    use crate::core::presence::{AppState, PlayerSession, RuntimeCounters};
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::{mpsc, Mutex, RwLock};
+
+    async fn test_state() -> SharedState {
+        let dir = std::env::temp_dir().join(format!("lqxp-sync-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temporary test dir");
+        let url = format!("sqlite://{}/test.sqlite?mode=rwc", dir.display());
+        let db_cfg = DatabaseConfig {
+            kind: "sqlite".to_owned(),
+            url,
+            create_if_missing: true,
+        };
+        let accounts = AccountDatabase::connect(&db_cfg, vec![], true)
+            .await
+            .expect("connect test accounts db");
+        let database = RoomDatabase::connect(&db_cfg)
+            .await
+            .expect("connect test room db");
+        Arc::new(AppState {
+            config: Config::default(),
+            started_at_ms: now_ms(),
+            runtime: Arc::new(RuntimeCounters::default()),
+            blocklist_terms: Arc::new(vec![]),
+            players: Arc::new(RwLock::new(HashMap::new())),
+            room_messages: Arc::new(RwLock::new(HashMap::new())),
+            database: Arc::new(database),
+            accounts: Arc::new(accounts),
+            rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            public_profile_cache: Arc::new(Mutex::new(HashMap::new())),
+            call_access_overrides: Arc::new(RwLock::new(HashSet::new())),
+            poll_tallies: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    async fn register_user(state: &SharedState, username: &str) -> String {
+        let (user, _, _) = state
+            .accounts
+            .register(username, "password123")
+            .await
+            .expect("register test user");
+        user.id
+    }
+
+    async fn insert_session(
+        state: &SharedState,
+        sid: &str,
+        user_id: &str,
+        username: &str,
+        client_id: &str,
+    ) -> mpsc::Receiver<Message> {
+        let (tx, rx) = mpsc::channel::<Message>(512);
+        let mut players = state.players.write().await;
+        players.insert(
+            sid.to_owned(),
+            PlayerSession {
+                id: sid.to_owned(),
+                user_id: user_id.to_owned(),
+                is_admin: false,
+                badges: Vec::new(),
+                username: username.to_owned(),
+                tx,
+                rooms: HashSet::new(),
+                is_voice_chat: false,
+                call_room: None,
+                call_camera: false,
+                call_screen: false,
+                call_deafened: false,
+                client_id: client_id.to_owned(),
+                platform: "web".to_owned(),
+                version: "test".to_owned(),
+                last_message_timestamp: None,
+                is_mobile: None,
+                is_secure: None,
+                muted_users: HashSet::new(),
+                delete_messages_on_leave: false,
+                profile: UserProfile::default(),
+                status: UserPresenceStatus::Online,
+                identified_at_ms: 0,
+                last_revalidation_ms: 0,
+            },
+        );
+        rx
+    }
+
+    async fn sender_tx(state: &SharedState, sid: &str) -> mpsc::Sender<Message> {
+        let players = state.players.read().await;
+        players.get(sid).expect("sender session").tx.clone()
+    }
+
+    async fn recv_json(rx: &mut mpsc::Receiver<Message>) -> Value {
+        let msg = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .expect("timed out waiting for message")
+            .expect("channel closed");
+        match msg {
+            Message::Text(text) => serde_json::from_str(&text).expect("valid json"),
+            other => panic!("expected text message, got {other:?}"),
+        }
+    }
+
+    fn expect_no_message(rx: &mut mpsc::Receiver<Message>) {
+        assert!(
+            rx.try_recv().is_err(),
+            "expected no message but one was queued"
+        );
+    }
+
+    async fn sync_mesh() -> (SharedState, String, String) {
+        let state = test_state().await;
+        let alice = register_user(&state, "alice_sync").await;
+        let bob = register_user(&state, "bob_sync").await;
+        (state, alice, bob)
+    }
+
+    #[tokio::test]
+    async fn broadcast_fanout_reaches_same_user_only() {
+        let (state, alice, bob) = sync_mesh().await;
+        let mut rx_a1 = insert_session(&state, "s-a1", &alice, "alice_sync", "clientA").await;
+        let mut rx_a2 = insert_session(&state, "s-a2", &alice, "alice_sync", "clientB").await;
+        let mut rx_b = insert_session(&state, "s-b", &bob, "bob_sync", "clientC").await;
+
+        let tx = sender_tx(&state, "s-a1").await;
+        process_message(
+            state.clone(),
+            "s-a1".to_owned(),
+            tx,
+            r#"{"op":60,"d":{"toClientId":"","encrypted":{"kind":"ping"},"requestId":"r1"}}"#.to_owned(),
+        )
+        .await;
+
+        let fwd: Value = recv_json(&mut rx_a2).await;
+        assert_eq!(fwd["op"], 61);
+        assert_eq!(fwd["d"]["fromClientId"], "clientA");
+        assert_eq!(fwd["d"]["toClientId"], "");
+        assert_eq!(fwd["d"]["encrypted"]["kind"], "ping");
+        expect_no_message(&mut rx_b);
+
+        let ack: Value = recv_json(&mut rx_a1).await;
+        assert_eq!(ack["op"], 60);
+        assert_eq!(ack["d"]["ok"], true);
+        assert_eq!(ack["d"]["requestId"], "r1");
+        assert_eq!(ack["d"]["delivered"], 1);
+        assert_eq!(ack["d"]["dropped"], 0);
+        assert_eq!(ack["d"]["peerCount"], 1);
+        assert_eq!(ack["d"]["peers"], json!(["clientB"]));
+    }
+
+    #[tokio::test]
+    async fn unicast_routing_and_stale_target_report() {
+        let (state, alice, _) = sync_mesh().await;
+        let mut rx_a1 = insert_session(&state, "s-a1", &alice, "alice_sync", "clientA").await;
+        let mut rx_a2 = insert_session(&state, "s-a2", &alice, "alice_sync", "clientB").await;
+
+        // Live unicast reaches exactly one peer.
+        let tx = sender_tx(&state, "s-a1").await;
+        process_message(
+            state.clone(),
+            "s-a1".to_owned(),
+            tx,
+            r#"{"op":60,"d":{"toClientId":"clientB","encrypted":{"kind":"ping"},"requestId":"u1"}}"#.to_owned(),
+        )
+        .await;
+        let fwd: Value = recv_json(&mut rx_a2).await;
+        assert_eq!(fwd["d"]["toClientId"], "clientB");
+        let ack: Value = recv_json(&mut rx_a1).await;
+        assert_eq!(ack["d"]["delivered"], 1);
+        assert_eq!(ack["d"]["peers"], json!(["clientB"]));
+
+        // Stale target: zero recipients, but the ack says so.
+        let tx = sender_tx(&state, "s-a1").await;
+        process_message(
+            state.clone(),
+            "s-a1".to_owned(),
+            tx,
+            r#"{"op":60,"d":{"toClientId":"ghost","encrypted":{"kind":"ping"},"requestId":"u2"}}"#.to_owned(),
+        )
+        .await;
+        let ack: Value = recv_json(&mut rx_a1).await;
+        assert_eq!(ack["d"]["ok"], true);
+        assert_eq!(ack["d"]["delivered"], 0);
+        assert_eq!(ack["d"]["dropped"], 0);
+        assert_eq!(ack["d"]["peers"], json!([]));
+        assert_eq!(ack["d"]["peerCount"], 1);
+        expect_no_message(&mut rx_a2);
+    }
+
+    #[tokio::test]
+    async fn rejects_unidentified_unroutable_and_oversize() {
+        let (state, alice, _) = sync_mesh().await;
+        let mut rx_raw = insert_session(&state, "s-raw", "", "", "").await;
+        let tx = sender_tx(&state, "s-raw").await;
+        process_message(
+            state.clone(),
+            "s-raw".to_owned(),
+            tx,
+            r#"{"op":60,"d":{"toClientId":"","encrypted":{"kind":"ping"},"requestId":"e1"}}"#.to_owned(),
+        )
+        .await;
+        let err: Value = recv_json(&mut rx_raw).await;
+        assert_eq!(err["d"]["error"], "You need to be identified before");
+
+        // Identified but no clientId: no return address, no mesh.
+        let mut rx_nc = insert_session(&state, "s-nc", &alice, "alice_sync", "").await;
+        let tx = sender_tx(&state, "s-nc").await;
+        process_message(
+            state.clone(),
+            "s-nc".to_owned(),
+            tx,
+            r#"{"op":60,"d":{"toClientId":"","encrypted":{"kind":"ping"},"requestId":"e2"}}"#.to_owned(),
+        )
+        .await;
+        let err: Value = recv_json(&mut rx_nc).await;
+        assert_eq!(err["d"]["error"], "Missing clientId");
+
+        // Missing / oversize payloads.
+        let mut rx_a = insert_session(&state, "s-a", &alice, "alice_sync", "clientA").await;
+        let tx = sender_tx(&state, "s-a").await;
+        process_message(
+            state.clone(),
+            "s-a".to_owned(),
+            tx,
+            r#"{"op":60,"d":{"toClientId":"","requestId":"e3"}}"#.to_owned(),
+        )
+        .await;
+        let err: Value = recv_json(&mut rx_a).await;
+        assert_eq!(err["d"]["error"], "Missing payload");
+
+        let big = "x".repeat(70 * 1024);
+        let tx = sender_tx(&state, "s-a").await;
+        process_message(
+            state.clone(),
+            "s-a".to_owned(),
+            tx,
+            json!({"op":60,"d":{"toClientId":"","encrypted":{"blob":big},"requestId":"e4"}}).to_string(),
+        )
+        .await;
+        let err: Value = recv_json(&mut rx_a).await;
+        assert_eq!(err["d"]["error"], "Payload too large");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_holds_at_120_per_10s() {
+        let (state, alice, _) = sync_mesh().await;
+        let mut rx_a = insert_session(&state, "s-a", &alice, "alice_sync", "clientA").await;
+        for _ in 0..120 {
+            let tx = sender_tx(&state, "s-a").await;
+            process_message(
+                state.clone(),
+                "s-a".to_owned(),
+                tx,
+                r#"{"op":60,"d":{"toClientId":"","encrypted":{"kind":"ping"}}}"#.to_owned(),
+            )
+            .await;
+        }
+        expect_no_message(&mut rx_a);
+        let tx = sender_tx(&state, "s-a").await;
+        process_message(
+            state.clone(),
+            "s-a".to_owned(),
+            tx,
+            r#"{"op":60,"d":{"toClientId":"","encrypted":{"kind":"ping"}}}"#.to_owned(),
+        )
+        .await;
+        let err: Value = recv_json(&mut rx_a).await;
+        assert_eq!(err["op"], 60);
+        assert_eq!(err["d"]["error"], "Rate limit exceeded");
+    }
+
+    #[tokio::test]
+    async fn peers_directory_lists_routable_siblings_sorted() {
+        let (state, alice, _) = sync_mesh().await;
+        let mut rx_a = insert_session(&state, "s-a", &alice, "alice_sync", "clientB").await;
+        insert_session(&state, "s-a2", &alice, "alice_sync", "clientA").await;
+        insert_session(&state, "s-a3", &alice, "alice_sync", "").await;
+
+        let tx = sender_tx(&state, "s-a").await;
+        process_message(
+            state.clone(),
+            "s-a".to_owned(),
+            tx,
+            r#"{"op":62,"d":{"requestId":"p1"}}"#.to_owned(),
+        )
+        .await;
+        let res: Value = recv_json(&mut rx_a).await;
+        assert_eq!(res["op"], 62);
+        assert_eq!(res["d"]["ok"], true);
+        assert_eq!(res["d"]["self"], "clientB");
+        // Self excluded, empty-clientId session omitted.
+        assert_eq!(res["d"]["peers"], json!([{"clientId":"clientA","platform":"web"}]));
+    }
+
+    #[tokio::test]
+    async fn presence_events_fan_out_to_siblings() {
+        let (state, alice, bob) = sync_mesh().await;
+        let mut rx_a1 = insert_session(&state, "s-a1", &alice, "alice_sync", "clientA").await;
+        let mut rx_a2 = insert_session(&state, "s-a2", &alice, "alice_sync", "clientB").await;
+        let mut rx_b = insert_session(&state, "s-b", &bob, "bob_sync", "clientC").await;
+
+        broadcast_sync_peer_event(&state, &alice, "join", "clientZ", "mobile", Some("s-a1")).await;
+        let ev: Value = recv_json(&mut rx_a2).await;
+        assert_eq!(ev["op"], 63);
+        assert_eq!(ev["d"]["event"], "join");
+        assert_eq!(ev["d"]["clientId"], "clientZ");
+        assert_eq!(ev["d"]["platform"], "mobile");
+        expect_no_message(&mut rx_a1);
+        expect_no_message(&mut rx_b);
+
+        broadcast_sync_peer_leave(&state, &alice, "clientB", "web").await;
+        let ev: Value = recv_json(&mut rx_a1).await;
+        assert_eq!(ev["d"]["event"], "leave");
+        assert_eq!(ev["d"]["clientId"], "clientB");
+    }
+
+    #[tokio::test]
+    async fn identify_announces_join_once_per_client_id() {
+        let (state, alice, _) = sync_mesh().await;
+        let mut rx_a1 = insert_session(&state, "s-a1", &alice, "alice_sync", "clientA").await;
+        let mut rx_new = insert_session(&state, "s-new", "", "", "").await;
+
+        let token = state
+            .accounts
+            .create_session(&alice)
+            .await
+            .expect("create test session token");
+        let tx = sender_tx(&state, "s-new").await;
+        process_message(
+            state.clone(),
+            "s-new".to_owned(),
+            tx,
+            json!({"op":2,"d":{"token":token,"clientId":"clientZ","platform":"mobile","requestId":"i1"}}).to_string(),
+        )
+        .await;
+        // Identify response to the newcomer.
+        let idr: Value = recv_json(&mut rx_new).await;
+        assert_eq!(idr["op"], 2);
+        // Sibling sees exactly one join event.
+        let ev: Value = recv_json(&mut rx_a1).await;
+        assert_eq!(ev["op"], 63);
+        assert_eq!(ev["d"]["event"], "join");
+        assert_eq!(ev["d"]["clientId"], "clientZ");
+
+        // Re-identify with the same clientId stays silent.
+        let tx = sender_tx(&state, "s-new").await;
+        process_message(
+            state.clone(),
+            "s-new".to_owned(),
+            tx,
+            json!({"op":2,"d":{"token":token,"clientId":"clientZ","platform":"mobile","requestId":"i2"}}).to_string(),
+        )
+        .await;
+        let _ = recv_json(&mut rx_new).await;
+        expect_no_message(&mut rx_a1);
+    }
+}
