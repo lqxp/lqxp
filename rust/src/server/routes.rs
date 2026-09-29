@@ -921,7 +921,7 @@ fn escape_for_inline_script(json: &str) -> String {
         .replace('\u{2029}', "\\u2029")
 }
 
-const APP_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://img.shields.io; media-src 'self' blob:; object-src 'self' blob:; connect-src 'self' ws: wss: https://api.github.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+const APP_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://img.shields.io https://avatars.githubusercontent.com; media-src 'self' blob:; object-src 'self' blob:; connect-src 'self' ws: wss: https://api.github.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 async fn serve_webchat_index(path: &Path, origin: Option<&str>, state: &SharedState) -> Response {
     match fs::read_to_string(path).await {
