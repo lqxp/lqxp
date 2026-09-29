@@ -179,6 +179,19 @@ pub async fn disconnect_player(state: &SharedState, session_id: &str) {
         return;
     };
 
+    // QxCloudSync mesh presence: tell the remaining siblings this routable
+    // peer is gone so they mark the leg stale and re-handshake on return
+    // instead of pushing into the void.
+    if !player.user_id.is_empty() && !player.client_id.is_empty() {
+        protocol::broadcast_sync_peer_leave(
+            state,
+            &player.user_id,
+            &player.client_id,
+            &player.platform,
+        )
+        .await;
+    }
+
     let username = player.username.clone();
 
     for game_id in &player.rooms {

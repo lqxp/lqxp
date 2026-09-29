@@ -132,6 +132,7 @@ pub async fn process_message(
         55 => relay_room_signal(&state, &session_id, payload.d).await,
         57 => delete_room_op(&state, &session_id, payload.d).await,
         60 => relay_cloud_sync_op(&state, &session_id, payload.d).await,
+        62 => sync_peers_op(&state, &session_id, payload.d).await,
         21 => delete_message(&state, &session_id, payload.d).await,
         29 => edit_message(&state, &session_id, payload.d).await,
         28 => request_link_preview(&state, &session_id, payload.d).await,
@@ -235,7 +236,7 @@ async fn identify_player(state: &SharedState, session_id: &str, d: Value) -> boo
         }
     }
 
-    let (final_username, account_id, is_admin, profile, status) = {
+    let (final_username, account_id, is_admin, profile, status, prev_client_id, new_client_id, new_platform) = {
         let mut players = state.players.write().await;
         let Some(player) = players.get_mut(session_id) else {
             return false;
@@ -258,6 +259,7 @@ async fn identify_player(state: &SharedState, session_id: &str, d: Value) -> boo
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_owned();
+        let prev_client_id = player.client_id.clone();
         player.client_id = sanitize_client_id(d.get("clientId").and_then(Value::as_str));
         player.platform = sanitize_platform(d.get("platform").and_then(Value::as_str));
         player.is_mobile = d.get("isMobile").and_then(Value::as_bool);
@@ -273,6 +275,9 @@ async fn identify_player(state: &SharedState, session_id: &str, d: Value) -> boo
             player.is_admin,
             player.profile.clone(),
             player.status,
+            prev_client_id,
+            player.client_id.clone(),
+            player.platform.clone(),
         )
     };
 
@@ -298,6 +303,22 @@ async fn identify_player(state: &SharedState, session_id: &str, d: Value) -> boo
         ),
     )
     .await;
+
+    // QxCloudSync mesh presence: a newly routable peer announces itself to its
+    // siblings so a 3+ device mesh discovers joins instantly instead of waiting
+    // for a broadcast-hello round trip. Re-identifies with an unchanged
+    // clientId stay silent to avoid handshake storms on token refresh.
+    if !new_client_id.is_empty() && prev_client_id != new_client_id {
+        broadcast_sync_peer_event(
+            state,
+            &account_id,
+            "join",
+            &new_client_id,
+            &new_platform,
+            Some(session_id),
+        )
+        .await;
+    }
 
     false
 }
@@ -605,6 +626,8 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
         if let Some(player) = players.get_mut(session_id) {
             let previous_status = player.status;
             let previous_voice_chat = player.is_voice_chat;
+            let previous_client_id = player.client_id.clone();
+            let previous_platform = player.platform.clone();
             if let Some(client_id) = d.get("clientId").and_then(Value::as_str) {
                 player.client_id = sanitize_client_id(Some(client_id));
             }
@@ -634,6 +657,8 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
                 previous_voice_chat,
                 player.client_id.clone(),
                 player.platform.clone(),
+                previous_client_id,
+                previous_platform,
                 player.rooms.iter().cloned().collect::<Vec<_>>(),
             ))
         } else {
@@ -650,6 +675,8 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
         previous_voice_chat,
         client_id,
         platform,
+        previous_client_id,
+        previous_platform,
         rooms,
     ) = match update_context {
         Ok(context) => context,
@@ -781,6 +808,15 @@ async fn update_client_settings(state: &SharedState, session_id: &str, d: Value)
                 .await;
             }
         }
+    }
+
+    // QxCloudSync mesh presence: a clientId rotation (reinstall, new tab id)
+    // changes the unicast return address, so siblings must treat it as a new
+    // peer and re-handshake; a platform-only change just refreshes the icon.
+    if !client_id.is_empty() && client_id != previous_client_id {
+        broadcast_sync_peer_event(state, &user_id, "join", &client_id, &platform, Some(session_id)).await;
+    } else if !client_id.is_empty() && platform != previous_platform {
+        broadcast_sync_peer_event(state, &user_id, "update", &client_id, &platform, Some(session_id)).await;
     }
 
     false
@@ -4346,16 +4382,36 @@ async fn dispatch_room_history(
 const MAX_POLL_OPTIONS: usize = 10;
 const MAX_ROOM_SIGNAL_BYTES: usize = 64 * 1024;
 const MAX_CLOUD_SYNC_BYTES: usize = 64 * 1024;
+/// Burst budget for a full-mesh sync. N devices need N(N-1)/2 pairwise
+/// handshakes plus chunked snapshot floods on join; the previous 30/10s budget
+/// choked meshes of 3-4+ devices mid-handshake and the mesh never converged.
+/// 120/10s absorbs join bursts while the global WS guard (1200/60s) still caps
+/// sustained abuse.
+const CLOUD_SYNC_RATE_LIMIT: u32 = 120;
+const CLOUD_SYNC_RATE_WINDOW_MS: u64 = 10_000;
+/// Presence directory polling budget. Cheap read-only op; the cap only stops
+/// tight retry loops.
+const SYNC_PEERS_RATE_LIMIT: u32 = 15;
+const SYNC_PEERS_RATE_WINDOW_MS: u64 = 10_000;
 
 /// QxCloudSync: opaque, end-to-end encrypted sync payloads relayed to the other
 /// sessions of the SAME user_id. Nothing is stored, nothing is read, nothing is
-/// logged. The server only checks: identified session, rate limit, opaque object
-/// shape and byte cap, then fan-outs to sibling sessions. All authentication
-/// (recovery-word derived HMAC) and confidentiality (syncEpochKey) are verified
-/// and enforced client-side only.
+/// logged. The server only checks: identified session, routable clientId, rate
+/// limit, opaque object shape and byte cap, then fan-outs to sibling sessions.
+/// All authentication (recovery-word derived HMAC) and confidentiality
+/// (syncEpochKey) are verified and enforced client-side only.
+///
+/// Mesh behaviour (N >= 3 devices):
+/// - The ack reports delivery (`delivered` / `dropped` / `peers` /
+///   `peerCount`) so the sender can heal a stale unicast route immediately:
+///   a unicast frame with `delivered == 0` means the target is gone — fall
+///   back to broadcast and refresh via op 62 instead of stalling.
+/// - A sender without a `clientId` is rejected: with no return address its
+///   siblings could only answer by broadcast, which turns every handshake
+///   into a mesh-wide storm at N >= 3.
 async fn relay_cloud_sync_op(state: &SharedState, session_id: &str, d: Value) -> bool {
     let req_id = request_id(&d);
-    if rate_limit_hit(state.as_ref(), format!("cloud_sync:session:{session_id}"), 30, 10_000).await {
+    if rate_limit_hit(state.as_ref(), format!("cloud_sync:session:{session_id}"), CLOUD_SYNC_RATE_LIMIT, CLOUD_SYNC_RATE_WINDOW_MS).await {
         return respond_error(state, session_id, 60, "Rate limit exceeded", req_id).await;
     }
     let Some(encrypted) = d.get("encrypted").filter(|v| v.is_object()).cloned() else {
@@ -4365,7 +4421,7 @@ async fn relay_cloud_sync_op(state: &SharedState, session_id: &str, d: Value) ->
         return respond_error(state, session_id, 60, "Payload too large", req_id).await;
     }
     let to_client_id = sanitize_client_id(d.get("toClientId").and_then(Value::as_str));
-    let (from_client_id, recipients) = {
+    let (from_client_id, targets, peer_count) = {
         let players = state.players.read().await;
         let Some(sender) = players.get(session_id) else {
             return respond_error(state, session_id, 60, "You need to be identified before", req_id).await;
@@ -4373,30 +4429,144 @@ async fn relay_cloud_sync_op(state: &SharedState, session_id: &str, d: Value) ->
         if sender.user_id.trim().is_empty() || sender.username.is_empty() {
             return respond_error(state, session_id, 60, "You need to be identified before", req_id).await;
         }
-        let recipients = players
-            .iter()
-            .filter(|(id, player)| {
-                id.as_str() != session_id
-                    && player.user_id == sender.user_id
-                    && (to_client_id.is_empty() || player.client_id == to_client_id)
-            })
-            .map(|(_, player)| player.tx.clone())
-            .collect::<Vec<_>>();
-        (sender.client_id.clone(), recipients)
+        if sender.client_id.is_empty() {
+            return respond_error(state, session_id, 60, "Missing clientId", req_id).await;
+        }
+        let mut targets = Vec::new();
+        let mut peer_count = 0usize;
+        for (id, player) in players.iter() {
+            if id.as_str() == session_id || player.user_id != sender.user_id {
+                continue;
+            }
+            peer_count += 1;
+            if to_client_id.is_empty() || player.client_id == to_client_id {
+                targets.push((player.client_id.clone(), player.tx.clone()));
+            }
+        }
+        (sender.client_id.clone(), targets, peer_count)
     };
+    // Wire format of op 61 is unchanged: older clients keep decrypting.
     let payload = json!({ "op": 61, "d": { "fromClientId": from_client_id, "toClientId": to_client_id, "encrypted": encrypted } }).to_string();
-    for tx in recipients {
-        let _ = tx.try_send(Message::Text(payload.clone()));
+    let mut delivered = 0usize;
+    let mut dropped = 0usize;
+    let mut delivered_peers = BTreeSet::new();
+    for (client_id, tx) in targets {
+        if tx.try_send(Message::Text(payload.clone())).is_ok() {
+            delivered += 1;
+            if !client_id.is_empty() {
+                delivered_peers.insert(client_id);
+            }
+        } else {
+            // Per-session queue full (512) or receiver gone: counted, never
+            // silent — the sender retries with backoff instead of assuming
+            // delivery like the old unconditional `{ ok: true }`.
+            dropped += 1;
+        }
     }
     if req_id.is_some() {
         respond_to_sender(
             state,
             session_id,
-            with_request_id(json!({ "op": 60, "d": { "ok": true } }), req_id),
+            with_request_id(json!({ "op": 60, "d": { "ok": true, "delivered": delivered, "dropped": dropped, "peers": delivered_peers.into_iter().collect::<Vec<_>>(), "peerCount": peer_count } }), req_id),
         )
         .await;
     }
     false
+}
+
+/// QxCloudSync presence directory (op 62): list the caller's sibling sessions
+/// (same `user_id`, other WS sessions) so a mesh can discover N, notice a
+/// `toClientId` that matches nothing connected, and repair stale unicast
+/// routes without waiting for traffic. Same-user only — the server already
+/// holds this mapping in RAM, nothing new leaves the user's own mesh.
+/// Sessions without a `clientId` are not routable and are omitted on purpose.
+async fn sync_peers_op(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("sync_peers:session:{session_id}"), SYNC_PEERS_RATE_LIMIT, SYNC_PEERS_RATE_WINDOW_MS).await {
+        return respond_error(state, session_id, 62, "Rate limit exceeded", req_id).await;
+    }
+    let (self_client_id, peers) = {
+        let players = state.players.read().await;
+        let Some(me) = players.get(session_id) else {
+            return respond_error(state, session_id, 62, "You need to be identified before", req_id).await;
+        };
+        if me.user_id.trim().is_empty() || me.username.is_empty() {
+            return respond_error(state, session_id, 62, "You need to be identified before", req_id).await;
+        }
+        let mut peers = players
+            .iter()
+            .filter(|(id, player)| {
+                id.as_str() != session_id
+                    && player.user_id == me.user_id
+                    && !player.client_id.is_empty()
+            })
+            .map(|(_, player)| {
+                json!({ "clientId": player.client_id, "platform": player.platform })
+            })
+            .collect::<Vec<_>>();
+        peers.sort_by(|a, b| {
+            a.get("clientId")
+                .and_then(Value::as_str)
+                .cmp(&b.get("clientId").and_then(Value::as_str))
+        });
+        (me.client_id.clone(), peers)
+    };
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(
+            json!({ "op": 62, "d": { "ok": true, "self": self_client_id, "peers": peers } }),
+            req_id,
+        ),
+    )
+    .await;
+    false
+}
+
+/// Server → siblings mesh presence event (op 63): `{ event: "join" | "update" |
+/// "leave", clientId, platform }`. Best-effort fan-out to the other sessions
+/// of `user_id`; older clients ignore the unknown op. Lets every leg learn
+/// joins/leaves/rotations instantly and re-handshake, instead of discovering
+/// a dead route after minutes of one-way pushes into the void.
+pub async fn broadcast_sync_peer_event(
+    state: &SharedState,
+    user_id: &str,
+    event: &str,
+    client_id: &str,
+    platform: &str,
+    exclude_session: Option<&str>,
+) {
+    if user_id.trim().is_empty() || client_id.trim().is_empty() {
+        return;
+    }
+    let recipients = {
+        let players = state.players.read().await;
+        players
+            .iter()
+            .filter(|(id, player)| {
+                player.user_id == user_id
+                    && Some(id.as_str()) != exclude_session
+            })
+            .map(|(_, player)| player.tx.clone())
+            .collect::<Vec<_>>()
+    };
+    if recipients.is_empty() {
+        return;
+    }
+    let payload = json!({ "op": 63, "d": { "event": event, "clientId": client_id, "platform": platform } }).to_string();
+    for tx in recipients {
+        let _ = tx.try_send(Message::Text(payload.clone()));
+    }
+}
+
+/// Presence `leave` emitted from the disconnect path (`websocket/mod.rs`).
+pub async fn broadcast_sync_peer_leave(
+    state: &SharedState,
+    user_id: &str,
+    client_id: &str,
+    platform: &str,
+) {
+    broadcast_sync_peer_event(state, user_id, "leave", client_id, platform, None).await;
 }
 
 /// Opaque, end-to-end encrypted payloads (whiteboard strokes) relayed to the other
