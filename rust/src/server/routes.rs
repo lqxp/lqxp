@@ -52,6 +52,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/profile/image", post(profile_image_upload_handler))
         .route("/api/rooms/:room_id/icon", post(room_icon_upload_handler))
         .route("/api/admin/overview", get(admin_overview_handler))
+        .route("/api/admin/users", get(admin_users_list_handler))
         .route("/api/admin/users/search", get(admin_users_search_handler))
         .route("/api/admin/features", post(admin_features_handler))
         .route("/api/admin/default-room", post(admin_default_room_handler))
@@ -583,6 +584,29 @@ struct AdminUserSearchQuery {
     q: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AdminUserListQuery {
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+async fn admin_users_list_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<AdminUserListQuery>,
+) -> ApiResult<impl IntoResponse> {
+    let admin = authenticated_user(&state, &headers).await?;
+    let rate_key = format!("admin:users:list:user:{}", admin.id);
+    if crate::core::security::rate_limit_hit(&state, rate_key, 60, 60_000).await {
+        return Err(ApiError::too_many_requests(
+            "List rate limit exceeded. Please wait a minute.",
+        ));
+    }
+    admin::list_users(&state, &admin, query.limit.unwrap_or(100), query.cursor.as_deref())
+        .await
+        .map(Json)
+}
+
 async fn admin_users_search_handler(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -897,7 +921,7 @@ fn escape_for_inline_script(json: &str) -> String {
         .replace('\u{2029}', "\\u2029")
 }
 
-const APP_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; object-src 'self' blob:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+const APP_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://img.shields.io; media-src 'self' blob:; object-src 'self' blob:; connect-src 'self' ws: wss: https://api.github.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 async fn serve_webchat_index(path: &Path, origin: Option<&str>, state: &SharedState) -> Response {
     match fs::read_to_string(path).await {

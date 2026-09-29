@@ -148,6 +148,22 @@ pub async fn search_users(
     Ok(json!({ "ok": true, "users": users }))
 }
 
+/// Paginated full-table browse for the admin user center
+/// (`GET /api/admin/users?limit=&cursor=`). Same PublicUser shape as search,
+/// keyset-paginated, admin only.
+pub async fn list_users(
+    state: &SharedState,
+    admin: &AuthenticatedUser,
+    limit: usize,
+    cursor: Option<&str>,
+) -> ApiResult<serde_json::Value> {
+    if !admin.admin {
+        return Err(ApiError::forbidden("Admin only."));
+    }
+    let (users, next_cursor) = state.accounts.list_users_page(limit, cursor).await?;
+    Ok(json!({ "ok": true, "users": users, "nextCursor": next_cursor }))
+}
+
 pub async fn set_feature(
     state: &SharedState,
     admin: &AuthenticatedUser,

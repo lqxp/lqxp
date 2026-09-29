@@ -1552,8 +1552,73 @@ impl AccountDatabase {
             .collect())
     }
 
-    pub async fn set_user_disabled(&self, user_id: &str, disabled: bool) -> ApiResult<()> {
-        let value = if disabled { 1i64 } else { 0i64 };
+    /// Paginated full-table browse for the admin user center. Keyset on
+    /// `(created_at, id)` so pages stay stable while accounts are created.
+    /// Cursor format: `{created_at}:{id}` (both numeric, admin-only endpoint).
+    /// Returns the page plus the cursor for the next page, if any.
+    pub async fn list_users_page(
+        &self,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> ApiResult<(Vec<PublicUser>, Option<String>)> {
+        let limit = limit.clamp(1, 100);
+        let (after_created, after_id) = match cursor {
+            Some(raw) => {
+                let raw = raw.trim();
+                if raw.is_empty() {
+                    (0i64, String::new())
+                } else {
+                    let (created_raw, id_raw) = raw
+                        .split_once(':')
+                        .ok_or_else(|| ApiError::bad_request("Invalid cursor."))?;
+                    let created = created_raw
+                        .parse::<i64>()
+                        .map_err(|_| ApiError::bad_request("Invalid cursor."))?;
+                    if created < 0 || id_raw.is_empty() || id_raw.len() > 64 {
+                        return Err(ApiError::bad_request("Invalid cursor."));
+                    }
+                    (created, id_raw.to_owned())
+                }
+            }
+            None => (0i64, String::new()),
+        };
+        // created_at is stored as BIGINT ms; ids are numeric snowflakes, so
+        // lexicographic id comparison matches numeric order here.
+        // `0 AS user_rank` satisfies RawStoredUser (unused for listing).
+        let select = "SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, 0 AS user_rank, username_changes_json, custom_badges_json FROM users WHERE (created_at > ? OR (created_at = ? AND id > ?)) ORDER BY created_at ASC, id ASC LIMIT ?";
+        let select_pg = "SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, 0 AS user_rank, username_changes_json, custom_badges_json FROM users WHERE (created_at > $1 OR (created_at = $1 AND id > $2)) ORDER BY created_at ASC, id ASC LIMIT $3";
+        let rows: Vec<RawStoredUser> = match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query_as::<_, RawStoredUser>(select)
+                .bind(after_created)
+                .bind(after_created)
+                .bind(&after_id)
+                .bind(limit as i64 + 1)
+                .fetch_all(pool)
+                .await
+                .map_err(|err| ApiError::internal("List users query", err))?,
+            SqlBackend::Postgres(pool) => sqlx::query_as::<_, RawStoredUser>(select_pg)
+                .bind(after_created)
+                .bind(&after_id)
+                .bind(limit as i64 + 1)
+                .fetch_all(pool)
+                .await
+                .map_err(|err| ApiError::internal("List users query", err))?,
+        };
+        let has_more = rows.len() > limit;
+        let mut users = Vec::with_capacity(rows.len().min(limit));
+        for row in rows.into_iter().take(limit) {
+            let user = self.stored_from_raw(row)?;
+            users.push(self.public_user(user));
+        }
+        let next_cursor = if has_more {
+            users.last().map(|u| format!("{}:{}", u.created_at, u.id))
+        } else {
+            None
+        };
+        Ok((users, next_cursor))
+    }
+
+        pub async fn set_user_disabled(&self, user_id: &str, disabled: bool) -> ApiResult<()> {        let value = if disabled { 1i64 } else { 0i64 };
         let now = now_ms() as i64;
         match &self.backend {
             SqlBackend::Sqlite(pool) => sqlx::query("UPDATE users SET disabled = ?, updated_at = ? WHERE id = ?")
