@@ -69,8 +69,8 @@ struct NonceEntry {
     seq: u64,
 }
 
-/// Store de nonces à usage unique pour la redemption Privacy Pass. Plafonné à
-/// 100 k entrées avec éviction FIFO (corrige l'audit #7).
+/// Single-use nonce store for Privacy Pass redemption. Capped at
+/// 100k entries with FIFO eviction (fixes audit #7).
 #[derive(Debug, Default)]
 pub struct MemoryNonceStore {
     entries: HashMap<String, NonceEntry>,
@@ -82,8 +82,8 @@ impl MemoryNonceStore {
         Self::default()
     }
 
-    /// Réserve un nonce. Renvoie `false` s'il est déjà utilisé ou si le store
-    /// est plein et que l'éviction échoue.
+    /// Reserves a nonce. Returns `false` if already used or if the store
+    /// is full and eviction fails.
     pub fn reserve(&mut self, nonce: &str) -> bool {
         if self.entries.contains_key(nonce) {
             return false;
@@ -127,8 +127,8 @@ impl MemoryNonceStore {
     }
 }
 
-/// Délivre un jeton de dépôt éphémère (HMAC, 5 min, consommable une fois). Il
-/// évite qu'un même pass soit rejoué plusieurs fois.
+/// Issues an ephemeral deposit token (HMAC, 5 min, single-use). It
+/// prevents the same pass from being replayed.
 pub async fn issue_deposit_token() -> String {
     let mut bytes = [0u8; 16];
     OsRng.fill_bytes(&mut bytes);
@@ -174,13 +174,12 @@ pub async fn consume_deposit_token(token: &str) -> ApiResult<()> {
     }
 }
 
-/// Vérifie un `AmortizedBatchTokenResponse` Privacy Pass contre le keyset
-/// public de l'émetteur, en passant par le cycle reserve → verify → commit.
+/// Verifies a Privacy Pass `AmortizedBatchTokenResponse` against the issuer
+/// public keyset, via the reserve → verify → commit cycle.
 ///
-/// S1 : la vérification VOPRF réelle (RFC 9578, Ristretto255) requiert un
-/// émetteur Privacy Pass (clé + endpoint d'émission + rotation) qui n'est pas
-/// encore câblé. Échec fermé tant que ce n'est pas en place — on ne réinvente
-/// pas la primitive.
+/// S1: real VOPRF verification (RFC 9578, Ristretto255) requires a Privacy
+/// Pass issuer (key + issuance endpoint + rotation) that is not wired up
+/// yet. Fail closed until then — do not reimplement the primitive.
 pub async fn redeem_pass_token(token_response: &str, nonce: &str) -> ApiResult<String> {
     if nonce.len() != 32 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(ApiError::bad_request("Malformed redemption nonce."));
@@ -205,8 +204,8 @@ pub async fn redeem_pass_token(token_response: &str, nonce: &str) -> ApiResult<S
     Ok(issue_deposit_token().await)
 }
 
-/// Point de couture : vérification VOPRF finalize (RFC 9578) contre le keyset
-/// public. À câbler dans un jalon crypto dédié avec un crate audité.
+/// Seam point: VOPRF finalize verification (RFC 9578) against the public
+/// keyset. To be wired in a dedicated crypto milestone with an audited crate.
 fn verify_amortized_batch_response(_token_response: &str) -> ApiResult<()> {
     Err(ApiError::bad_request(
         "Privacy Pass redemption is not yet available.",
@@ -221,12 +220,12 @@ mod tests {
     fn nonce_store_reserve_commit_release() {
         let mut store = MemoryNonceStore::new();
         assert!(store.reserve("a"));
-        assert!(!store.reserve("a")); // déjà réservé
+        assert!(!store.reserve("a")); // already reserved
         assert!(store.commit("a"));
-        assert!(!store.commit("a")); // déjà commité
+        assert!(!store.commit("a")); // already committed
 
         assert!(store.reserve("b"));
         store.release("b");
-        assert!(store.reserve("b")); // libéré, donc réutilisable
+        assert!(store.reserve("b")); // released, so reusable
     }
 }

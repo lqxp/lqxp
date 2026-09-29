@@ -14,9 +14,9 @@ use crate::core::result::{ApiError, ApiResult};
 const USERNAME_MIN: usize = 2;
 const USERNAME_MAX: usize = 32;
 const USERNAME_REGISTER_MAX: usize = 24;
-// Noms réservés : empêche l'usurpation de comptes officiels/staff
-// (« qxchat official » etc.) à l'inscription comme au renommage. Doit rester
-// en phase avec la liste client (lqxp-client `RESERVED_USERNAMES`).
+// Reserved names: blocks impersonation of official/staff accounts
+// ("qxchat official" etc.) at signup and on rename. Must stay
+// in sync with the client list (lqxp-client `RESERVED_USERNAMES`).
 const RESERVED_USERNAMES: &[&str] = &[
     "system",
     "official",
@@ -49,8 +49,8 @@ const RESERVED_USERNAMES: &[&str] = &[
     "server",
     "bot",
 ];
-// Sous-chaînes interdites où qu'elles apparaissent : la marque ne doit pas
-// pouvoir être injectée dans un pseudo (« qxchat_official », « myqxchat »…).
+// Forbidden substrings anywhere in the name: the brand must not
+// be injectable into a username ("qxchat_official", "myqxchat"...).
 const RESERVED_USERNAME_SUBSTRINGS: &[&str] = &["qxchat", "qx_protocol", "qxprotocol"];
 const PASSWORD_MIN: usize = 8;
 const PASSWORD_MAX: usize = 128;

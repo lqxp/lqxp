@@ -22,12 +22,12 @@ const MAX_ENV_PER_SLOT: usize = 16;
 const MAX_TOTAL_ENVELOPES: usize = 100_000;
 const MAX_SLOTS_PER_POLL: usize = 64;
 const MAX_WANT: usize = 8;
-/// Plafond par enveloppe (base64 du ct) : doit couvrir le plus grand bucket.
+/// Per-envelope cap (base64 of ct): must cover the largest bucket.
 /// Bucket 65536 → 1088 (ML-KEM-768) + 12 (IV) + 65536 + 16 (tag) = 66652
-/// octets → ~88872 en base64. Un plafond plus bas (ex. 8 Ko) rejetterait
-/// TOUTES les demandes signées (la seule signature ML-DSA-65 fait déjà
-/// 3309 octets). Le budget mémoire global reste borné par MAX_TOTAL_BYTES.
-/// (INV : toute intro/welcome signée dépasse le bucket 4096.)
+/// bytes → ~88872 in base64. A lower cap (e.g. 8 KiB) would reject
+/// ALL signed requests (the ML-DSA-65 signature alone is already
+/// 3309 bytes). The global memory budget stays bounded by MAX_TOTAL_BYTES.
+/// (INV: any signed intro/welcome exceeds the 4096 bucket.)
 const MAX_CT_LEN: usize = 96 * 1024;
 const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_GATE_TOKEN_LEN: usize = 4096;
@@ -37,9 +37,9 @@ fn is_hex64(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// `tag = SHA256(recipientFp ‖ senderHint)` : barrière de coût côté serveur. Le
-/// serveur apprend qu'un couple (fp, hint) est bloqué, jamais quel compte bloque
-/// quel compte.
+/// `tag = SHA256(recipientFp ‖ senderHint)`: server-side cost barrier. The
+/// server learns that an (fp, hint) pair is blocked, never which account blocks
+/// which account.
 pub fn block_tag(recipient_fp: &str, sender_hint: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(recipient_fp.as_bytes());
@@ -76,8 +76,8 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// `fp(pk) = SHA256(octets bruts de la clé publique)`, hex minuscule 64 chars.
-/// Convention partagée serveur/client pour `recipientFp`.
+/// `fp(pk) = SHA256(raw public-key bytes)`, lowercase hex, 64 chars.
+/// Shared server/client convention for `recipientFp`.
 fn fingerprint_of_mlkem_hex(hex: &str) -> Option<String> {
     let bytes = decode_hex(hex)?;
     let mut hasher = Sha256::new();
@@ -91,8 +91,8 @@ struct StoredEnvelope {
     expires_at: u64,
 }
 
-/// Boîte aux lettres aveugle, RAM-only, jamais persistée. Chaque enveloppe meurt
-/// avec son slot (TTL 24 h). Un redémarrage vide la structure (INV8).
+/// Blind mailbox, RAM-only, never persisted. Each envelope dies
+/// with its slot (24 h TTL). A restart empties the store (INV8).
 #[derive(Debug, Default)]
 pub struct DeadDropStore {
     slots: HashMap<String, VecDeque<StoredEnvelope>>,
@@ -174,7 +174,7 @@ impl DeadDropStore {
         }
     }
 
-    /// Claim unique par frame : retire l'enveloppe sous lock (consommation).
+    /// Single claim per frame: removes the envelope under lock (consume).
     pub fn claim(&mut self, slot: &str, now: u64) -> Option<PhantomEnvelope> {
         let queue = self.slots.get_mut(slot)?;
         while queue
@@ -229,13 +229,13 @@ pub async fn deposit(state: &SharedState, req: PhantomDepositRequest) -> ApiResu
         return Err(ApiError::bad_request("Gate token out of bounds."));
     }
 
-    // Barrière de coût serveur : rejet silencieux d'un couple (fp, hint) bloqué.
+    // Server-side cost barrier: silent reject of a blocked (fp, hint) pair.
     let tag = block_tag(&req.envelope.recipient_fp, &req.envelope.sender_hint);
     if state.accounts.is_blocked_tag(&tag).await? {
         return Err(ApiError::forbidden("Deposit rejected."));
     }
 
-    // Gating ordonné : 2) nullifier RLN lié au jour epoch, 3) mode.
+    // Ordered gating: 2) day-epoch-bound RLN nullifier, 3) mode.
     let action = format!("phantom_deposit:{}", now_ms() / 86_400_000);
     let quota_token = req
         .gate
@@ -307,8 +307,8 @@ pub async fn fetch_prekey(state: &SharedState, username: &str) -> ApiResult<Opti
     Ok(Some(bundle))
 }
 
-/// Op 36 — publie un bundle de prékey après vérification des DEUX signatures
-/// hybrides (ECDSA P-256 ‖ ML-DSA-65) sur la forme canonique.
+/// Op 36 — publishes a prekey bundle after verifying BOTH hybrid
+/// signatures (ECDSA P-256 ‖ ML-DSA-65) over the canonical form.
 pub async fn publish_prekey(
     state: &SharedState,
     user_id: &str,
@@ -323,7 +323,7 @@ pub async fn publish_prekey(
     Ok(json!({ "ok": true, "version": bundle.version }))
 }
 
-/// Op 37 — récupère les bundles publics d'un lot d'usernames (≤8).
+/// Op 37 — fetches public bundles for a batch of usernames (≤8).
 pub async fn fetch_prekeys(
     state: &SharedState,
     usernames: &[String],
@@ -351,8 +351,8 @@ async fn owner_fingerprint(state: &SharedState, user_id: &str) -> ApiResult<Stri
         .ok_or_else(|| ApiError::bad_request("Invalid stored prekey."))
 }
 
-/// Op 39 — bloque/débloque des hints de façon opaque. Le serveur stocke
-/// `SHA256(fp(mlkem_pk_propriétaire) ‖ hint)` ; il ne joint jamais compte→cible.
+/// Op 39 — blocks/unblocks hints opaquely. The server stores
+/// `SHA256(fp(owner_mlkem_pk) ‖ hint)`; it never joins account→target.
 pub async fn update_blocks(
     state: &SharedState,
     user_id: &str,
@@ -461,7 +461,7 @@ mod tests {
         };
         store.deposit(env, 0);
         assert!(store.claim(&"a".repeat(64), 0).is_some());
-        // Après TTL + 1 ms, plus rien n'est servable.
+        // After TTL + 1 ms, nothing is servable anymore.
         let env = PhantomEnvelope {
             pv: 1,
             slot_id: "b".repeat(64),

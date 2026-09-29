@@ -6,11 +6,11 @@ use crate::core::{
     result::{ApiError, ApiResult},
 };
 
-// ── Canonicalisation ─────────────────────────────────────────────────────────
+// ── Canonicalization ─────────────────────────────────────────────────────────
 //
-// `canonical()` = JSON trié récursivement par clé, séparateurs compacts
-// (sans espaces), tableaux dans l'ordre. C'est la forme EXACTE signée par le
-// client (le même contrat doit être réimplémenté en TS dans `crypto/phantom.ts`).
+// `canonical()` = JSON recursively sorted by key, compact separators
+// (no spaces), arrays in order. This is the EXACT form signed by the
+// client (the same contract must be reimplemented in TS in `crypto/phantom.ts`).
 
 fn canonical_json(value: &Value) -> String {
     match value {
@@ -50,7 +50,7 @@ fn decode_b64url(value: &str) -> Option<Vec<u8>> {
     URL_SAFE_NO_PAD.decode(value.trim_end_matches('=')).ok()
 }
 
-/// Octets canoniques du bundle SANS les signatures (`sigEcdsa`, `sigMldsa`).
+/// Canonical bundle bytes WITHOUT the signatures (`sigEcdsa`, `sigMldsa`).
 pub fn canonical_prekey_bundle_bytes(bundle: &PrekeyBundle) -> ApiResult<Vec<u8>> {
     let mut value = serde_json::to_value(bundle)
         .map_err(|err| ApiError::internal("Prekey bundle encode", err))?;
@@ -61,7 +61,7 @@ pub fn canonical_prekey_bundle_bytes(bundle: &PrekeyBundle) -> ApiResult<Vec<u8>
     Ok(canonical_json(&value).into_bytes())
 }
 
-// ── Vérification ECDSA P-256 (signature brute `r‖s`, 64 octets) ──────────────
+// ── ECDSA P-256 verification (raw `r‖s` signature, 64 bytes) ──────────────
 
 fn jwk_to_verifying_key(jwk: &Value) -> ApiResult<p256::ecdsa::VerifyingKey> {
     let kty = jwk.get("kty").and_then(Value::as_str).unwrap_or("");
@@ -103,7 +103,7 @@ pub fn verify_ecdsa_p256(jwk: &Value, msg: &[u8], sig_b64url: &str) -> ApiResult
         return Err(ApiError::bad_request("Invalid ECDSA signature length."));
     }
 
-    // Web Crypto émet un `r‖s` brut (IEEE P1363), pas du DER.
+    // Web Crypto emits raw `r‖s` (IEEE P1363), not DER.
     let r = p256::FieldBytes::clone_from_slice(&raw[..32]);
     let s = p256::FieldBytes::clone_from_slice(&raw[32..]);
     let signature = p256::ecdsa::Signature::from_scalars(r, s)
@@ -114,7 +114,7 @@ pub fn verify_ecdsa_p256(jwk: &Value, msg: &[u8], sig_b64url: &str) -> ApiResult
         .map_err(|_| ApiError::bad_request("Invalid ECDSA signature."))
 }
 
-// ── Vérification ML-DSA-65 (FIPS 204) ────────────────────────────────────────
+// ── ML-DSA-65 verification (FIPS 204) ────────────────────────────────────────
 
 pub fn verify_mldsa65(pk_hex: &str, msg: &[u8], sig_hex: &str) -> ApiResult<()> {
     use ml_dsa::signature::Verifier as _;
@@ -136,7 +136,7 @@ pub fn verify_mldsa65(pk_hex: &str, msg: &[u8], sig_hex: &str) -> ApiResult<()> 
         .map_err(|_| ApiError::bad_request("Invalid ML-DSA-65 signature."))
 }
 
-/// Vérifie les DEUX signatures hybrides du bundle (ECDSA P-256 ‖ ML-DSA-65).
+/// Verifies BOTH hybrid bundle signatures (ECDSA P-256 ‖ ML-DSA-65).
 pub fn verify_prekey_bundle(bundle: &PrekeyBundle) -> ApiResult<()> {
     let msg = canonical_prekey_bundle_bytes(bundle)?;
     verify_ecdsa_p256(&bundle.ecdsa_p256_pk, &msg, &bundle.sig_ecdsa)?;
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn canonical_bundle_matches_client_contract() {
-        // Vecteur cross-langage : la sortie doit être identique à celle de
+        // Cross-language vector: output must match
         // `web/src/crypto/phantom.selfcheck.ts` (CROSS_LANG_CANONICAL).
         let bundle = PrekeyBundle {
             version: 1,

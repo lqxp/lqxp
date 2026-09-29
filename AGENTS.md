@@ -72,10 +72,10 @@ minimum compile, pass `cargo test`, and keep clippy warning count flat.
 - The relay stays amnesic: no DB write, no dead-drop, no logging of
   `encrypted` payloads for sync/signal ops.
 
-## Languages / translations
+## Languages
 
-- Server error strings and logs: English, static. Code comments may be French
-  (existing style) — keep them short, never chain-of-thought.
+- English everywhere: error strings, logs, AND code comments. Keep comments
+  short and technical, never chain-of-thought.
 - User-facing translations live in `lqxp/client` (`useI18n`), NOT here. Do
   not add server-side i18n; the server only emits stable English error keys.
 - Username rules: 2–32 chars (24 at registration), reserved-name + leet

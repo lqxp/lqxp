@@ -106,10 +106,10 @@ impl Default for FeatureFlags {
     }
 }
 
-/// Salon par défaut (« session par défaut ») : roomId + roomKey, configurable à
-/// chaud par un admin. Le serveur détient volontairement la `room_key` E2EE du
-/// salon officiel afin de pouvoir la redistribuer à chaque connexion (accepté
-/// par conception pour un canal de news non sensible).
+/// Default room ("default session"): roomId + roomKey, hot-configurable by an
+/// admin. The server deliberately holds the official room's E2EE `room_key`
+/// to redistribute it on each connection (accepted by design for a
+/// non-sensitive news channel).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DefaultRoom {
@@ -252,7 +252,7 @@ impl AccountDatabase {
         )
         .await?;
 
-        // QXP-PHANTOM : préclés publiques, tags de blocage opaques, blob roster.
+        // QXP-PHANTOM: public prekeys, opaque block tags, roster blob.
         self.execute(
             r#"
             CREATE TABLE IF NOT EXISTS prekeys (
@@ -294,15 +294,15 @@ impl AccountDatabase {
         )
         .await?;
 
-        // La casse n'est pas une identité : deux comptes ne doivent jamais
-        // pouvoir ne différer que par elle, sinon le second rend le premier
-        // inatteignable (toutes les lectures passent par `normalize_username`).
-        // L'écriture normalise déjà (`security::validate_username_with_max`) ;
-        // cet index couvre les chemins hors application (SQL manuel,
-        // restauration de sauvegarde, outillage).
+        // Case is not identity: two accounts must never differ by case only,
+        // otherwise the second makes the first unreachable (all reads go
+        // through `normalize_username`).
+        // Writes already normalize (`security::validate_username_with_max`);
+        // this index covers out-of-application paths (manual SQL, backup
+        // restore, tooling).
         //
-        // Non bloquant et sans renommage : si des variantes de casse héritées
-        // empêchent l'index, on le signale au lieu d'empêcher le démarrage.
+        // Non-blocking and rename-free: if legacy case variants block the
+        // index, report it instead of refusing to start.
         let uniqueness_guard = match &self.backend {
             SqlBackend::Sqlite(_) => {
                 "CREATE UNIQUE INDEX IF NOT EXISTS users_username_nocase ON users (username COLLATE NOCASE)"
@@ -319,12 +319,12 @@ impl AccountDatabase {
         Ok(())
     }
 
-    /// Signale les comptes dont le pseudonyme n'est pas en minuscules.
+    /// Reports accounts whose username is not lowercase.
     ///
-    /// Ces lignes sont inatteignables : `login` et `recover` cherchent la forme
-    /// minuscule. Aucun renommage automatique n'est effectué ici — renommer un
-    /// compte est une décision d'exploitant, pas un effet de bord de démarrage —
-    /// mais l'anomalie ne doit pas rester silencieuse.
+    /// These rows are unreachable: `login` and `recover` look up the lowercase
+    /// form. No automatic rename happens here — renaming an account is an
+    /// operator decision, not a startup side effect — but the anomaly must not
+    /// stay silent.
     async fn warn_about_legacy_username_casing(&self) {
         let query = "SELECT COUNT(*) FROM users WHERE username <> LOWER(username)";
         let count = match &self.backend {
@@ -1109,7 +1109,7 @@ impl AccountDatabase {
         }
     }
 
-    /// Retourne `Ok(Some(ver_courant))` en cas de conflit LWW, `Ok(None)` sinon.
+    /// Returns `Ok(Some(current_ver))` on LWW conflict, `Ok(None)` otherwise.
     pub async fn put_social_blob(&self, user_id: &str, ver: i64, blob: &str) -> ApiResult<Option<i64>> {
         let (current_ver, _) = self.get_social_blob(user_id).await?;
         if ver <= current_ver {
@@ -2326,9 +2326,8 @@ impl RoomDatabase {
         self.set_room_record(room_id, &room).await
     }
 
-    /// Suppression complète d'une room communautaire (owner). Retourne true
-    /// si une ligne existait. L'appelant purge les messages RAM, les sessions
-    /// et diffuse l'éviction.
+    /// Fully deletes a community room (owner). Returns true if a row existed.
+    /// The caller purges RAM messages, sessions, and broadcasts the eviction.
     pub async fn delete_room(&self, room_id: &str) -> ApiResult<bool> {
         let deleted = match &self.backend {
             SqlBackend::Sqlite(pool) => sqlx::query("DELETE FROM rooms WHERE room_id = ?")
@@ -2348,10 +2347,9 @@ impl RoomDatabase {
     }
 }
 
-/// Chemin du fichier désigné par une URL SQLite, s'il y en a un.
+/// File path designated by a SQLite URL, if any.
 ///
-/// `None` pour `sqlite::memory:` et pour les URL qui ne désignent pas de
-/// fichier.
+/// `None` for `sqlite::memory:` and for URLs that designate no file.
 fn sqlite_file_path(url: &str) -> Option<PathBuf> {
     let raw = url
         .strip_prefix("sqlite://")
@@ -2369,7 +2367,7 @@ async fn ensure_sqlite_database(url: &str, create_if_missing: bool) -> ApiResult
     };
 
     if fs::try_exists(&path).await.unwrap_or(false) {
-        tracing::info!("Base SQLite: {}", path.display());
+        tracing::info!("SQLite database: {}", path.display());
         return Ok(());
     }
 
@@ -2377,11 +2375,11 @@ async fn ensure_sqlite_database(url: &str, create_if_missing: bool) -> ApiResult
         return Err(ApiError::new(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!(
-                "Fichier de base SQLite introuvable: {}. Démarrage refusé : ouvrir une base \
-                 vide ferait disparaître tous les comptes aux yeux des utilisateurs. \
-                 Corrigez [database].url, ou fixez la racine de déploiement avec la variable \
-                 d'environnement QXP_ROOT, ou — pour un premier déploiement uniquement — \
-                 ajoutez [database].createIfMissing = true.",
+                "SQLite database file not found: {}. Refusing to start: opening an empty \
+                 database would hide every account from users. \
+                 Fix [database].url, or pin the deploy root with the \
+                 QXP_ROOT environment variable, or — for a first deployment only — \
+                 set [database].createIfMissing = true.",
                 path.display()
             ),
         ));
@@ -2393,7 +2391,7 @@ async fn ensure_sqlite_database(url: &str, create_if_missing: bool) -> ApiResult
             .map_err(|err| ApiError::internal("Prepare sqlite directory", err))?;
     }
     tracing::warn!(
-        "Création d'une base SQLite **vide** (createIfMissing = true): {}",
+        "Creating an **empty** SQLite database (createIfMissing = true): {}",
         path.display()
     );
     Ok(())

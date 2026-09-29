@@ -17,8 +17,8 @@ use crate::core::{
 
 const PQC_KEY_TTL_MS: u64 = 3 * 60 * 1000;
 
-/// Clé d'encapsulation ML-KEM-768 (FIPS 203) renvoyée au client pour le
-/// challenge anti-bot. `ek_hex` = 1184 octets hexadécimaux.
+/// ML-KEM-768 (FIPS 203) encapsulation key returned to the client for the
+/// anti-bot challenge. `ek_hex` = 1184 bytes, hex-encoded.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PqcPublicKey {
@@ -26,8 +26,8 @@ pub struct PqcPublicKey {
     pub ek_hex: String,
 }
 
-/// Ciphertext ML-KEM-768 (FIPS 203) renvoyé par le client. `ct_hex` = 1088
-/// octets hexadécimaux.
+/// ML-KEM-768 (FIPS 203) ciphertext returned by the client. `ct_hex` = 1088
+/// bytes, hex-encoded.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PqcCiphertext {
@@ -60,8 +60,8 @@ fn get_pqc_store() -> &'static Arc<Mutex<HashMap<String, PqcSecretKey>>> {
     PQC_ACTIVE_KEYS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
-/// Génère une paire ML-KEM-768 éphémère, stocke la clé de décapsulation en RAM
-/// (TTL 3 min) et renvoie la clé d'encapsulation au client.
+/// Generates an ephemeral ML-KEM-768 pair, stores the decapsulation key in RAM
+/// (3 min TTL) and returns the encapsulation key to the client.
 pub async fn issue_pqc_challenge() -> PqcPublicKey {
     let mut key_id_bytes = [0u8; 16];
     OsRng.fill_bytes(&mut key_id_bytes);
@@ -89,8 +89,8 @@ pub async fn issue_pqc_challenge() -> PqcPublicKey {
     pk
 }
 
-/// Décapsule le ciphertext ML-KEM-768 et renvoie le secret partagé (32 octets).
-/// Consomme la clé éphémère correspondante (one-time).
+/// Decapsulates the ML-KEM-768 ciphertext and returns the shared secret (32 bytes).
+/// Consumes the matching ephemeral key (one-time).
 pub async fn verify_and_decapsulate_pqc(ct: &PqcCiphertext) -> ApiResult<[u8; 32]> {
     let store = get_pqc_store();
     let mut keys = store.lock().await;

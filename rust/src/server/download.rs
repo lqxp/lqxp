@@ -170,8 +170,8 @@ fn detect_arch(name: &str) -> String {
     }
 }
 
-/// Les signatures / métadonnées ne sont pas des binaires installables :
-/// on les expose via `checksums` mais on les retire de `binaries`.
+/// Signatures / metadata are not installable binaries:
+/// they are exposed via `checksums` but excluded from `binaries`.
 fn is_binary_asset(name: &str, content_type: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".sig")
@@ -262,7 +262,7 @@ fn parse_release_detail(v: &serde_json::Value) -> Option<(ReleaseDetail, Vec<Bin
             }
         }
     }
-    // Tri stable pour la vitrine : plus gros téléchargements d'abord.
+    // Stable sort for the showcase: most downloaded first.
     binaries.sort_by(|a, b| b.downloads.cmp(&a.downloads).then(a.name.cmp(&b.name)));
     let detail = ReleaseDetail {
         version: strip_version(&tag),
@@ -433,7 +433,7 @@ fn build_response(full: &serde_json::Value, limit: usize) -> serde_json::Value {
         }
         if let Some(releases) = obj.get("releases").cloned() {
             obj.insert("releases".to_owned(), slice_json_array(&releases, limit));
-            // Alias attendu par certaines vitrines.
+            // Alias expected by some showcase sites.
             obj.insert("history".to_owned(), slice_json_array(&releases, limit));
             obj.insert(
                 "versionHistory".to_owned(),
@@ -477,22 +477,22 @@ fn json_response(status: StatusCode, value: &serde_json::Value) -> Response {
     )
 }
 
-/// `GET /api/download` — agrégat public pour le site vitrine.
+/// `GET /api/download` — public aggregate for the showcase site.
 ///
-/// Réponse (JSON) :
+/// Response (JSON):
 /// ```json
 /// {
 ///   "tag": "v1.20.6", "version": "1.20.6",
 ///   "release": { "tag", "name", "body", "publishedAt", "url", ... },
 ///   "binaries": [ { "name", "size", "downloads", "url", "sha256", "platform", "arch" } ],
-///   "checksum": { "<fichier>": "<sha256>" },
+///   "checksum": { "<file>": "<sha256>" },
 ///   "checksums": [ { "name", "sha256", "url" } ],
 ///   "commits": [ { "sha", "message", "author", "date", "url" } ],
 ///   "releases": [ { "tag", "version", "name", "publishedAt", "url" } ]
 /// }
 /// ```
-/// `releases` est l'historique des versions (array), `binaries` les binaires
-/// de la dernière release, `checksum` la map fichier -> sha256 (digest GitHub).
+/// `releases` is the version history (array), `binaries` the binaries
+/// of the latest release, `checksum` the file -> sha256 map (GitHub digest).
 pub async fn download_handler(
     State(state): State<SharedState>,
     Query(query): Query<DownloadQuery>,
@@ -505,8 +505,8 @@ pub async fn download_handler(
     }
     let limit = clamp_limit(query.limit);
 
-    // Cache : on stocke le payload complet (per_page=20) puis on découpe
-    // selon `?limit=` pour chaque réponse.
+    // Cache: store the full payload (per_page=20) then slice
+    // per `?limit=` for each response.
     let cached_hit: Option<(StatusCode, axum::body::Bytes, Option<serde_json::Value>)> = {
         let cache = DOWNLOAD_CACHE.lock().await;
         match cache.as_ref() {
@@ -620,8 +620,8 @@ pub async fn download_handler(
             full: Some(full),
         });
     }
-    // On borne le rate-limit GitHub : on tolère un historique vide plutôt
-    // qu'une 502 dès que les endpoints secondaires sont limités.
+    // Bound the GitHub rate limit: tolerate an empty history rather
+    // than a 502 as soon as the secondary endpoints are rate limited.
     if history_list.is_empty() && commit_list.is_empty() {
         tracing::debug!("download: serving latest only (history+commits unavailable)");
     }

@@ -3491,9 +3491,9 @@ async fn kick_member(state: &SharedState, session_id: &str, d: Value) -> bool {
     false
 }
 
-/// Suppression complète d'une room communautaire par son owner (ou un admin
-/// serveur). Détruit le record persisté, l'historique RAM, l'icône uploadée,
-/// fait partir toutes les sessions et diffuse l'éviction (op 58).
+/// Full deletion of a community room by its owner (or a server admin).
+/// Destroys the persisted record, the RAM history, the uploaded icon,
+/// kicks all sessions and broadcasts the eviction (op 58).
 async fn delete_room_op(state: &SharedState, session_id: &str, d: Value) -> bool {
     let req_id = request_id(&d);
     if rate_limit_hit(state.as_ref(), format!("delete_room:session:{session_id}"), 5, 60_000).await {
@@ -3522,7 +3522,7 @@ async fn delete_room_op(state: &SharedState, session_id: &str, d: Value) -> bool
     if room.owner_id.as_deref() != Some(actor_id.as_str()) && !is_server_admin {
         return respond_error(state, session_id, 57, "Only the room owner can delete it", req_id).await;
     }
-    // Fichier d'icône : nettoyage best-effort avant destruction du record.
+    // Icon file: best-effort cleanup before destroying the record.
     if let Some(icon) = room.icon.as_ref() {
         let icon_path =
             std::path::Path::new(&state.config.network.upload_dir).join(&icon.file.id);

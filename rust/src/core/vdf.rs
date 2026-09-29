@@ -276,7 +276,7 @@ pub fn verify_vdf(
         let expected_hash = hash_target(target);
         let left = challenge.target_hash.as_bytes();
         let right = expected_hash.as_bytes();
-        // Comparaison constant-time (S4).
+        // Constant-time comparison (S4).
         if left.len() != right.len() || !bool::from(left.ct_eq(right)) {
             return Err(ApiError::bad_request(
                 "VDF security challenge was not bound to this target username.",
@@ -284,8 +284,8 @@ pub fn verify_vdf(
         }
     }
 
-    // Borne de taille AVANT parse_bytes (S3) : évite l'allocation de grands
-    // entiers sur entrée non fiable.
+    // Size bound BEFORE parse_bytes (S3): avoids allocating large
+    // integers from untrusted input.
     if challenge.x.len() > 1024 || proof.y.len() > 1024 || proof.pi.len() > 1024 {
         return Err(ApiError::bad_request("VDF parameters exceed size bound."));
     }

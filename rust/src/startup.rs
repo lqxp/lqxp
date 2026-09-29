@@ -5,10 +5,10 @@ use crate::{
     web::{prepare, CommandRunner, WebError},
 };
 
-/// En dev (`cargo run` sans `PRODUCTION=1`), on ne déploie jamais le client
-/// distant : on sert les fichiers locaux de `publicDir`.
-/// - `LQXP_SKIP_WEB_PREPARE=1` force le skip même en prod.
-/// - `LQXP_FORCE_WEB_PREPARE=1` force le deploy même en dev.
+/// In dev (`cargo run` without `PRODUCTION=1`), never deploy the remote
+/// client: serve the local files from `publicDir`.
+/// - `LQXP_SKIP_WEB_PREPARE=1` forces the skip even in prod.
+/// - `LQXP_FORCE_WEB_PREPARE=1` forces the deploy even in dev.
 pub fn should_skip_web_prepare() -> bool {
     should_skip_web_prepare_with(
         std::env::var("PRODUCTION").is_ok(),
@@ -74,9 +74,9 @@ mod tests {
 
     #[tokio::test]
     async fn startup_preflight_stops_before_server_side_effects() {
-        // `startup_preflight` lit l'env global : on force le chemin `prepare`
-        // même quand `PRODUCTION` est absent (cas `cargo test` / `cargo run`).
-        // Pas d'autre test ne doit toucher ces vars en parallèle.
+        // `startup_preflight` reads the global env: force the `prepare` path
+        // even when `PRODUCTION` is absent (`cargo test` / `cargo run` case).
+        // No other test may touch these vars in parallel.
         std::env::set_var("LQXP_FORCE_WEB_PREPARE", "1");
         let root =
             std::env::temp_dir().join(format!("lqxp-startup-preflight-{}", uuid::Uuid::new_v4()));
@@ -102,11 +102,11 @@ mod tests {
 
     #[test]
     fn dev_skips_web_deploy_without_force() {
-        // `cargo run` sans PRODUCTION -> skip, fichiers locaux.
+        // `cargo run` without PRODUCTION -> skip, local files.
         assert!(should_skip_web_prepare_with(false, false, false));
-        // Opt-in pour forcer le deploy en dev.
+        // Opt-in to force the deploy in dev.
         assert!(!should_skip_web_prepare_with(false, false, true));
-        // Prod -> deploy sauf opt-out explicite.
+        // Prod -> deploy unless explicitly opted out.
         assert!(!should_skip_web_prepare_with(true, false, false));
         assert!(should_skip_web_prepare_with(true, true, false));
         assert!(should_skip_web_prepare_with(false, true, false));

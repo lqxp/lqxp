@@ -17,7 +17,7 @@ pub fn request_id(value: &Value) -> Option<String> {
     value
         .get("requestId")
         .and_then(Value::as_str)
-        // Plafonné à 128 caractères côté serveur (S5).
+        // Capped at 128 chars server-side (S5).
         .map(|s| s.chars().take(128).collect())
 }
 

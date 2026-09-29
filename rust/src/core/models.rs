@@ -295,8 +295,8 @@ pub struct SocketPayload {
     pub d: serde_json::Value,
 }
 
-// ── QXP-PHANTOM (rendez-vous fantôme) ────────────────────────────────────────
-// Couche externe d'une enveloppe : les seuls champs visibles par le serveur.
+// ── QXP-PHANTOM (ghost rendezvous) ────────────────────────────────────────
+// Outer layer of an envelope: the only fields visible to the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhantomEnvelope {
@@ -323,7 +323,7 @@ pub struct PhantomGate {
     pub token: String,
     #[serde(default)]
     pub nullifier: String,
-    /// Jeton de quota RLN (obtenu via `GET /api/auth/challenge`).
+    /// RLN quota token (obtained via `GET /api/auth/challenge`).
     #[serde(default)]
     pub quota_token: Option<crate::core::rln::EpochQuotaToken>,
 }
@@ -348,7 +348,7 @@ pub struct PhantomPollRequest {
     pub want: usize,
 }
 
-// Bundle de prékey publique (§2.1), persistée telle quelle.
+// Public prekey bundle (§2.1), persisted as-is.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrekeyBundle {

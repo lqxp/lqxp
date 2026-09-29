@@ -31,9 +31,9 @@ use crate::{
 };
 
 pub fn build_router(state: SharedState) -> Router {
-    // Routes privées : CORS ouvert (`*`, toutes méthodes / headers).
-    // L'auth se fait par Bearer token (pas de cookies), donc `Any` suffit
-    // et le shell Tauri, le dev local et n'importe quel domaine passent.
+    // Private routes: open CORS (`*`, all methods / headers).
+    // Auth uses Bearer tokens (no cookies), so `Any` is enough
+    // and the Tauri shell, local dev and any domain go through.
     let private = Router::new()
         .route("/app", get(app_index_redirect))
         .route("/app/", get(webchat_page))
@@ -88,10 +88,10 @@ pub fn build_router(state: SharedState) -> Router {
         .layer(cors_layer())
         .with_state(state.clone());
 
-    // Routes publiques pour le site vitrine : CORS ouvert (`*`) car le
-    // domaine de la vitrine n'est pas connu à l'avance.
-    // `GET /api/download` agrège tag, release, commits, checksums,
-    // binaires de la dernière release et historique des versions.
+    // Public routes for the showcase site: open CORS (`*`) since the
+    // showcase domain is not known in advance.
+    // `GET /api/download` aggregates tag, release, commits, checksums,
+    // latest-release binaries and version history.
     let public = Router::new()
         .route(
             "/api/release",
@@ -805,10 +805,10 @@ async fn latest_release_handler(State(state): State<SharedState>) -> Response {
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-/// Le build client utilise une base relative (`./`) : sans slash final, les
-/// assets se résolvent vers `/assets/*` au lieu de `/app/assets/*` et l'app
-/// reste blanche. Redirige `/app` vers `/app/` (le fragment `#/...` du
-/// routeur est conservé par le navigateur).
+/// The client build uses a relative base (`./`): without a trailing slash,
+/// assets resolve to `/assets/*` instead of `/app/assets/*` and the app
+/// stays blank. Redirect `/app` to `/app/` (the `#/...` fragment of the
+/// router is preserved by the browser).
 async fn app_index_redirect() -> impl IntoResponse {
     axum::response::Redirect::permanent("/app/")
 }
@@ -1124,13 +1124,13 @@ async fn phantom_deposit_handler(
     State(state): State<SharedState>,
     Json(body): Json<PhantomDepositRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    // Réponse générique unique : ok:true ou ok:false{reason:"gate"}. Aucune
-    // distinction observable entre refus de porte, blocage et validation.
+    // Single generic response: ok:true or ok:false{reason:"gate"}. No
+    // observable distinction between gate refusal, blocking and validation.
     match phantom::deposit(&state, body).await {
         Ok(()) => Ok(Json(json!({ "ok": true }))),
         Err(err) => {
-            // Journal interne uniquement (debug) — la réponse client reste
-            // générique pour préserver INV13/E1.
+            // Internal log only (debug) — the client response stays
+            // generic to preserve INV13/E1.
             tracing::debug!("phantom deposit rejected: {err}");
             Ok(Json(json!({ "ok": false, "reason": "gate" })))
         }

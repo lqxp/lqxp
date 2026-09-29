@@ -450,17 +450,17 @@ pub fn init_tracing() {
 }
 
 
-/// Surcouches d'environnement pour `[rtc]`.
+/// Environment overrides for `[rtc]`.
 ///
-/// `files/config.custom.toml` est volontairement gitignoré (il contient le
-/// secret TURN) : les images Docker / CI n'en ont donc jamais. Sans ces
-/// variables, un déploiement frais retombe sur `config.{dev,prod}.toml` sans
-/// TURN et les clients affichent "Calls are disabled until TURN URLs are
-/// configured". Les variables (jamais journalisées en valeur) :
-/// - `QXP_TURN_URLS` : liste séparée par des virgules, promeut un serveur
-///   "legacy" (ex. `turn:host:3478?transport=udp,turns:host:5349?transport=tcp`)
-/// - `QXP_TURN_USERNAME` / `QXP_TURN_CREDENTIAL` : credential du serveur legacy
-/// - `QXP_RELAY_ONLY` : `1`/`true` ou `0`/`false`
+/// `files/config.custom.toml` is intentionally gitignored (it holds the
+/// TURN secret), so Docker / CI images never ship it. Without these
+/// variables, a fresh deploy falls back to `config.{dev,prod}.toml` without
+/// TURN and clients show "Calls are disabled until TURN URLs are
+/// configured". Variables (never logged by value):
+/// - `QXP_TURN_URLS`: comma-separated list, promotes a
+///   "legacy" server (e.g. `turn:host:3478?transport=udp,turns:host:5349?transport=tcp`)
+/// - `QXP_TURN_USERNAME` / `QXP_TURN_CREDENTIAL`: legacy server credential
+/// - `QXP_RELAY_ONLY`: `1`/`true` or `0`/`false`
 fn apply_rtc_env_overrides(rtc: &mut RtcConfig) {
     let urls: Vec<String> = std::env::var("QXP_TURN_URLS")
         .unwrap_or_default()
@@ -490,8 +490,8 @@ fn apply_rtc_env_overrides(rtc: &mut RtcConfig) {
     }
 }
 
-/// Résumé RTC au démarrage : comptes et ids uniquement, jamais les secrets.
-/// Visible en `info`, donc aussi en `RUST_LOG=debug` (mode debug demandé).
+/// Startup RTC summary: counts and ids only, never secrets.
+/// Logged at `info`, so also visible with `RUST_LOG=debug`.
 fn log_rtc_summary(rtc: &RtcConfig) {
     let servers = rtc.resolved_servers();
     let ids: Vec<String> = servers
@@ -555,17 +555,17 @@ pub async fn load_config() -> Result<Config, ConfigError> {
     let default_path = resolve_project_path(format!("files/config.{}.toml", env));
     let custom_path = resolve_project_path("files/config.custom.toml");
     let example_path = resolve_project_path("files/config.example.toml");
-    // Chaîne de repli : custom (gitignoré, secrets) → config.{dev,prod}.toml →
-    // config.example.toml (dernier recours, typique des images Docker qui ne
-    // contiennent qu'elle ; les secrets arrivent alors par QXP_TURN_*).
-    // Seule l'absence des trois fichiers est une erreur dure.
+    // Fallback chain: custom (gitignored, secrets) → config.{dev,prod}.toml →
+    // config.example.toml (last resort, typical of Docker images shipping
+    // only it; secrets then arrive via QXP_TURN_*).
+    // Only the absence of all three files is a hard error.
     let (config_path, is_example_fallback) = if custom_path.exists() {
         (custom_path, false)
     } else if default_path.exists() {
         (default_path, false)
     } else {
         warn!(
-            "Ni {} ni {} : repli sur {} (pensez QXP_TURN_* pour le TURN)",
+            "Neither {} nor {}: falling back to {} (use QXP_TURN_* for TURN)",
             custom_path.display(),
             default_path.display(),
             example_path.display()
@@ -573,7 +573,7 @@ pub async fn load_config() -> Result<Config, ConfigError> {
         (example_path, true)
     };
     if is_example_fallback {
-        warn!("Configuration d'exemple : ne pas utiliser en production sans QXP_TURN_* ni [security].adminIds.");
+        warn!("Example configuration: do not use in production without QXP_TURN_* and [security].adminIds.");
     }
 
     match fs::read_to_string(&config_path).await {
@@ -601,31 +601,31 @@ pub async fn load_config() -> Result<Config, ConfigError> {
                 }
 
                 info!(
-                    "Configuration: {} (racine: {}, PRODUCTION: {})",
+                    "Configuration: {} (root: {}, PRODUCTION: {})",
                     config_path.display(),
                     project_root().display(),
                     std::env::var("PRODUCTION").is_ok()
                 );
                 log_rtc_summary(&config.rtc);
                 if config.database.url.starts_with("sqlite") {
-                    info!("Base de données: {}", config.database.url);
+                    info!("Database: {}", config.database.url);
                 }
                 if config.database.create_if_missing {
                     warn!(
-                        "createIfMissing = true : si le fichier est absent, une base **vide** \
-                         sera créée à {}. À réserver au premier déploiement.",
+                        "createIfMissing = true: if the file is missing, an **empty** database \
+                         will be created at {}. Reserve for first deployment.",
                         config.database.url
                     );
                 }
                 Ok(config)
             }
             Err(err) => Err(ConfigError::new(format!(
-                "configuration {} illisible: {err}",
+                "configuration {} unreadable: {err}",
                 config_path.display()
             ))),
         },
         Err(err) => Err(ConfigError::new(format!(
-            "configuration {} introuvable ou illisible: {err}",
+            "configuration {} missing or unreadable: {err}",
             config_path.display()
         ))),
     }
