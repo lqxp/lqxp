@@ -83,6 +83,12 @@ message batches of ~100/room) so each relay frame stays ≤ 64 KiB. Full history
 lives in client IndexedDB (`qxcloudsync-v1`), beyond the 500/room
 localStorage cap. Sync pauses under client-lock, RAM-only OPSEC, or decoy.
 
+Room deletion (op 57/58) travels as a `deleted` tombstone collection (30-day
+TTL): the deleted room is dropped locally (lists, messages, keys, pins,
+IndexedDB) and never re-imported from stale snapshots while the tombstone
+lives. Pins (`pinnedRooms`, ≤5) sync LWW; room `members` are attached for
+newly imported rooms only, so live rosters are never clobbered.
+
 ## 9.4 Event propagation
 Snapshots are full-state and idempotent, but they are not only periodic:
 `persist()` itself notifies subscribers (internal mutation calls included),

@@ -130,6 +130,7 @@ pub async fn process_message(
         19 => toggle_message_reaction(&state, &session_id, payload.d).await,
         53 => vote_poll(&state, &session_id, payload.d).await,
         55 => relay_room_signal(&state, &session_id, payload.d).await,
+        57 => delete_room_op(&state, &session_id, payload.d).await,
         60 => relay_cloud_sync_op(&state, &session_id, payload.d).await,
         21 => delete_message(&state, &session_id, payload.d).await,
         29 => edit_message(&state, &session_id, payload.d).await,
@@ -3449,6 +3450,76 @@ async fn kick_member(state: &SharedState, session_id: &str, d: Value) -> bool {
         state,
         session_id,
         with_request_id(json!({"op": 45, "d": { "ok": true, "gameId": room_id, "room": room } }), req_id),
+    )
+    .await;
+    false
+}
+
+/// Suppression complète d'une room communautaire par son owner (ou un admin
+/// serveur). Détruit le record persisté, l'historique RAM, l'icône uploadée,
+/// fait partir toutes les sessions et diffuse l'éviction (op 58).
+async fn delete_room_op(state: &SharedState, session_id: &str, d: Value) -> bool {
+    let req_id = request_id(&d);
+    if rate_limit_hit(state.as_ref(), format!("delete_room:session:{session_id}"), 5, 60_000).await {
+        return respond_error(state, session_id, 57, "Rate limit exceeded", req_id).await;
+    }
+    let Some((actor_id, actor_name)) = session_identity(state, session_id).await else {
+        return respond_error(state, session_id, 57, "You need to be identified before", req_id).await;
+    };
+    let room_id =
+        match resolve_room_for_session(state, session_id, d.get("gameId").and_then(Value::as_str))
+            .await
+        {
+            Ok(room_id) => room_id,
+            Err(message) => return respond_error(state, session_id, 57, &message, req_id).await,
+        };
+    let Some(room) = state.database.room_record(&room_id).await else {
+        return respond_error(state, session_id, 57, "Unknown room", req_id).await;
+    };
+    if room.kind != RoomKind::Community {
+        return respond_error(state, session_id, 57, "Not a community room", req_id).await;
+    }
+    let is_server_admin = {
+        let players = state.players.read().await;
+        players.get(session_id).map(|p| p.is_admin).unwrap_or(false)
+    };
+    if room.owner_id.as_deref() != Some(actor_id.as_str()) && !is_server_admin {
+        return respond_error(state, session_id, 57, "Only the room owner can delete it", req_id).await;
+    }
+    // Fichier d'icône : nettoyage best-effort avant destruction du record.
+    if let Some(icon) = room.icon.as_ref() {
+        let icon_path =
+            std::path::Path::new(&state.config.network.upload_dir).join(&icon.file.id);
+        let _ = tokio::fs::remove_file(icon_path).await;
+    }
+    if let Err(err) = state.database.delete_room(&room_id).await {
+        error!("Failed to delete room {}: {}", room_id, err);
+        return respond_error(state, session_id, 57, "Failed to delete room", req_id).await;
+    }
+    let member_txs = {
+        let mut room_messages = state.room_messages.write().await;
+        room_messages.remove(&room_id);
+        let mut players = state.players.write().await;
+        let mut txs = Vec::new();
+        for player in players.values_mut() {
+            if player.rooms.remove(&room_id) {
+                txs.push(player.tx.clone());
+            }
+        }
+        txs
+    };
+    let payload = json!({
+        "op": 58,
+        "d": { "gameId": room_id, "deleted": true, "by": actor_name }
+    })
+    .to_string();
+    for tx in member_txs {
+        let _ = tx.try_send(Message::Text(payload.clone()));
+    }
+    respond_to_sender(
+        state,
+        session_id,
+        with_request_id(json!({ "op": 57, "d": { "ok": true, "gameId": room_id } }), req_id),
     )
     .await;
     false

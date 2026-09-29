@@ -13,6 +13,13 @@ Three authenticated WebSocket operations were added for QXP-PHANTOM:
 | 36 | Publish prekey | a prekey bundle | `{ "ok": true, "version": 1 }` |
 | 37 | Fetch prekeys | `{ "usernames": ["..."] }` | `{ "bundles": { "user": bundle } }` |
 | 39 | Update blocks | `{ "add": ["<hex64>"], "remove": ["<hex64>"] }` | `{ "filter": ["<hex64>"] }` |
+| 57 | Delete room | `{ "gameId": "<room id>" }` | `{ "ok": true, "gameId": "<room id>" }` |
+| 58 | Room deleted (broadcast) | — | `{ "gameId": "<room id>", "deleted": true, "by": "<username>" }` |
+
+Room deletion (op 57) is restricted to community rooms and to the room
+owner (or a server admin). It destroys the persisted record, the RAM history,
+the uploaded icon, evicts every session and broadcasts op 58. QxCloudSync
+carries the deletion as a tombstone (`explain/09-qxcloudsync.md`).
 
 All three require an identified session and follow the existing
 `respond_error(state, sid, op, message, request_id)` error pattern with static

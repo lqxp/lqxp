@@ -2260,6 +2260,27 @@ impl RoomDatabase {
         room.icon = Some(icon.clone());
         self.set_room_record(room_id, &room).await
     }
+
+    /// Suppression complète d'une room communautaire (owner). Retourne true
+    /// si une ligne existait. L'appelant purge les messages RAM, les sessions
+    /// et diffuse l'éviction.
+    pub async fn delete_room(&self, room_id: &str) -> ApiResult<bool> {
+        let deleted = match &self.backend {
+            SqlBackend::Sqlite(pool) => sqlx::query("DELETE FROM rooms WHERE room_id = ?")
+                .bind(room_id)
+                .execute(pool)
+                .await
+                .map_err(|err| ApiError::internal("Delete room", err))?
+                .rows_affected(),
+            SqlBackend::Postgres(pool) => sqlx::query("DELETE FROM rooms WHERE room_id = $1")
+                .bind(room_id)
+                .execute(pool)
+                .await
+                .map_err(|err| ApiError::internal("Delete room", err))?
+                .rows_affected(),
+        };
+        Ok(deleted > 0)
+    }
 }
 
 /// Chemin du fichier désigné par une URL SQLite, s'il y en a un.

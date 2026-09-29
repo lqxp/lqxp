@@ -51,6 +51,8 @@ The dispatch table from `websocket/protocol.rs::process_message` is:
 | 50 | Set calls enabled | Client to server |
 | 51 | Set call access | Client to server |
 | 52 | Unmute member | Client to server |
+| 57 | Delete room (owner) | Client to server |
+| 58 | Room deleted | Server to client |
 | 98 | Update voice chat state | Both |
 | 100 | Update mute state | Client to server |
 | 101 | Admin status | Client to server |
