@@ -473,4 +473,401 @@ mod tests {
         store.deposit(env, 0);
         assert!(store.claim(&"b".repeat(64), ENVELOPE_TTL_MS + 1).is_none());
     }
+
+    // ── Stresser PHANTOM : dead-drop sous charge + gates + fautes ──────────
+    // The global relay store is process-shared: every handler test below uses
+    // unique slots (uuid-prefixed) so parallel tests never cross-talk.
+
+    fn stress_slot(run: &str, n: u32) -> String {
+        format!("{run}{n:032x}")
+    }
+
+    fn stress_run() -> String {
+        uuid::Uuid::new_v4().simple().to_string()
+    }
+
+    fn stress_envelope(slot: String, n: u32) -> PhantomEnvelope {
+        PhantomEnvelope {
+            pv: 1,
+            slot_id: slot,
+            recipient_fp: "f".repeat(64),
+            sender_hint: "e".repeat(64),
+            bucket: 4096,
+            ct: format!("ct-{n}"),
+        }
+    }
+
+    #[test]
+    fn dead_drop_per_slot_cap_is_fifo_16() {
+        let mut store = DeadDropStore::new();
+        let slot = "a".repeat(64);
+        for n in 0..20u32 {
+            store.deposit(stress_envelope(slot.clone(), n), 0);
+        }
+        assert_eq!(store.live_count(), MAX_ENV_PER_SLOT);
+        // Oldest 4 evicted: first claim returns #4.
+        let first = store.claim(&slot, 0).expect("claim");
+        assert_eq!(first.ct, "ct-4");
+    }
+
+    #[test]
+    fn dead_drop_cross_slot_isolation() {
+        let mut store = DeadDropStore::new();
+        store.deposit(stress_envelope("a".repeat(64), 1), 0);
+        assert!(store.claim(&"b".repeat(64), 0).is_none());
+        assert_eq!(store.live_count(), 1);
+        assert!(store.claim(&"a".repeat(64), 0).is_some());
+        assert_eq!(store.live_count(), 0);
+    }
+
+    #[test]
+    fn dead_drop_sweep_removes_only_expired() {
+        let mut store = DeadDropStore::new();
+        store.deposit(stress_envelope("a".repeat(64), 1), 0);
+        store.deposit(stress_envelope("b".repeat(64), 2), 0);
+        // Sweep halfway: nothing expires yet.
+        assert_eq!(store.sweep_expired(ENVELOPE_TTL_MS - 1), 0);
+        assert_eq!(store.live_count(), 2);
+        // Past TTL: everything goes, empty slots vanish.
+        assert_eq!(store.sweep_expired(ENVELOPE_TTL_MS + 1), 2);
+        assert_eq!(store.live_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn dead_drop_concurrent_deposits_stay_capped() {
+        use std::sync::Arc;
+        let store = Arc::new(tokio::sync::Mutex::new(DeadDropStore::new()));
+        let mut tasks = Vec::new();
+        for t in 0..8u32 {
+            let store = Arc::clone(&store);
+            tasks.push(tokio::spawn(async move {
+                for n in 0..250u32 {
+                    let slot = format!("slot-{t:02}");
+                    let mut guard = store.lock().await;
+                    guard.deposit(stress_envelope(slot, n), 0);
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.expect("worker");
+        }
+        // 8 slots x 250 deposits each, per-slot FIFO cap 16.
+        assert_eq!(store.lock().await.live_count(), 8 * MAX_ENV_PER_SLOT);
+    }
+
+    async fn stress_state() -> crate::core::presence::SharedState {
+        use crate::core::config::{Config, DatabaseConfig};
+        use crate::core::database::{AccountDatabase, RoomDatabase};
+        use crate::core::models::now_ms;
+        use crate::core::presence::{AppState, RuntimeCounters};
+        use std::collections::{HashMap, HashSet};
+        use std::sync::Arc;
+        use tokio::sync::{Mutex, RwLock};
+        let dir = std::env::temp_dir().join(format!("lqxp-phantom-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temporary test dir");
+        let url = format!("sqlite://{}/test.sqlite?mode=rwc", dir.display());
+        let db_cfg = DatabaseConfig {
+            kind: "sqlite".to_owned(),
+            url,
+            create_if_missing: true,
+        };
+        let accounts = AccountDatabase::connect(&db_cfg, vec![], true)
+            .await
+            .expect("connect test accounts db");
+        let database = RoomDatabase::connect(&db_cfg)
+            .await
+            .expect("connect test room db");
+        Arc::new(AppState {
+            config: Config::default(),
+            started_at_ms: now_ms(),
+            runtime: Arc::new(RuntimeCounters::default()),
+            blocklist_terms: Arc::new(vec![]),
+            players: Arc::new(RwLock::new(HashMap::new())),
+            room_messages: Arc::new(RwLock::new(HashMap::new())),
+            database: Arc::new(database),
+            accounts: Arc::new(accounts),
+            rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            public_profile_cache: Arc::new(Mutex::new(HashMap::new())),
+            call_access_overrides: Arc::new(RwLock::new(HashSet::new())),
+            poll_tallies: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    // PhantomGate is the only model type not already in scope via `super::*`.
+    use crate::core::models::PhantomGate;
+
+    fn stress_gate(token: String, nullifier: String, quota: crate::core::rln::EpochQuotaToken) -> PhantomGate {
+        PhantomGate {
+            mode: PhantomGateMode::Cap,
+            token,
+            nullifier,
+            quota_token: Some(quota),
+        }
+    }
+
+    async fn stress_quota() -> (crate::core::rln::EpochQuotaToken, String) {
+        use crate::core::rln::{compute_nullifier, current_epoch, generate_quota_token};
+        let token = generate_quota_token();
+        let action = format!("phantom_deposit:{}", now_ms() / 86_400_000);
+        let nullifier = compute_nullifier(&token.ticket, token.epoch, &action);
+        assert_eq!(nullifier.len(), 64);
+        assert!(current_epoch() >= token.epoch);
+        (token, nullifier)
+    }
+
+    async fn stress_cap_token() -> String {
+        crate::core::cap::mint_test_cap_token(
+            &uuid::Uuid::new_v4().simple().to_string(),
+            "phantom",
+            600_000,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn deposit_validation_matrix_rejects_before_gates() {
+        let state = stress_state().await;
+        let run = stress_run();
+        let good_slot = stress_slot(&run, 1);
+        let (quota, nullifier) = stress_quota().await;
+        let base = PhantomEnvelope {
+            pv: 1,
+            slot_id: good_slot,
+            recipient_fp: "f".repeat(64),
+            sender_hint: "e".repeat(64),
+            bucket: 16384,
+            ct: "QUJD".to_owned(),
+        };
+        // Control: structurally valid envelope passes validation (fails later
+        // at the cap-token gate with a dummy token — proving validation ran).
+        let err = deposit(
+            &state,
+            PhantomDepositRequest {
+                envelope: base.clone(),
+                gate: stress_gate("tok".to_owned(), nullifier.clone(), quota.clone()),
+            },
+        )
+        .await
+        .expect_err("dummy cap token must fail");
+        assert!(err.to_string().contains("CAPTCHA"), "unexpected: {err}");
+
+        let cases: Vec<(&str, PhantomEnvelope)> = vec![
+            ("bad pv", PhantomEnvelope { pv: 2, ..base.clone() }),
+            ("bad slot", PhantomEnvelope { slot_id: "zz".to_owned(), ..base.clone() }),
+            ("bad fp", PhantomEnvelope { recipient_fp: "0".repeat(63), ..base.clone() }),
+            ("bad bucket", PhantomEnvelope { bucket: 8192, ..base.clone() }),
+            ("empty ct", PhantomEnvelope { ct: String::new(), ..base.clone() }),
+            ("oversize ct", PhantomEnvelope { ct: "A".repeat(96 * 1024 + 1), ..base.clone() }),
+        ];
+        for (label, envelope) in cases {
+            let err = deposit(
+                &state,
+                PhantomDepositRequest {
+                    envelope,
+                    gate: stress_gate("tok".to_owned(), nullifier.clone(), quota.clone()),
+                },
+            )
+            .await
+            .unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("version")
+                    || msg.contains("identifier")
+                    || msg.contains("bucket")
+                    || msg.contains("bounds"),
+                "{label}: unexpected error {msg}"
+            );
+        }
+
+        // Missing quota token and malformed nullifier fail before the store.
+        let err = deposit(
+            &state,
+            PhantomDepositRequest {
+                envelope: base.clone(),
+                gate: PhantomGate {
+                    mode: PhantomGateMode::Cap,
+                    token: "tok".to_owned(),
+                    nullifier: nullifier.clone(),
+                    quota_token: None,
+                },
+            },
+        )
+        .await
+        .expect_err("missing quota must fail");
+        assert!(err.to_string().contains("quota"));
+
+        let err = deposit(
+            &state,
+            PhantomDepositRequest {
+                envelope: base,
+                gate: PhantomGate {
+                    mode: PhantomGateMode::Cap,
+                    token: "tok".to_owned(),
+                    nullifier: "not-hex".to_owned(),
+                    quota_token: Some(quota),
+                },
+            },
+        )
+        .await
+        .expect_err("malformed nullifier must fail");
+        assert!(err.to_string().contains("nullifier"));
+    }
+
+    #[tokio::test]
+    async fn deposit_poll_gated_roundtrip_with_consume_and_padding() {
+        let state = stress_state().await;
+        let run = stress_run();
+        let slot = stress_slot(&run, 7);
+        let (quota, nullifier) = stress_quota().await;
+        let token = stress_cap_token().await;
+        deposit(
+            &state,
+            PhantomDepositRequest {
+                envelope: stress_envelope(slot.clone(), 1),
+                gate: stress_gate(token, nullifier, quota),
+            },
+        )
+        .await
+        .expect("gated deposit");
+
+        // First poll claims the envelope…
+        let frames = poll(
+            &state,
+            PhantomPollRequest {
+                slots: vec![slot.clone()],
+                want: 1,
+            },
+        )
+        .await
+        .expect("poll");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].as_ref().expect("claimed").ct, "ct-1");
+
+        // …second poll finds nothing (consumed) and pads to `want` with nulls.
+        let frames = poll(
+            &state,
+            PhantomPollRequest {
+                slots: vec![slot, "0".repeat(64)],
+                want: 3,
+            },
+        )
+        .await
+        .expect("poll");
+        assert_eq!(frames.len(), 3);
+        assert!(frames.iter().all(|f| f.is_none()));
+
+        // `want` is clamped to 8.
+        let frames = poll(&state, PhantomPollRequest { slots: vec![], want: 100 })
+            .await
+            .expect("poll");
+        assert_eq!(frames.len(), 8);
+
+        // Too many slots rejected.
+        let err = poll(
+            &state,
+            PhantomPollRequest {
+                slots: vec!["0".repeat(64); 65],
+                want: 1,
+            },
+        )
+        .await
+        .expect_err("slot overflow must fail");
+        assert!(err.to_string().contains("slots"));
+    }
+
+    #[tokio::test]
+    async fn deposit_replays_and_double_spends_fail() {
+        let state = stress_state().await;
+        let run = stress_run();
+        // Same quota token twice: nullifier already consumed.
+        let (quota, nullifier) = stress_quota().await;
+        let t1 = stress_cap_token().await;
+        deposit(
+            &state,
+            PhantomDepositRequest {
+                envelope: stress_envelope(stress_slot(&run, 1), 1),
+                gate: stress_gate(t1, nullifier.clone(), quota.clone()),
+            },
+        )
+        .await
+        .expect("first deposit");
+        let t2 = stress_cap_token().await;
+        let err = deposit(
+            &state,
+            PhantomDepositRequest {
+                envelope: stress_envelope(stress_slot(&run, 2), 2),
+                gate: stress_gate(t2, nullifier, quota),
+            },
+        )
+        .await
+        .expect_err("nullifier replay must fail");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("replay")
+                || msg.contains("nullifier")
+                || msg.contains("quota")
+                || msg.contains("429"),
+            "unexpected: {msg}"
+        );
+
+        // Same cap token twice: single-use.
+        let (quota2, nullifier2) = stress_quota().await;
+        let t3 = stress_cap_token().await;
+        deposit(
+            &state,
+            PhantomDepositRequest {
+                envelope: stress_envelope(stress_slot(&run, 3), 3),
+                gate: stress_gate(t3.clone(), nullifier2.clone(), quota2.clone()),
+            },
+        )
+        .await
+        .expect("first use");
+        let (quota3, nullifier3) = stress_quota().await;
+        let err = deposit(
+            &state,
+            PhantomDepositRequest {
+                envelope: stress_envelope(stress_slot(&run, 4), 4),
+                gate: stress_gate(t3, nullifier3, quota3),
+            },
+        )
+        .await
+        .expect_err("cap replay must fail");
+        assert!(err.to_string().contains("consumed"));
+    }
+
+    #[tokio::test]
+    async fn deposit_blocked_pair_rejected_opaquely() {
+        let state = stress_state().await;
+        let (user, _, _) = state
+            .accounts
+            .register("ghost_block", "password123")
+            .await
+            .expect("register");
+        let fp = "b".repeat(64);
+        let hint = "c".repeat(64);
+        let tag = block_tag(&fp, &hint);
+        assert!(state.accounts.add_block_tag(&user.id, &tag).await.expect("block"));
+        let run = stress_run();
+        let (quota, nullifier) = stress_quota().await;
+        let token = stress_cap_token().await;
+        let err = deposit(
+            &state,
+            PhantomDepositRequest {
+                envelope: PhantomEnvelope {
+                    pv: 1,
+                    slot_id: stress_slot(&run, 1),
+                    recipient_fp: fp,
+                    sender_hint: hint,
+                    bucket: 4096,
+                    ct: "QUJD".to_owned(),
+                },
+                gate: stress_gate(token, nullifier, quota),
+            },
+        )
+        .await
+        .expect_err("blocked pair must fail");
+        // Opaque: identical message no matter which side blocks
+        // (Display prefixes the status code).
+        assert!(err.to_string().ends_with("Deposit rejected."), "unexpected: {err}");
+    }
 }

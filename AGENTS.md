@@ -20,12 +20,35 @@ plaintext and stores no message content.
 
 ```sh
 cargo check
-cargo test          # must stay 34/34 green
+cargo test          # must stay green (currently 40+ tests)
 cargo clippy --all-targets   # pre-existing warnings only; add none
 ```
 
-No test harness for WS handlers exists; behavior changes to the relay must at
-minimum compile, pass `cargo test`, and keep clippy warning count flat.
+Relay behavior changes must at minimum compile, pass `cargo test`, and keep
+the clippy warning count flat.
+
+## Testing protocol (mandatory for protocol / implementation changes)
+
+Every change to a protocol or its implementation MUST ship with tests kept
+in the codebase:
+
+- **Unit tests** next to the code (`#[cfg(test)]` modules):
+  `websocket::protocol::sync_relay_tests` (fan-out, acks, limits, directory,
+  presence), `services::phantom::tests` (dead-drop caps/TTL/consume,
+  validation matrix, gated deposit→poll roundtrips, replays, blocks).
+- **Mocking + fault injection**: emulate the peer/relay with stale routes,
+  partitions, duplicates, tampered frames, expired TTLs, oversized payloads.
+  Client-side harnesses live in `lqxp/client`
+  (`cloudsync-mesh.test.ts` + `MockRelay`, `phantom-stress.test.ts` +
+  `MockDeadDrop`).
+- **Test-only helpers** go behind `#[cfg(test)]` (e.g.
+  `cap::mint_test_cap_token`). Never weaken prod gates for tests.
+- **Global-state hygiene**: the dead-drop store, nullifier/cap stores and
+  rate buckets are process-global — tests MUST use unique ids (uuid-prefixed
+  slots, random tickets) so parallel tests never cross-talk.
+- A stress run that finds a bug MUST include a regression test reproducing
+  it (e.g. the 4-device Pair-race deadlock, the inflight track-before-send
+  race).
 
 ## Rust conventions
 

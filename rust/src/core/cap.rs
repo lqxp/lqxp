@@ -225,3 +225,20 @@ pub async fn verify_and_consume_cap_token(token: &str, expected_scope: &str) -> 
         _ => Err(ApiError::bad_request("CAPTCHA token has already been consumed or is invalid.")),
     }
 }
+
+/// Test-only minter: issues a single-use cap token without solving a CAPTCHA.
+/// Each token id must be unique per test (the consumed/nulled stores are
+/// process-global and shared across tests).
+#[cfg(test)]
+pub async fn mint_test_cap_token(token_id: &str, scope: &str, ttl_ms: u64) -> String {
+    let expires_at = now_ms() + ttl_ms;
+    let token = format!(
+        "cap.{token_id}.{expires_at}.{}",
+        sign_data(&format!("{token_id}:{scope}:{expires_at}"))
+    );
+    get_token_store()
+        .lock()
+        .await
+        .insert(token.clone(), expires_at);
+    token
+}
