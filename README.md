@@ -65,23 +65,23 @@ flowchart LR
 ## Features
 
 ### Transport & cryptography
-★ **Blind relay core** — the server stores ciphertext, routes frames, and enforces rate limits. No plaintext, no metadata mining.
-★ **Post-quantum ready** — ML-KEM-768 key exchange and ML-DSA/SLH-DSA signatures alongside ECDSA P-256 ([primitives](./explain/06-cryptographic-primitives.md)).
-★ **QXP-PHANTOM** — the ghost-rendezvous friend protocol: blind mailbox slots, sealed envelopes, opaque blocking ([spec](./explain/05-phantom-protocol.md)).
-★ **QxCloudSync** — device-to-device sync over the same blind relay: hybrid PQ handshake, epoch keys, self-healing mesh ([spec](./explain/09-qxcloudsync.md)).
-★ **Tor-friendly** — clients can route through Tor; relay directory and circuit views included.
+- ★ **Blind relay core** — the server stores ciphertext, routes frames, and enforces rate limits. No plaintext, no metadata mining.
+- ★ **Post-quantum ready** — ML-KEM-768 key exchange and ML-DSA/SLH-DSA signatures alongside ECDSA P-256 ([primitives](./explain/06-cryptographic-primitives.md)).
+- ★ **QXP-PHANTOM** — the ghost-rendezvous friend protocol: blind mailbox slots, sealed envelopes, opaque blocking ([spec](./explain/05-phantom-protocol.md)).
+- ★ **QxCloudSync** — device-to-device sync over the same blind relay: hybrid PQ handshake, epoch keys, self-healing mesh ([spec](./explain/09-qxcloudsync.md)).
+- ★ **Tor-friendly** — clients can route through Tor; relay directory and circuit views included.
 
 ### Messaging & calls
-★ **Rooms & DMs** — tokens, roles, pins, threads, polls, whiteboard, spoiler particles.
-★ **Voice calls** — WebRTC peer-to-peer audio with TURN relay fallback and per-user volume.
-★ **Files & media** — images, audio, video, arbitrary files, link previews — encrypted like any message.
-★ **Pseudonymous accounts** — username-based identity, 12-word recovery, no email or phone required.
+- ★ **Rooms & DMs** — tokens, roles, pins, threads, polls, whiteboard, spoiler particles.
+- ★ **Voice calls** — WebRTC peer-to-peer audio with TURN relay fallback and per-user volume.
+- ★ **Files & media** — images, audio, video, arbitrary files, link previews — encrypted like any message.
+- ★ **Pseudonymous accounts** — username-based identity, 12-word recovery, no email or phone required.
 
 ### Operations
-★ **One binary** — `qxprotocol`, configured by a single TOML file, SQLite out of the box, Postgres when you grow.
-★ **Docker & bare metal** — Compose stack, systemd units, PM2 and Pelican recipes included.
-★ **Built-in web client** — the server owns a web checkout and rebuilds it on every startup; zero separate frontend deploy.
-★ **Anti-abuse baked in** — rate limits, quota tokens, VDF + CAPTCHA challenges, Privacy Pass ([details](./explain/07-anti-abuse.md)).
+- ★ **One binary** — `qxprotocol`, configured by a single TOML file, SQLite out of the box, Postgres when you grow.
+- ★ **Docker & bare metal** — Compose stack, systemd units, PM2 and Pelican recipes included.
+- ★ **Built-in web client** — the server owns a web checkout and rebuilds it on every startup; zero separate frontend deploy.
+- ★ **Anti-abuse baked in** — rate limits, quota tokens, VDF + CAPTCHA challenges, Privacy Pass ([details](./explain/07-anti-abuse.md)).
 
 ---
 
