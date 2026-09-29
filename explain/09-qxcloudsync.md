@@ -27,6 +27,10 @@ Handler: `relay_cloud_sync_op` (`websocket/protocol.rs`), modelled on
   same as op 55/111).
 - No DB write, no `room_messages` push, no dead-drop, no history. Invisible
   devices are included (unlike room broadcasts).
+- Stale routing is silent: a `toClientId` that no longer maps to a connected
+  session yields zero recipients, yet the sender still gets `{ ok: true }`
+  (relay ack, not peer ack). The client therefore never trusts the relay ack
+  and heals routing itself (see §9.3).
 
 ## 9.2 Trust root and key schedule (client-only)
 
@@ -52,11 +56,21 @@ Handler: `relay_cloud_sync_op` (`websocket/protocol.rs`), modelled on
   Sessions are additionally persisted client-side, AES-GCM encrypted under
   `HKDF(syncRoot, "", "qxcloudsync:persist:v1")`, so a browser restart does not
   force a re-pair (the server still stores nothing).
-- Pairing is automatic: with sync enabled and the 12 words present, each client
-  broadcasts a signed hello on boot (jittered 2–6 s); any holder of the same
-  words verifies the HMAC and answers. No manual button in routine; the manual
-  Pair only forces an immediate search. One session per peer (N devices), hello
-  broadcast, accept/confirm/data unicast via `toClientId`.
+- Topology is a full mesh of pairwise sessions with **no transitive trust
+  and no forwarding**: A paired with B and C does not make B and C know each
+  other, and A never relays between them. Every pair needs its own direct
+  handshake (hello → accept → confirm → dedicated master/epoch). N devices =
+  N(N−1)/2 handshakes. Version vectors still gossip-merge, so data converges
+  once the pairwise legs exist.
+- Pairing: with sync enabled and the 12 words present, a client with zero
+  sessions broadcasts a signed hello on boot (jittered 2–6 s); any holder of
+  the same words verifies the HMAC and answers. Devices that already hold
+  sessions do not auto-hello; the manual Pair button (or a re-handshake, see
+  §9.3) covers later joins. Hello broadcast, accept/confirm/data unicast via
+  `toClientId`. Duplicate hellos are ignored while the existing session shows
+  recent verified inbound traffic, but answered when that session is stale
+  (reinstall / divergence recovery) — the completed handshake then replaces
+  the old session and its secrets are wiped.
 - Hellos carry a signed normalized `platform` (`mobile` | `web` | `desktop`)
   shown in Settings → Sync with one icon per type.
 - Epoch keys: `syncEpochKey_k = HKDF(syncMaster, BE64(k),
@@ -68,7 +82,34 @@ Handler: `relay_cloud_sync_op` (`websocket/protocol.rs`), modelled on
 - `roomKey` never travels raw: `AES-GCM(wrapKey, roomKey)` where
   `wrapKey = HKDF(epochKey, "", "qxcloudsync:roomkey-wrap:v1")`.
 
-## 9.3 deepMerge rules
+## 9.3 Mesh self-healing (client-only)
+
+`peerWs` (the peer's WS `client_id` used for unicast) goes stale on every
+reconnect, tab reload, or phone wake — and the relay drops such frames
+without telling the sender (§9.1). Before healing, a stale leg stalled
+silently (auto-hello only fires with zero sessions) and a rekey lost in a
+stale route split epochs permanently (both sides then drop everything:
+the sender already advanced, the receiver's own rekey is rejected as
+`epoch != sess.epoch + 1`).
+
+- `lastInboundAt` per session: last *verified inbound* traffic only.
+  (`lastSeen` is also bumped on send, so it can never detect a one-way
+  black hole — a sender pushing into the void would look "fresh".)
+- Stale route → broadcast fallback: past 3 min without inbound, pushes,
+  rekeys and revokes go out with empty `toClientId` (server fans out to all
+  same-`user_id` sessions). Reception refreshes `peerWs` via `fromClientId`
+  and the ack heals the way back — one round trip restores the leg.
+- Epoch healing on receive, only for envelopes addressed to us (`outer.to`
+  must equal our device id; third-party broadcast fallbacks are ignored):
+  missed rekey → bounded local fast-forward (≤ 10 epochs; the subsequent
+  `openData` authenticates, so only the master holder can trigger adoption);
+  peer behind → resend of the current signed rekey; unknown `syncId` →
+  fresh handshake. Re-handshakes and rekey resends are rate-limited to
+  1/min/peer.
+- Epoch is never advanced without a successful rekey send
+  (`sendRekeyMessage`, shared by the rotation scheduler and the resend path).
+
+## 9.4 deepMerge rules
 
 Every object carries `{ updatedAt, by }`; rooms/messages carry ids.
 Version vectors `{ deviceId: counter }` select deltas; merge = union + LWW
@@ -89,7 +130,7 @@ IndexedDB) and never re-imported from stale snapshots while the tombstone
 lives. Pins (`pinnedRooms`, ≤5) sync LWW; room `members` are attached for
 newly imported rooms only, so live rosters are never clobbered.
 
-## 9.4 Event propagation
+## 9.5 Event propagation
 Snapshots are full-state and idempotent, but they are not only periodic:
 `persist()` itself notifies subscribers (internal mutation calls included),
 coalesced into one push 2.5 s after the last change. Out-of-band stores
@@ -97,7 +138,7 @@ coalesced into one push 2.5 s after the last change. Out-of-band stores
 remote snapshot never re-notifies (internal guard), so there is no echo loop.
 The 90 s timer remains as a safety net.
 
-## 9.5 Security properties (audited)
+## 9.6 Security properties (audited)
 
 - **Quantum-proof (hybrid):** KEX = ECDH P-256 + 2× ML-KEM-768 (FIPS 203),
   safe via the ML-KEM component; identity = ECDSA P-256 + SLH-DSA-SHA2-128f
