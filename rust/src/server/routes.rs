@@ -20,7 +20,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     core::{
-        database::{AuthenticatedUser, MAX_SOCIAL_BLOB_BYTES},
+        database::{AuthenticatedUser, UserListFilter, MAX_SOCIAL_BLOB_BYTES},
         models::{PassRedeemRequest, PhantomDepositRequest, PhantomPollRequest, SocialBlobPutRequest},
         presence::SharedState,
         result::{ApiError, ApiResult},
@@ -588,6 +588,12 @@ struct AdminUserSearchQuery {
 struct AdminUserListQuery {
     limit: Option<usize>,
     cursor: Option<String>,
+    q: Option<String>,
+    status: Option<String>,
+    badge: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    sort: Option<String>,
 }
 
 async fn admin_users_list_handler(
@@ -602,9 +608,23 @@ async fn admin_users_list_handler(
             "List rate limit exceeded. Please wait a minute.",
         ));
     }
-    admin::list_users(&state, &admin, query.limit.unwrap_or(100), query.cursor.as_deref())
-        .await
-        .map(Json)
+    let filter = UserListFilter::from_params(
+        query.q.as_deref(),
+        query.status.as_deref(),
+        query.badge.as_deref(),
+        query.from.as_deref(),
+        query.to.as_deref(),
+        query.sort.as_deref(),
+    )?;
+    admin::list_users(
+        &state,
+        &admin,
+        query.limit.unwrap_or(100),
+        query.cursor.as_deref(),
+        &filter,
+    )
+    .await
+    .map(Json)
 }
 
 async fn admin_users_search_handler(

@@ -2,13 +2,14 @@ use std::{
     collections::BTreeMap,
     path::{PathBuf},
     str::FromStr,
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use sqlx::{
     postgres::{PgPool, PgPoolOptions},
     sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions},
-    Row,
+    ColumnIndex, FromRow, Row,
 };
 use tokio::fs;
 
@@ -168,6 +169,189 @@ pub struct AccountDatabase {
     admin_ids: Vec<String>,
 }
 
+/// Sort order for the admin user browse. The keyset cursor always matches
+/// the active sort so pages stay stable while accounts are created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UserListSort {
+    /// Newest first (`created_at DESC, id DESC`).
+    #[default]
+    Newest,
+    /// Oldest first (`created_at ASC, id ASC`).
+    Oldest,
+    /// Case-insensitive username (`LOWER(username) ASC, id ASC`).
+    Username,
+}
+
+/// Account-state filter for the admin user browse. `Admin` matches the
+/// configured admin id list; every other variant reads the stored flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UserListStatus {
+    #[default]
+    All,
+    Active,
+    Disabled,
+    Banned,
+    Admin,
+}
+
+/// Server-side filters for the admin user browse
+/// (`GET /api/admin/users`). Everything here is a pure SQL predicate, so
+/// filtered pages stay full-or-exhausted and the client's `page < limit`
+/// exhaustion heuristic keeps working at any table size.
+#[derive(Debug, Clone, Default)]
+pub struct UserListFilter {
+    /// Case-insensitive substring over `username` and `id`.
+    pub query: String,
+    pub status: UserListStatus,
+    /// Substring over the stored custom badges, plus the computed `admin`
+    /// and `early` badge names (matched against the admin id list and the
+    /// global creation rank, exactly like `user_badges` derives them).
+    pub badge: String,
+    /// Inclusive `created_at` bounds, epoch milliseconds.
+    pub created_after: Option<i64>,
+    pub created_before: Option<i64>,
+    pub sort: UserListSort,
+}
+
+impl UserListFilter {
+    /// Builds a filter from raw query params, rejecting garbage with a
+    /// static 400 message (never interpolate user input into errors).
+    pub fn from_params(
+        q: Option<&str>,
+        status: Option<&str>,
+        badge: Option<&str>,
+        from: Option<&str>,
+        to: Option<&str>,
+        sort: Option<&str>,
+    ) -> ApiResult<Self> {
+        let query = q.unwrap_or("").trim().chars().take(64).collect::<String>();
+        let status = match status.unwrap_or("all").trim().to_lowercase().as_str() {
+            "all" => UserListStatus::All,
+            "active" => UserListStatus::Active,
+            "disabled" => UserListStatus::Disabled,
+            "banned" => UserListStatus::Banned,
+            "admin" => UserListStatus::Admin,
+            _ => return Err(ApiError::bad_request("Invalid status.")),
+        };
+        let badge = badge
+            .unwrap_or("")
+            .trim()
+            .to_lowercase()
+            .chars()
+            .take(64)
+            .collect::<String>();
+        let parse_bound = |raw: Option<&str>, name: &str| -> ApiResult<Option<i64>> {
+            match raw {
+                None => Ok(None),
+                Some(text) => {
+                    let value = text
+                        .trim()
+                        .parse::<i64>()
+                        .map_err(|_| ApiError::bad_request(name))?;
+                    if value < 0 {
+                        return Err(ApiError::bad_request(name));
+                    }
+                    Ok(Some(value))
+                }
+            }
+        };
+        let created_after = parse_bound(from, "Invalid from.")?;
+        let created_before = parse_bound(to, "Invalid to.")?;
+        if let (Some(after), Some(before)) = (created_after, created_before) {
+            if after > before {
+                return Err(ApiError::bad_request("Invalid range."));
+            }
+        }
+        let sort = match sort.unwrap_or("newest").trim().to_lowercase().as_str() {
+            "newest" => UserListSort::Newest,
+            "oldest" => UserListSort::Oldest,
+            "username" => UserListSort::Username,
+            _ => return Err(ApiError::bad_request("Invalid sort.")),
+        };
+        Ok(Self {
+            query,
+            status,
+            badge,
+            created_after,
+            created_before,
+            sort,
+        })
+    }
+}
+
+/// Keyset position for the admin user browse. The encoding is tagged so a
+/// cursor is only ever read back with the sort order that wrote it; the
+/// pre-tag `{created}:{id}` shape is still accepted as a time cursor so a
+/// client mid-pagination across a server upgrade does not get a 400.
+enum UserListCursor {
+    Time { created: i64, id: String },
+    Name { username: String, id: String },
+}
+
+/// String that sorts after every plausible account id on first DESC pages.
+const CURSOR_HIGH_ID: &str = "\u{10FFFF}";
+
+fn decode_user_cursor(raw: &str) -> ApiResult<Option<UserListCursor>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let invalid = || ApiError::bad_request("Invalid cursor.");
+    let check_id = |id: &str| -> ApiResult<String> {
+        if id.is_empty() || id.len() > 64 {
+            return Err(invalid());
+        }
+        Ok(id.to_owned())
+    };
+    if let Some(rest) = raw.strip_prefix("t:") {
+        let (created_raw, id_raw) = rest.split_once(':').ok_or_else(invalid)?;
+        let created = created_raw.parse::<i64>().map_err(|_| invalid())?;
+        return Ok(Some(UserListCursor::Time {
+            created,
+            id: check_id(id_raw)?,
+        }));
+    }
+    if let Some(rest) = raw.strip_prefix("u:") {
+        // Split at the last colon: legacy usernames can hold anything,
+        // ids (snowflakes) never contain one.
+        let (name_raw, id_raw) = rest.rsplit_once(':').ok_or_else(invalid)?;
+        if name_raw.is_empty() || name_raw.chars().count() > 128 {
+            return Err(invalid());
+        }
+        return Ok(Some(UserListCursor::Name {
+            username: name_raw.to_owned(),
+            id: check_id(id_raw)?,
+        }));
+    }
+    let (created_raw, id_raw) = raw.split_once(':').ok_or_else(invalid)?;
+    let created = created_raw.parse::<i64>().map_err(|_| invalid())?;
+    Ok(Some(UserListCursor::Time {
+        created,
+        id: check_id(id_raw)?,
+    }))
+}
+
+/// One bound value for the dynamically built listing query. Variants exist
+/// so conditions can be assembled in a fixed order for both backends.
+enum ListBind {
+    Int(i64),
+    Text(String),
+}
+
+/// Applies a dynamic bind list to a concrete query. Must stay a macro:
+/// `Query::bind` needs `Encode + Type` for the concrete database, which no
+/// generic helper can promise for both backends at once.
+macro_rules! bind_all {
+    ($query:ident, $binds:expr) => {{
+        for bind in $binds {
+            $query = match bind {
+                ListBind::Int(value) => $query.bind(value),
+                ListBind::Text(value) => $query.bind(value),
+            };
+        }
+    }};
+}
+
 impl AccountDatabase {
     pub async fn connect(
         config: &DatabaseConfig,
@@ -187,7 +371,12 @@ impl AccountDatabase {
             ensure_sqlite_database(&config.url, config.create_if_missing).await?;
             let options = SqliteConnectOptions::from_str(&config.url)
                 .map_err(|err| ApiError::internal("SQLite URL invalid", err))?
-                .create_if_missing(config.create_if_missing);
+                .create_if_missing(config.create_if_missing)
+                // Under production write load a reader can hit SQLITE_BUSY
+                // while a writer holds the database lock. Retry in-process
+                // for a few seconds instead of failing the request: without
+                // this every endpoint 500s the moment two connections collide.
+                .busy_timeout(Duration::from_secs(5));
             SqlBackend::Sqlite(
                 SqlitePoolOptions::new()
                     .max_connections(5)
@@ -1479,12 +1668,12 @@ impl AccountDatabase {
     /// candidates (exact → prefix → substring) are then ranked in Rust by
     /// edit distance, so typos still surface and only the top `limit`
     /// matches are returned.
-    pub async fn search_users(&self, query: &str, limit: usize) -> ApiResult<Vec<PublicUser>> {
+    pub async fn search_users(&self, query: &str, limit: usize) -> ApiResult<(Vec<PublicUser>, u64)> {
         // Usernames are capped at 32 chars server-side; bound the needle so
         // huge queries can't turn into expensive LIKE scans.
         let needle: String = query.trim().to_lowercase().chars().take(64).collect();
         if needle.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
         let limit = limit.clamp(1, 50);
         // Ask the DB for a few extra candidates so the in-Rust ranking has
@@ -1494,12 +1683,14 @@ impl AccountDatabase {
         let substring = format!("%{}%", escape_like_pattern(&needle));
 
         let select = "SELECT * FROM (SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) ranked_users";
-        let rows = match &self.backend {
+        // Rows decode independently per backend (SqliteRow vs PgRow never
+        // unify), then share the resilient decoder below.
+        let (stored, skipped) = match &self.backend {
             SqlBackend::Sqlite(pool) => {
                 let sql = format!(
                     "{select} WHERE LOWER(username) = ? OR LOWER(username) LIKE ? ESCAPE '\\' OR LOWER(username) LIKE ? ESCAPE '\\' ORDER BY CASE WHEN LOWER(username) = ? THEN 0 WHEN LOWER(username) LIKE ? ESCAPE '\\' THEN 1 ELSE 2 END ASC, created_at DESC LIMIT ?"
                 );
-                sqlx::query_as::<_, RawStoredUser>(&sql)
+                let rows = sqlx::query(&sql)
                     .bind(&needle)
                     .bind(&prefix)
                     .bind(&substring)
@@ -1508,25 +1699,29 @@ impl AccountDatabase {
                     .bind(sql_limit)
                     .fetch_all(pool)
                     .await
+                    .map_err(|err| ApiError::internal("Search users query", err))?;
+                self.decode_stored_rows(rows)
             }
             SqlBackend::Postgres(pool) => {
                 let sql = format!(
                     "{select} WHERE LOWER(username) = $1 OR LOWER(username) LIKE $2 ESCAPE '\\' OR LOWER(username) LIKE $3 ESCAPE '\\' ORDER BY CASE WHEN LOWER(username) = $1 THEN 0 WHEN LOWER(username) LIKE $2 ESCAPE '\\' THEN 1 ELSE 2 END ASC, created_at DESC LIMIT $4"
                 );
-                sqlx::query_as::<_, RawStoredUser>(&sql)
+                let rows = sqlx::query(&sql)
                     .bind(&needle)
                     .bind(&prefix)
                     .bind(&substring)
                     .bind(sql_limit)
                     .fetch_all(pool)
                     .await
+                    .map_err(|err| ApiError::internal("Search users query", err))?;
+                self.decode_stored_rows(rows)
             }
-        }
-        .map_err(|err| ApiError::internal("Search users query", err))?;
+        };
 
-        let mut ranked: Vec<(u8, usize, StoredUser)> = Vec::with_capacity(rows.len());
-        for row in rows {
-            let user = self.stored_from_raw(row)?;
+        // One malformed row must not fail the whole search: decode per row,
+        // skip what does not parse, and report how many were skipped.
+        let mut ranked: Vec<(u8, usize, StoredUser)> = Vec::with_capacity(stored.len());
+        for user in stored {
             let username = user.username.to_lowercase();
             let class = if username == needle {
                 0
@@ -1546,76 +1741,285 @@ impl AccountDatabase {
                 .then(b.2.created_at.cmp(&a.2.created_at))
         });
         ranked.truncate(limit);
-        Ok(ranked
+        let users = ranked
             .into_iter()
             .map(|(_, _, user)| self.public_user(user))
-            .collect())
+            .collect();
+        Ok((users, skipped))
     }
 
-    /// Paginated full-table browse for the admin user center. Keyset on
-    /// `(created_at, id)` so pages stay stable while accounts are created.
-    /// Cursor format: `{created_at}:{id}` (both numeric, admin-only endpoint).
-    /// Returns the page plus the cursor for the next page, if any.
-    pub async fn list_users_page(
-        &self,
-        limit: usize,
-        cursor: Option<&str>,
-    ) -> ApiResult<(Vec<PublicUser>, Option<String>)> {
-        let limit = limit.clamp(1, 100);
-        let (after_created, after_id) = match cursor {
-            Some(raw) => {
-                let raw = raw.trim();
-                if raw.is_empty() {
-                    (0i64, String::new())
-                } else {
-                    let (created_raw, id_raw) = raw
-                        .split_once(':')
-                        .ok_or_else(|| ApiError::bad_request("Invalid cursor."))?;
-                    let created = created_raw
-                        .parse::<i64>()
-                        .map_err(|_| ApiError::bad_request("Invalid cursor."))?;
-                    if created < 0 || id_raw.is_empty() || id_raw.len() > 64 {
-                        return Err(ApiError::bad_request("Invalid cursor."));
+
+    /// Decodes one batch of user rows, skipping malformed rows instead of
+    /// failing the whole page. A single legacy/hand-edited row (NULL or a
+    /// mistyped value where the schema says otherwise) used to turn every
+    /// admin listing into a 500; now it is warned about and counted.
+    fn decode_stored_rows<R>(&self, rows: Vec<R>) -> (Vec<StoredUser>, u64)
+    where
+        R: sqlx::Row,
+        RawStoredUser: for<'r> FromRow<'r, R>,
+        for<'r> &'r str: ColumnIndex<R>,
+        String: sqlx::Type<<R as sqlx::Row>::Database>,
+        for<'r> String: sqlx::Decode<'r, <R as sqlx::Row>::Database>,
+    {
+        let mut users = Vec::with_capacity(rows.len());
+        let mut skipped = 0u64;
+        for row in &rows {
+            match RawStoredUser::from_row(row) {
+                Ok(raw) => match self.stored_from_raw(raw) {
+                    Ok(user) => users.push(user),
+                    Err(err) => {
+                        skipped += 1;
+                        tracing::warn!("Skipping malformed user row: {err}");
                     }
-                    (created, id_raw.to_owned())
+                },
+                Err(err) => {
+                    skipped += 1;
+                    let id = row
+                        .try_get::<String, _>("id")
+                        .unwrap_or_else(|_| "?".to_owned());
+                    tracing::warn!("Skipping malformed user row id={id}: {err}");
                 }
             }
-            None => (0i64, String::new()),
-        };
+        }
+        (users, skipped)
+    }
+
+    /// Paginated full-table browse for the admin user center
+    /// (`GET /api/admin/users`). Keyset on `(created_at, id)` for time sorts
+    /// and `(LOWER(username), id)` for username sort, so pages stay stable
+    /// while accounts are created. Returns the page plus the cursor for the
+    /// next page (if any) plus the count of malformed rows skipped.
+    pub async fn list_users_page(
+        &self,
+        filter: &UserListFilter,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> ApiResult<(Vec<PublicUser>, Option<String>, u64)> {
+        let limit = limit.clamp(1, 100);
+        let position = decode_user_cursor(cursor.unwrap_or(""))?;
         // created_at is stored as BIGINT ms; ids are numeric snowflakes, so
         // lexicographic id comparison matches numeric order here.
-        // `0 AS user_rank` satisfies RawStoredUser (unused for listing).
-        let select = "SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, 0 AS user_rank, username_changes_json, custom_badges_json FROM users WHERE (created_at > ? OR (created_at = ? AND id > ?)) ORDER BY created_at ASC, id ASC LIMIT ?";
-        let select_pg = "SELECT id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, 0 AS user_rank, username_changes_json, custom_badges_json FROM users WHERE (created_at > $1 OR (created_at = $1 AND id > $2)) ORDER BY created_at ASC, id ASC LIMIT $3";
-        let rows: Vec<RawStoredUser> = match &self.backend {
-            SqlBackend::Sqlite(pool) => sqlx::query_as::<_, RawStoredUser>(select)
-                .bind(after_created)
-                .bind(after_created)
-                .bind(&after_id)
-                .bind(limit as i64 + 1)
-                .fetch_all(pool)
-                .await
-                .map_err(|err| ApiError::internal("List users query", err))?,
-            SqlBackend::Postgres(pool) => sqlx::query_as::<_, RawStoredUser>(select_pg)
-                .bind(after_created)
-                .bind(&after_id)
-                .bind(limit as i64 + 1)
-                .fetch_all(pool)
-                .await
-                .map_err(|err| ApiError::internal("List users query", err))?,
+        let (after_created, after_id, after_name) = match (filter.sort, position) {
+            (UserListSort::Newest, None) => (i64::MAX, CURSOR_HIGH_ID.to_owned(), String::new()),
+            (UserListSort::Newest, Some(UserListCursor::Time { created, id })) => (created, id, String::new()),
+            (UserListSort::Oldest, None) => (i64::MIN, String::new(), String::new()),
+            (UserListSort::Oldest, Some(UserListCursor::Time { created, id })) => (created, id, String::new()),
+            (UserListSort::Username, None) => (0, String::new(), String::new()),
+            (UserListSort::Username, Some(UserListCursor::Name { username, id })) => (0, id, username),
+            // A cursor written by another sort order cannot be honored.
+            _ => return Err(ApiError::bad_request("Invalid cursor.")),
         };
-        let has_more = rows.len() > limit;
-        let mut users = Vec::with_capacity(rows.len().min(limit));
-        for row in rows.into_iter().take(limit) {
-            let user = self.stored_from_raw(row)?;
-            users.push(self.public_user(user));
+
+        // Conditions are assembled once, rendered per backend (`?` vs `$n`).
+        // `user_rank` comes from the same full-table window the search uses,
+        // so the `early` badge check matches `user_badges` exactly.
+        enum Cond {
+            Keyset,
+            Query,
+            Active,
+            Disabled,
+            Banned,
+            Admin,
+            Badge,
+            From,
+            To,
+        }
+        let mut conds: Vec<Cond> = vec![Cond::Keyset];
+        if !filter.query.is_empty() {
+            conds.push(Cond::Query);
+        }
+        match filter.status {
+            UserListStatus::All => {}
+            UserListStatus::Active => conds.push(Cond::Active),
+            UserListStatus::Disabled => conds.push(Cond::Disabled),
+            UserListStatus::Banned => conds.push(Cond::Banned),
+            UserListStatus::Admin => {
+                if self.admin_ids.is_empty() {
+                    return Ok((Vec::new(), None, 0));
+                }
+                conds.push(Cond::Admin);
+            }
+        }
+        if !filter.badge.is_empty() {
+            conds.push(Cond::Badge);
+        }
+        if filter.created_after.is_some() {
+            conds.push(Cond::From);
+        }
+        if filter.created_before.is_some() {
+            conds.push(Cond::To);
+        }
+
+        let needle = filter.query.to_lowercase();
+        let needle_like = format!("%{}%", escape_like_pattern(&needle));
+        let badge_like = format!("%{}%", escape_like_pattern(&filter.badge));
+        let admin_ids = self.admin_ids.clone();
+
+        // Renders the WHERE clause; `pg` selects `$n` placeholders, sqlite `?`.
+        let render = |pg: bool| -> (String, Vec<ListBind>) {
+            let mut counter = 0usize;
+            let mut next = || -> String {
+                counter += 1;
+                if pg {
+                    format!("${}", counter)
+                } else {
+                    "?".to_owned()
+                }
+            };
+            let mut parts: Vec<String> = Vec::with_capacity(conds.len());
+            let mut binds: Vec<ListBind> = Vec::new();
+            for cond in &conds {
+                match cond {
+                    Cond::Keyset => match filter.sort {
+                        UserListSort::Newest => {
+                            let a = next();
+                            let b = next();
+                            let c = next();
+                            binds.push(ListBind::Int(after_created));
+                            binds.push(ListBind::Int(after_created));
+                            binds.push(ListBind::Text(after_id.clone()));
+                            parts.push(format!("(created_at < {a} OR (created_at = {b} AND id < {c}))"));
+                        }
+                        UserListSort::Oldest => {
+                            let a = next();
+                            let b = next();
+                            let c = next();
+                            binds.push(ListBind::Int(after_created));
+                            binds.push(ListBind::Int(after_created));
+                            binds.push(ListBind::Text(after_id.clone()));
+                            parts.push(format!("(created_at > {a} OR (created_at = {b} AND id > {c}))"));
+                        }
+                        UserListSort::Username => {
+                            let a = next();
+                            let b = next();
+                            let c = next();
+                            binds.push(ListBind::Text(after_name.clone()));
+                            binds.push(ListBind::Text(after_name.clone()));
+                            binds.push(ListBind::Text(after_id.clone()));
+                            parts.push(format!("(LOWER(username) > LOWER({a}) OR (LOWER(username) = LOWER({b}) AND id > {c}))"));
+                        }
+                    },
+                    Cond::Query => {
+                        let a = next();
+                        let b = next();
+                        binds.push(ListBind::Text(needle_like.clone()));
+                        binds.push(ListBind::Text(needle_like.clone()));
+                        parts.push(format!("(LOWER(username) LIKE {a} ESCAPE '\\' OR LOWER(id) LIKE {b} ESCAPE '\\')"));
+                    }
+                    Cond::Active => {
+                        parts.push("(disabled = 0 AND banned = 0)".to_owned());
+                    }
+                    Cond::Disabled => {
+                        parts.push("(disabled != 0)".to_owned());
+                    }
+                    Cond::Banned => {
+                        parts.push("(banned != 0)".to_owned());
+                    }
+                    Cond::Admin => {
+                        let holes: Vec<String> =
+                            admin_ids.iter().map(|_| next()).collect();
+                        for id in &admin_ids {
+                            binds.push(ListBind::Text(id.clone()));
+                        }
+                        parts.push(format!("(id IN ({}))", holes.join(", ")));
+                    }
+                    Cond::Badge => {
+                        // Placeholders and binds follow TEXT order (sqlite `?`
+                        // is positional; Postgres `$n` just needs 1..=max
+                        // bound, which text order also satisfies).
+                        let like_custom = next();
+                        binds.push(ListBind::Text(badge_like.clone()));
+                        let like_admin = next();
+                        binds.push(ListBind::Text(badge_like.clone()));
+                        let mut admin_holes: Vec<String> = Vec::new();
+                        for id in &admin_ids {
+                            admin_holes.push(next());
+                            binds.push(ListBind::Text(id.clone()));
+                        }
+                        let like_early = next();
+                        binds.push(ListBind::Text(badge_like.clone()));
+                        // Stored custom badges, plus the two computed names
+                        // with their membership rule, mirroring `user_badges`.
+                        let admin_part = if admin_holes.is_empty() {
+                            "0 = 1".to_owned()
+                        } else {
+                            format!("id IN ({})", admin_holes.join(", "))
+                        };
+                        parts.push(format!(
+                            "(LOWER(custom_badges_json) LIKE {like_custom} ESCAPE '\\' OR ('admin' LIKE {like_admin} ESCAPE '\\' AND ({admin_part})) OR ('early' LIKE {like_early} ESCAPE '\\' AND user_rank >= 1 AND user_rank <= 200))"
+                        ));
+                    }
+                    Cond::From => {
+                        let place = next();
+                        binds.push(ListBind::Int(filter.created_after.unwrap_or(0)));
+                        parts.push(format!("(created_at >= {place})"));
+                    }
+                    Cond::To => {
+                        let place = next();
+                        binds.push(ListBind::Int(filter.created_before.unwrap_or(0)));
+                        parts.push(format!("(created_at <= {place})"));
+                    }
+                }
+            }
+            (parts.join(" AND "), binds)
+        };
+
+        // The rank window runs over the whole table (like search) so `early`
+        // keeps its global meaning under any filter combination.
+        const COLS: &str = "id, username, password_hash, recovery_hash, profile_json, status, disabled, banned, created_at, username_changes_json, custom_badges_json";
+        let order = match filter.sort {
+            UserListSort::Newest => "ORDER BY created_at DESC, id DESC",
+            UserListSort::Oldest => "ORDER BY created_at ASC, id ASC",
+            UserListSort::Username => "ORDER BY LOWER(username) ASC, id ASC",
+        };
+        let fetch = limit as i64 + 1;
+        let from = "SELECT {COLS}, user_rank FROM (SELECT {COLS}, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS user_rank FROM users) ranked_users"
+            .replace("{COLS}", COLS);
+        let (raw_rows_len, users, skipped) = match &self.backend {
+            SqlBackend::Sqlite(pool) => {
+                let (where_sql, binds) = render(false);
+                let sql = format!("{from} WHERE {where_sql} {order} LIMIT ?");
+                let mut query = sqlx::query(&sql);
+                bind_all!(query, binds);
+                let rows = query
+                    .bind(fetch)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(|err| ApiError::internal("List users query", err))?;
+                let raw_len = rows.len();
+                let (users, skipped) = self.decode_stored_rows(rows);
+                (raw_len, users, skipped)
+            }
+            SqlBackend::Postgres(pool) => {
+                let (where_sql, binds) = render(true);
+                let limit_slot = binds.len() + 1;
+                let sql = format!("{from} WHERE {where_sql} {order} LIMIT ${limit_slot}");
+                let mut query = sqlx::query(&sql);
+                bind_all!(query, binds);
+                let rows = query
+                    .bind(fetch)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(|err| ApiError::internal("List users query", err))?;
+                let raw_len = rows.len();
+                let (users, skipped) = self.decode_stored_rows(rows);
+                (raw_len, users, skipped)
+            }
+        };
+        let has_more = raw_rows_len > limit;
+        let mut public: Vec<PublicUser> = Vec::with_capacity(users.len().min(limit));
+        for user in users.into_iter().take(limit) {
+            public.push(self.public_user(user));
         }
         let next_cursor = if has_more {
-            users.last().map(|u| format!("{}:{}", u.created_at, u.id))
+            public.last().map(|u| match filter.sort {
+                UserListSort::Username => format!("u:{}:{}", u.username, u.id),
+                _ => format!("t:{}:{}", u.created_at, u.id),
+            })
         } else {
             None
         };
-        Ok((users, next_cursor))
+        Ok((public, next_cursor, skipped))
     }
 
         pub async fn set_user_disabled(&self, user_id: &str, disabled: bool) -> ApiResult<()> {        let value = if disabled { 1i64 } else { 0i64 };
@@ -2395,4 +2799,385 @@ async fn ensure_sqlite_database(url: &str, create_if_missing: bool) -> ApiResult
         path.display()
     );
     Ok(())
+}
+
+/// Admin user-center tests: listing resilience at scale-shaped data (one bad
+/// row must not fail the page), server-side filters, sort orders with stable
+/// keyset pagination, and cursor formats. SQLite only — Postgres shares the
+/// same query builder, and CI has no Postgres service.
+#[cfg(test)]
+mod admin_users_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DB_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    async fn test_db(admin_ids: Vec<String>) -> (AccountDatabase, PathBuf) {
+        let n = TEST_DB_SEQ.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "qx-admin-list-test-{}-{n}.sqlite",
+            std::process::id()
+        ));
+        let _ = tokio::fs::remove_file(&path).await;
+        let config = DatabaseConfig {
+            kind: "sqlite".to_owned(),
+            url: format!("sqlite://{}?mode=rwc", path.display()),
+            create_if_missing: true,
+        };
+        let db = AccountDatabase::connect(&config, admin_ids, true)
+            .await
+            .expect("test database connects");
+        (db, path)
+    }
+
+    async fn seed(db: &AccountDatabase, username: &str) -> String {
+        db.register(username, "test-password-123")
+            .await
+            .expect("register test user")
+            .0
+            .id
+    }
+
+    async fn set_created_at(db: &AccountDatabase, user_id: &str, created_at: i64) {
+        match &db.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query("UPDATE users SET created_at = ? WHERE id = ?")
+                    .bind(created_at)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .expect("set created_at");
+            }
+            SqlBackend::Postgres(_) => unreachable!("sqlite-only test"),
+        }
+    }
+
+    /// Legacy/hand-edited type mix: TEXT where the schema says BIGINT.
+    async fn corrupt_disabled_flag(db: &AccountDatabase, user_id: &str) {
+        match &db.backend {
+            SqlBackend::Sqlite(pool) => {
+                sqlx::query("UPDATE users SET disabled = 'yes' WHERE id = ?")
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .expect("corrupt row");
+            }
+            SqlBackend::Postgres(_) => unreachable!("sqlite-only test"),
+        }
+    }
+
+    fn plain_filter() -> UserListFilter {
+        UserListFilter::default()
+    }
+
+    fn usernames(users: &[PublicUser]) -> Vec<String> {
+        users.iter().map(|u| u.username.clone()).collect()
+    }
+
+    #[tokio::test]
+    async fn list_skips_malformed_row_instead_of_500() {
+        let (db, path) = test_db(vec![]).await;
+        let keep_a = seed(&db, "list-skip-anna").await;
+        let broken = seed(&db, "list-skip-boris").await;
+        let keep_c = seed(&db, "list-skip-cleo").await;
+        corrupt_disabled_flag(&db, &broken).await;
+
+        let (users, next, skipped) = db
+            .list_users_page(&plain_filter(), 100, None)
+            .await
+            .expect("listing survives one malformed row");
+        assert_eq!(skipped, 1, "the corrupt row is reported, not fatal");
+        let ids: Vec<String> = users.iter().map(|u| u.id.clone()).collect();
+        assert!(ids.contains(&keep_a) && ids.contains(&keep_c));
+        assert!(!ids.contains(&broken));
+        // Two good rows under the limit: no next page.
+        assert!(next.is_none());
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn search_skips_malformed_row() {
+        let (db, path) = test_db(vec![]).await;
+        seed(&db, "search-skip-anna").await;
+        let broken = seed(&db, "search-skip-boris").await;
+        corrupt_disabled_flag(&db, &broken).await;
+
+        let (users, skipped) = db.search_users("search-skip", 30).await.expect("search works");
+        assert_eq!(skipped, 1);
+        assert_eq!(usernames(&users), vec!["search-skip-anna".to_owned()]);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    /// alice: admin + vip badge, created 1000. bob: disabled, 2000.
+    /// carol: banned, 3000. dave: plain, 4000. Returns alice's id.
+    async fn seed_filtered(db: &AccountDatabase) -> String {
+        let alice = seed(db, "filter-alice").await;
+        let bob = seed(db, "filter-boris").await;
+        let carol = seed(db, "filter-cleo").await;
+        let dave = seed(db, "filter-dario").await;
+        db.set_user_badges(&alice, &["vip".to_owned()])
+            .await
+            .expect("grant badge");
+        db.set_user_disabled(&bob, true).await.expect("disable");
+        db.set_user_banned(&carol, true).await.expect("ban");
+        set_created_at(db, &alice, 1000).await;
+        set_created_at(db, &bob, 2000).await;
+        set_created_at(db, &carol, 3000).await;
+        set_created_at(db, &dave, 4000).await;
+        alice
+    }
+
+    fn filtered(status: UserListStatus) -> UserListFilter {
+        UserListFilter {
+            status,
+            ..UserListFilter::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn list_status_filters() {
+        let (db, path) = test_db(vec![]).await;
+        seed_filtered(&db).await;
+
+        let (users, _, _) = db
+            .list_users_page(&filtered(UserListStatus::Disabled), 100, None)
+            .await
+            .expect("disabled filter");
+        assert_eq!(usernames(&users), vec!["filter-boris".to_owned()]);
+
+        let (users, _, _) = db
+            .list_users_page(&filtered(UserListStatus::Banned), 100, None)
+            .await
+            .expect("banned filter");
+        assert_eq!(usernames(&users), vec!["filter-cleo".to_owned()]);
+
+        let (users, _, _) = db
+            .list_users_page(&filtered(UserListStatus::Active), 100, None)
+            .await
+            .expect("active filter");
+        // Default sort is newest-first.
+        assert_eq!(usernames(&users), vec!["filter-dario".to_owned(), "filter-alice".to_owned()]);
+
+        // `admin` with nobody configured matches nothing, without error.
+        let (users, next, _) = db
+            .list_users_page(&filtered(UserListStatus::Admin), 100, None)
+            .await
+            .expect("admin filter, empty admin list");
+        assert!(users.is_empty() && next.is_none());
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn list_admin_status_uses_configured_ids() {
+        let (mut db, path) = test_db(vec![]).await;
+        let alice_id = seed_filtered(&db).await;
+        db.admin_ids.push(alice_id);
+
+        let (users, _, _) = db
+            .list_users_page(&filtered(UserListStatus::Admin), 100, None)
+            .await
+            .expect("admin filter");
+        assert_eq!(usernames(&users), vec!["filter-alice".to_owned()]);
+
+        // The computed `admin` badge name resolves through the same list.
+        let badge = UserListFilter {
+            badge: "admin".to_owned(),
+            ..UserListFilter::default()
+        };
+        let (users, _, _) = db.list_users_page(&badge, 100, None).await.expect("badge admin");
+        assert_eq!(usernames(&users), vec!["filter-alice".to_owned()]);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn list_query_badge_and_date_filters() {
+        let (db, path) = test_db(vec![]).await;
+        seed_filtered(&db).await;
+
+        let q = UserListFilter {
+            query: "cleo".to_owned(),
+            ..UserListFilter::default()
+        };
+        let (users, _, _) = db.list_users_page(&q, 100, None).await.expect("q filter");
+        assert_eq!(usernames(&users), vec!["filter-cleo".to_owned()]);
+
+        // Username OR id substring, case-insensitive.
+        let q = UserListFilter {
+            query: "FILTER-".to_owned(),
+            ..UserListFilter::default()
+        };
+        let (users, _, _) = db.list_users_page(&q, 100, None).await.expect("q case");
+        assert_eq!(users.len(), 4);
+
+        let badge = UserListFilter {
+            badge: "vip".to_owned(),
+            ..UserListFilter::default()
+        };
+        let (users, _, _) = db.list_users_page(&badge, 100, None).await.expect("badge");
+        assert_eq!(usernames(&users), vec!["filter-alice".to_owned()]);
+
+        // Computed `early` badge: every seeded account ranks in the top 200.
+        let early = UserListFilter {
+            badge: "early".to_owned(),
+            ..UserListFilter::default()
+        };
+        let (users, _, _) = db.list_users_page(&early, 100, None).await.expect("early");
+        assert_eq!(users.len(), 4);
+
+        let from = UserListFilter {
+            created_after: Some(2500),
+            ..UserListFilter::default()
+        };
+        let (users, _, _) = db.list_users_page(&from, 100, None).await.expect("from");
+        assert_eq!(usernames(&users), vec!["filter-dario".to_owned(), "filter-cleo".to_owned()]);
+
+        let range = UserListFilter {
+            created_after: Some(2000),
+            created_before: Some(3000),
+            ..UserListFilter::default()
+        };
+        let (users, _, _) = db.list_users_page(&range, 100, None).await.expect("range");
+        assert_eq!(usernames(&users), vec!["filter-cleo".to_owned(), "filter-boris".to_owned()]);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn list_pagination_chains_to_exhaustion_in_every_sort() {
+        let (db, path) = test_db(vec![]).await;
+        for (i, name) in ["page-anna", "page-boris", "page-cleo", "page-dario", "page-elio"]
+            .iter()
+            .enumerate()
+        {
+            let id = seed(&db, name).await;
+            set_created_at(&db, &id, 1000 * (i as i64 + 1)).await;
+        }
+
+        for sort in [UserListSort::Newest, UserListSort::Oldest, UserListSort::Username] {
+            let filter = UserListFilter {
+                sort,
+                ..UserListFilter::default()
+            };
+            let mut seen: Vec<String> = Vec::new();
+            let mut cursor: Option<String> = None;
+            let mut pages = 0;
+            loop {
+                let (users, next, skipped) = db
+                    .list_users_page(&filter, 2, cursor.as_deref())
+                    .await
+                    .expect("page fetches");
+                assert_eq!(skipped, 0);
+                pages += 1;
+                assert!(pages < 10, "pagination must terminate");
+                seen.extend(users.iter().map(|u| u.username.clone()));
+                cursor = next;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            let mut sorted = seen.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(seen.len(), 5, "every account exactly once ({sort:?})");
+            assert_eq!(sorted.len(), 5, "no duplicates ({sort:?})");
+            // Order matches the requested sort.
+            match sort {
+                UserListSort::Newest => assert_eq!(
+                    seen,
+                    vec!["page-elio".to_owned(), "page-dario".to_owned(), "page-cleo".to_owned(), "page-boris".to_owned(), "page-anna".to_owned()]
+                ),
+                UserListSort::Oldest => assert_eq!(
+                    seen,
+                    vec!["page-anna".to_owned(), "page-boris".to_owned(), "page-cleo".to_owned(), "page-dario".to_owned(), "page-elio".to_owned()]
+                ),
+                UserListSort::Username => assert_eq!(
+                    seen,
+                    vec!["page-anna".to_owned(), "page-boris".to_owned(), "page-cleo".to_owned(), "page-dario".to_owned(), "page-elio".to_owned()]
+                ),
+            }
+        }
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn list_accepts_legacy_cursor_and_rejects_garbage() {
+        let (db, path) = test_db(vec![]).await;
+        // Distinct timestamps: no id-tiebreak involved, deterministic order.
+        for (i, name) in ["cursor-anna", "cursor-boris", "cursor-cleo"]
+            .iter()
+            .enumerate()
+        {
+            let id = seed(&db, name).await;
+            set_created_at(&db, &id, 1000 * (i as i64 + 1)).await;
+        }
+        let oldest = UserListFilter {
+            sort: UserListSort::Oldest,
+            ..UserListFilter::default()
+        };
+        let (page1, next1, _) = db.list_users_page(&oldest, 2, None).await.expect("p1");
+        assert_eq!(page1.len(), 2);
+        let cursor = next1.expect("has next");
+        assert!(cursor.starts_with("t:"), "tagged cursor, got {cursor}");
+        // Legacy untagged shape still parses.
+        let legacy = cursor.strip_prefix("t:").expect("tag").to_owned();
+        let (page2a, _, _) = db
+            .list_users_page(&oldest, 2, Some(&cursor))
+            .await
+            .expect("tagged cursor");
+        let (page2b, _, _) = db
+            .list_users_page(&oldest, 2, Some(&legacy))
+            .await
+            .expect("legacy cursor");
+        assert_eq!(usernames(&page2a), usernames(&page2b));
+
+        // A time cursor is a plain position: it stays valid when flipping
+        // between the two time orders. A username cursor never is.
+        let newest = UserListFilter {
+            sort: UserListSort::Newest,
+            ..UserListFilter::default()
+        };
+        let (flip_page, _, _) = db
+            .list_users_page(&newest, 2, Some(&cursor))
+            .await
+            .expect("time cursor works in both directions");
+        assert_eq!(usernames(&flip_page), vec!["cursor-anna".to_owned()]);
+
+        let username_sort = UserListFilter {
+            sort: UserListSort::Username,
+            ..UserListFilter::default()
+        };
+        let (_, name_cursor, _) = db
+            .list_users_page(&username_sort, 2, None)
+            .await
+            .expect("username first page");
+        let name_cursor = name_cursor.expect("username has next");
+        assert!(name_cursor.starts_with("u:"), "tagged cursor, got {name_cursor}");
+        assert!(db
+            .list_users_page(&oldest, 2, Some(&name_cursor))
+            .await
+            .is_err());
+        assert!(db.list_users_page(&oldest, 2, Some("nonsense")).await.is_err());
+        assert!(db.list_users_page(&oldest, 2, Some("t:abc:123")).await.is_err());
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn filter_params_reject_garbage() {
+        assert!(UserListFilter::from_params(None, None, None, None, None, None).is_ok());
+        assert!(UserListFilter::from_params(None, Some("nope"), None, None, None, None).is_err());
+        assert!(UserListFilter::from_params(None, None, None, None, None, Some("nope")).is_err());
+        assert!(UserListFilter::from_params(None, None, None, Some("abc"), None, None).is_err());
+        assert!(UserListFilter::from_params(None, None, None, Some("-5"), None, None).is_err());
+        assert!(
+            UserListFilter::from_params(None, None, None, Some("3000"), Some("1000"), None).is_err()
+        );
+        let ok =
+            UserListFilter::from_params(Some(" BoB "), Some("DISABLED"), Some("VIP"), Some("1000"), Some("2000"), Some("username"))
+                .expect("valid params");
+        assert_eq!(ok.query, "BoB");
+        assert_eq!(ok.status, UserListStatus::Disabled);
+        assert_eq!(ok.badge, "vip");
+        assert_eq!(ok.created_after, Some(1000));
+        assert_eq!(ok.created_before, Some(2000));
+        assert_eq!(ok.sort, UserListSort::Username);
+    }
 }

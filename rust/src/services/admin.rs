@@ -4,7 +4,7 @@ use serde_json::json;
 
 use crate::{
     core::{
-        database::{AuthenticatedUser, PublicUser},
+        database::{AuthenticatedUser, PublicUser, UserListFilter},
         models::now_ms,
         presence::SharedState,
         result::{ApiError, ApiResult},
@@ -145,23 +145,27 @@ pub async fn search_users(
         return Ok(json!({ "ok": true, "users": [] }));
     }
     let users = state.accounts.search_users(&needle, 30).await?;
-    Ok(json!({ "ok": true, "users": users }))
+    Ok(json!({ "ok": true, "users": users.0, "skipped": users.1 }))
 }
 
 /// Paginated full-table browse for the admin user center
-/// (`GET /api/admin/users?limit=&cursor=`). Same PublicUser shape as search,
-/// keyset-paginated, admin only.
+/// (`GET /api/admin/users?limit=&cursor=&q=&status=&badge=&from=&to=&sort=`).
+/// Same PublicUser shape as search, keyset-paginated, admin only.
 pub async fn list_users(
     state: &SharedState,
     admin: &AuthenticatedUser,
     limit: usize,
     cursor: Option<&str>,
+    filter: &UserListFilter,
 ) -> ApiResult<serde_json::Value> {
     if !admin.admin {
         return Err(ApiError::forbidden("Admin only."));
     }
-    let (users, next_cursor) = state.accounts.list_users_page(limit, cursor).await?;
-    Ok(json!({ "ok": true, "users": users, "nextCursor": next_cursor }))
+    let (users, next_cursor, skipped) = state
+        .accounts
+        .list_users_page(filter, limit, cursor)
+        .await?;
+    Ok(json!({ "ok": true, "users": users, "nextCursor": next_cursor, "skipped": skipped }))
 }
 
 pub async fn set_feature(
