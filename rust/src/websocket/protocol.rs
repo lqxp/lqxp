@@ -4385,9 +4385,9 @@ const MAX_CLOUD_SYNC_BYTES: usize = 64 * 1024;
 /// Burst budget for a full-mesh sync. N devices need N(N-1)/2 pairwise
 /// handshakes plus chunked snapshot floods on join; the previous 30/10s budget
 /// choked meshes of 3-4+ devices mid-handshake and the mesh never converged.
-/// 120/10s absorbs join bursts while the global WS guard (1200/60s) still caps
-/// sustained abuse.
-const CLOUD_SYNC_RATE_LIMIT: u32 = 120;
+/// 240/10s absorbs join bursts (larger meshes + big-history snapshot floods)
+/// while the global WS guard (1200/60s) still caps sustained abuse.
+const CLOUD_SYNC_RATE_LIMIT: u32 = 240;
 const CLOUD_SYNC_RATE_WINDOW_MS: u64 = 10_000;
 /// Presence directory polling budget. Cheap read-only op; the cap only stops
 /// tight retry loops.
@@ -5782,10 +5782,10 @@ mod sync_relay_tests {
     }
 
     #[tokio::test]
-    async fn rate_limit_holds_at_120_per_10s() {
+    async fn rate_limit_holds_at_240_per_10s() {
         let (state, alice, _) = sync_mesh().await;
         let mut rx_a = insert_session(&state, "s-a", &alice, "alice_sync", "clientA").await;
-        for _ in 0..120 {
+        for _ in 0..240 {
             let tx = sender_tx(&state, "s-a").await;
             process_message(
                 state.clone(),
