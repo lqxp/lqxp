@@ -5341,6 +5341,68 @@ async fn parse_user_profile(
     } else {
         current.custom_status.clone()
     };
+    // Discord-style rich activity. `null` clears it; an object must carry a
+    // whitelisted kind, short display strings and a sane timestamp.
+    let activity = if obj.contains_key("activity") {
+        match obj.get("activity") {
+            None | Some(Value::Null) => None,
+            Some(Value::Object(map)) => {
+                let kind = map.get("kind").and_then(Value::as_str).unwrap_or("").trim();
+                if !matches!(kind, "game" | "app" | "media" | "call") {
+                    return Err("Invalid activity kind");
+                }
+                let name = sanitize_profile_text(map.get("name").and_then(Value::as_str).unwrap_or(""), 64);
+                if name.is_empty() {
+                    return Err("Activity name required");
+                }
+                let details = sanitize_profile_text(map.get("details").and_then(Value::as_str).unwrap_or(""), 64);
+                let state = sanitize_profile_text(map.get("state").and_then(Value::as_str).unwrap_or(""), 64);
+                // Accept both casings: we serialize `started_at` (snake).
+                let started_at = map.get("startedAt").or(map.get("started_at")).and_then(Value::as_u64).unwrap_or(0);
+                let app_id = map
+                    .get("appId")
+                    .or(map.get("app_id"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                    .unwrap_or("")
+                    .to_owned();
+                // Artwork references: full https URLs or bare keys
+                // (CDN hashes, `mp:…`, `spotify:…`). Invalid entries are
+                // dropped, never a whole-profile error.
+                let asset_ref = |v: Option<&Value>| {
+                    v.and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| {
+                            !s.is_empty()
+                                && s.len() <= 512
+                                && (s.starts_with("https://")
+                                    || s.chars().all(|c| {
+                                        c.is_ascii_alphanumeric() || ":_-. /".contains(c)
+                                    }))
+                        })
+                        .unwrap_or("")
+                        .to_owned()
+                };
+                let assets = match map.get("assets") {
+                    Some(Value::Object(_)) => {
+                        let large = asset_ref(map["assets"].get("large"));
+                        let small = asset_ref(map["assets"].get("small"));
+                        if large.is_empty() && small.is_empty() {
+                            None
+                        } else {
+                            Some(crate::core::models::ProfileActivityAssets { large, small })
+                        }
+                    }
+                    _ => None,
+                };
+                Some(crate::core::models::ProfileActivity { kind: kind.to_owned(), name, details, state, started_at, app_id, assets })
+            }
+            _ => return Err("Activity must be an object or null"),
+        }
+    } else {
+        current.activity.clone()
+    };
 
     Ok(UserProfile {
         avatar,
@@ -5349,6 +5411,7 @@ async fn parse_user_profile(
         pronouns,
         links,
         custom_status,
+        activity,
     })
 }
 
@@ -5807,6 +5870,66 @@ mod sync_relay_tests {
         let err: Value = recv_json(&mut rx_a).await;
         assert_eq!(err["op"], 60);
         assert_eq!(err["d"]["error"], "Rate limit exceeded");
+    }
+
+    #[tokio::test]
+    async fn profile_activity_accepted_sanitized_and_cleared() {
+        let state = test_state().await;
+        let current = UserProfile::default();
+        // Valid activity stored, long strings truncated to 64 chars.
+        let parsed = parse_user_profile(
+            &state,
+            &current,
+            Some(&json!({ "activity": {
+                "kind": "game", "name": "Baldur's Gate 3",
+                "details": "x".repeat(200), "state": "Acte II",
+                "startedAt": 1735689600000u64,
+            } })),
+        )
+        .await
+        .expect("valid activity");
+        let act = parsed.activity.clone().expect("activity stored");
+        assert_eq!(act.kind, "game");
+        assert_eq!(act.name, "Baldur's Gate 3");
+        assert_eq!(act.details.chars().count(), 64);
+        assert_eq!(act.started_at, 1735689600000);
+        // Unknown kind, missing name and wrong shape rejected.
+        for bad in [
+            json!({ "activity": { "kind": "hacking", "name": "x" } }),
+            json!({ "activity": { "kind": "game", "name": "   " } }),
+            json!({ "activity": 42 }),
+        ] {
+            assert!(parse_user_profile(&state, &current, Some(&bad)).await.is_err());
+        }
+        // Artwork references + app id round-trip; garbage dropped, never fatal.
+        let art = parse_user_profile(
+            &state,
+            &current,
+            Some(&json!({ "activity": {
+                "kind": "game", "name": "G",
+                "appId": "1263505205522337886",
+                "assets": {
+                    "large": "https://raw.githubusercontent.com/x/y.png",
+                    "small": "not a url at all ???",
+                }
+            } })),
+        )
+        .await
+        .expect("art");
+        let art = art.activity.expect("art stored");
+        assert_eq!(art.app_id, "1263505205522337886");
+        let assets = art.assets.expect("assets stored");
+        assert!(assets.large.starts_with("https://"));
+        assert!(assets.small.is_empty());
+        // Null clears, absent preserves.
+        let cleared = parse_user_profile(&state, &parsed, Some(&json!({ "activity": null })))
+            .await
+            .expect("clear");
+        assert!(cleared.activity.is_none());
+        let kept = parse_user_profile(&state, &parsed, Some(&json!({ "customStatus": "hi" })))
+            .await
+            .expect("keep");
+        assert!(kept.activity.is_some());
     }
 
     #[tokio::test]

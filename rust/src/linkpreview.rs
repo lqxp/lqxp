@@ -118,7 +118,7 @@ fn is_public_ipv6(ip: &Ipv6Addr) -> bool {
     true
 }
 
-fn validate_and_pin_url(raw: &str) -> Option<(Url, SocketAddr)> {
+pub(crate) fn validate_and_pin_url(raw: &str) -> Option<(Url, SocketAddr)> {
     let parsed = Url::parse(raw).ok()?;
     match parsed.scheme() {
         "http" | "https" => (),

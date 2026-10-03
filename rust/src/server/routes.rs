@@ -78,6 +78,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/phantom/deposit", post(phantom_deposit_handler))
         .route("/api/phantom/poll", post(phantom_poll_handler))
         .route("/api/phantom/prekey/:username", get(phantom_prekey_handler))
+        .route("/api/activity/detectable", get(activity_detectable_handler))
+        .route("/api/activity/assets", get(activity_asset_handler))
         .route(
             "/api/social/blob",
             get(social_blob_get_handler).put(social_blob_put_handler),
@@ -1173,6 +1175,65 @@ async fn phantom_prekey_handler(
         Some(bundle) => Ok(Json(bundle)),
         None => Err(ApiError::new(StatusCode::NOT_FOUND, "Prekey not found.")),
     }
+}
+
+/// Process-detectable game list for desktop clients (`core::activity` fetches
+/// + compacts the upstream arrpc list; this only serves the cache).
+/// Public data, no auth — but the payload is megabytes, so a global budget
+/// stops tight retry loops. Clients cache it for days.
+async fn activity_detectable_handler(
+    State(state): State<SharedState>,
+) -> ApiResult<impl IntoResponse> {
+    if crate::core::security::rate_limit_hit(&state, "activity:detectable:global".to_string(), 30, 60_000).await
+    {
+        return Err(ApiError::too_many_requests(
+            "Detectable list rate limit exceeded. Please wait a minute.",
+        ));
+    }
+    let payload = crate::core::activity::detectable_payload().await;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json",
+        )],
+        payload,
+    ))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ActivityAssetQuery {
+    #[serde(default)]
+    u: String,
+}
+
+/// Rich-activity artwork proxy: clients resolve asset references to full
+/// `https://` URLs and load them here instead of hotlinking Discord or third
+/// party CDNs (no client IP leak, no CSP exception). Authenticated, budgeted
+/// per session, same SSRF discipline as link previews.
+async fn activity_asset_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<ActivityAssetQuery>,
+) -> ApiResult<impl IntoResponse> {
+    let user = authenticated_user(&state, &headers).await?;
+    let rate_key = format!("activity:assets:user:{}", user.id);
+    if crate::core::security::rate_limit_hit(&state, rate_key, 60, 60_000).await {
+        return Err(ApiError::too_many_requests(
+            "Artwork rate limit exceeded. Please wait a minute.",
+        ));
+    }
+    let asset = crate::core::activity::fetch_activity_asset(query.u.trim()).await
+        .ok_or_else(|| ApiError::bad_request("Artwork unavailable."))?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, asset.content_type),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=86400".to_string(),
+            ),
+        ],
+        asset.bytes,
+    ))
 }
 
 async fn rtc_credentials_handler(

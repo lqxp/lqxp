@@ -192,6 +192,51 @@ pub struct UserProfile {
     pub links: Vec<ProfileLink>,
     #[serde(default, skip_serializing_if = "String::is_empty", rename = "customStatus")]
     pub custom_status: String,
+    // Discord-style rich activity ("playing X since …"), broadcast like the
+    // status. Cleared by sending `activity: null`. Old profiles simply lack it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<ProfileActivity>,
+}
+
+/// Discord-style rich activity attached to a profile.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProfileActivity {
+    /// One of `game`, `app`, `media`, `call`.
+    #[serde(default)]
+    pub kind: String,
+    /// Display name ("Baldur's Gate 3", "En appel", …).
+    #[serde(default)]
+    pub name: String,
+    /// Optional second line.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub details: String,
+    /// Optional third line.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
+    /// Epoch millis when the activity started (elapsed timer). 0 = hidden.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub started_at: u64,
+    /// Emitter's Discord application id (resolves bare artwork keys).
+    #[serde(default, skip_serializing_if = "String::is_empty", rename = "appId")]
+    pub app_id: String,
+    /// Artwork references (raw URLs, CDN keys, `mp:`/`spotify:` ids).
+    /// Clients resolve them to full `https://` and load them through the
+    /// `/api/activity/assets` proxy — never hotlinked directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assets: Option<ProfileActivityAssets>,
+}
+
+/// Artwork references of a rich activity.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProfileActivityAssets {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub large: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub small: String,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
