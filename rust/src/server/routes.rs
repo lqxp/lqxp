@@ -95,6 +95,7 @@ pub fn build_router(state: SharedState) -> Router {
     // `GET /api/download` aggregates tag, release, commits, checksums,
     // latest-release binaries and version history.
     let public = Router::new()
+        .route("/api/status", get(status_handler))
         .route(
             "/api/release",
             get(latest_release_handler).options(release_options_handler),
@@ -763,6 +764,53 @@ struct CachedRelease {
 
 static RELEASE_CACHE: tokio::sync::Mutex<Option<CachedRelease>> = tokio::sync::Mutex::const_new(None);
 static RELEASE_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+async fn status_handler(State(state): State<SharedState>) -> Response {
+    if crate::core::security::rate_limit_hit(&state, "status:global".to_string(), 60, 60_000).await
+    {
+        return ApiError::new(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded.")
+            .into_response();
+    }
+    let now = crate::core::models::now_ms();
+    let (sessions, users_online) = {
+        let players = state.players.read().await;
+        let mut distinct = std::collections::HashSet::new();
+        for player in players.values() {
+            distinct.insert(player.user_id.as_str());
+        }
+        (players.len(), distinct.len())
+    };
+    let (messages_relayed, sessions_opened, peak_sessions) = state.runtime.snapshot();
+    // Feature flags are public client config (the login screen needs to know
+    // whether registration is open). On DB error keep serving status with
+    // safe defaults instead of failing the health check.
+    let features = state
+        .accounts
+        .feature_flags()
+        .await
+        .unwrap_or_default();
+    Json(json!({
+        "ok": true,
+        "status": "online",
+        "version": env!("CARGO_PKG_VERSION"),
+        "latestVersion": state.config.network.latest_version,
+        "now": now,
+        "uptimeMs": now.saturating_sub(state.started_at_ms),
+        "sessions": sessions,
+        "usersOnline": users_online,
+        "runtime": {
+            "messagesRelayed": messages_relayed,
+            "sessionsOpened": sessions_opened,
+            "peakSessions": peak_sessions,
+            "sinceMs": state.started_at_ms
+        },
+        "features": {
+            "registerEnabled": features.register_enabled,
+            "callsEnabled": features.calls_enabled
+        }
+    }))
+    .into_response()
+}
 
 async fn latest_release_handler(State(state): State<SharedState>) -> Response {
     if crate::core::security::rate_limit_hit(&state, "release:global".to_string(), 30, 60_000).await {
