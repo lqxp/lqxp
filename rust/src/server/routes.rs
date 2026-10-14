@@ -96,6 +96,7 @@ pub fn build_router(state: SharedState) -> Router {
     // latest-release binaries and version history.
     let public = Router::new()
         .route("/api/status", get(status_handler))
+        .route("/api/status/", get(status_handler))
         .route(
             "/api/release",
             get(latest_release_handler).options(release_options_handler),
